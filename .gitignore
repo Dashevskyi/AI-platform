@@ -1,8 +1,28 @@
+# Environment
 .env
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+backend/venv/
+
+# Node
 node_modules/
 dist/
-backups/
-backend/uploads/
 .vite/
+
+# Uploads & backups
+backend/uploads/
+backups/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
