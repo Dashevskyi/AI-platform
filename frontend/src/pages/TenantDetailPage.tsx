@@ -40,7 +40,6 @@ import {
   IconAlertCircle,
   IconCopy,
   IconCheck,
-  IconRobot,
   IconEdit,
 } from '@tabler/icons-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -695,11 +694,6 @@ function ModelConfigTab({ tenantId }: { tenantId: string }) {
     value: m.id,
     label: `${m.name} (${m.model_id}) [приватная]`,
   }));
-
-  const allModelOptions = [
-    { group: 'Каталог', items: catalogOptions },
-    { group: 'Приватные модели', items: customOptions },
-  ];
 
   const markDirty = () => setDirty(true);
 
