@@ -9,7 +9,6 @@ import {
   Textarea,
   Button,
   ScrollArea,
-  NavLink,
   ActionIcon,
   Loader,
   Center,
@@ -23,7 +22,6 @@ import {
   IconSend,
   IconPlus,
   IconMessageCircle,
-  IconArrowLeft,
   IconInfoCircle,
   IconPencil,
   IconPaperclip,
@@ -59,6 +57,20 @@ const STATUS_MAP: Record<string, { color: string; label: string }> = {
   error: { color: 'red', label: 'Ошибка' },
 };
 
+function getFileTypeFromName(filename: string): string {
+  const ext = filename.toLowerCase().split('.').pop() || '';
+  const map: Record<string, string> = {
+    pdf: 'pdf', png: 'image', jpg: 'image', jpeg: 'image', gif: 'image',
+    webp: 'image', bmp: 'image', tiff: 'image',
+    mp3: 'audio', wav: 'audio', ogg: 'audio', flac: 'audio', m4a: 'audio',
+    aac: 'audio', webm: 'audio', wma: 'audio',
+    docx: 'docx', xlsx: 'xlsx', xls: 'xlsx',
+    csv: 'csv', json: 'json', html: 'html', htm: 'html',
+    xml: 'xml', txt: 'text', md: 'text', log: 'text',
+  };
+  return map[ext] || 'text';
+}
+
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} Б`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} КБ`;
@@ -83,7 +95,7 @@ export function ChatPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Load chat list
-  const { data: chatsData, isLoading: chatsLoading } = useQuery({
+  const { data: chatsData } = useQuery({
     queryKey: ['tenants', tenantId, 'chats', 'list'],
     queryFn: () => chatsApi.list(tenantId, 1, 100),
   });
@@ -289,77 +301,6 @@ export function ChatPage() {
 
   return (
     <Box style={{ display: 'flex', height: 'calc(100vh - 120px)', gap: 0 }}>
-      {/* Left sidebar - Chat list */}
-      <Box
-        style={{
-          width: 280,
-          borderRight: '1px solid var(--mantine-color-default-border)',
-          display: 'flex',
-          flexDirection: 'column',
-        }}
-      >
-        <Group p="sm" justify="space-between">
-          <Group gap="xs">
-            <ActionIcon variant="subtle" onClick={() => navigate(`/tenants/${tenantId}`)}>
-              <IconArrowLeft size={18} />
-            </ActionIcon>
-            <Text fw={500} size="sm">
-              Чаты
-            </Text>
-          </Group>
-          <Tooltip label="Новый чат">
-            <ActionIcon
-              variant="light"
-              onClick={() => createChatMutation.mutate()}
-              loading={createChatMutation.isPending}
-            >
-              <IconPlus size={16} />
-            </ActionIcon>
-          </Tooltip>
-        </Group>
-        <Divider />
-        <ScrollArea style={{ flex: 1 }} p="xs">
-          {chatsLoading ? (
-            <Center py="md">
-              <Loader size="sm" />
-            </Center>
-          ) : !chatsData?.items.length ? (
-            <Text c="dimmed" size="sm" ta="center" py="md">
-              Чатов пока нет
-            </Text>
-          ) : (
-            chatsData.items.map((chat) => (
-              <NavLink
-                key={chat.id}
-                label={chat.title || chat.description || 'Новый чат'}
-                description={chat.description && chat.title ? chat.description : undefined}
-                leftSection={<IconMessageCircle size={16} />}
-                rightSection={
-                  <Tooltip label="Переименовать">
-                    <ActionIcon
-                      variant="subtle"
-                      size="xs"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        e.preventDefault();
-                        setEditChatId(chat.id);
-                        setEditChatTitle(chat.title || chat.description || '');
-                      }}
-                    >
-                      <IconPencil size={14} />
-                    </ActionIcon>
-                  </Tooltip>
-                }
-                active={chat.id === activeChatId}
-                onClick={() => navigate(`/tenants/${tenantId}/chat/${chat.id}`)}
-                variant="filled"
-                mb={2}
-              />
-            ))
-          )}
-        </ScrollArea>
-      </Box>
-
       {/* Main chat area */}
       <Box
         style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, position: 'relative' }}
@@ -424,6 +365,21 @@ export function ChatPage() {
                     chatsData?.items.find((c) => c.id === activeChatId)?.description ||
                     'Новый чат'}
                 </Text>
+                <Tooltip label="Переименовать чат">
+                  <ActionIcon
+                    variant="subtle"
+                    size="xs"
+                    onClick={() => {
+                      const chat = chatsData?.items.find((c) => c.id === activeChatId);
+                      if (chat) {
+                        setEditChatId(chat.id);
+                        setEditChatTitle(chat.title || chat.description || '');
+                      }
+                    }}
+                  >
+                    <IconPencil size={14} />
+                  </ActionIcon>
+                </Tooltip>
                 {attachments && attachments.length > 0 && (
                   <Tooltip label={`${attachments.length} файл(ов) приложено`}>
                     <Badge variant="light" size="sm" leftSection={<IconPaperclip size={10} />}>
@@ -474,11 +430,10 @@ export function ChatPage() {
                       >
                         <Group gap="xs">
                           <Loader size="xs" />
-                          <Text size="sm" c="dimmed">
-                            {attachedFiles.length > 0 || sendMutation.variables?.files?.length
-                              ? 'Обрабатываю файлы и думаю...'
-                              : 'Думаю...'}
-                          </Text>
+                          <ThinkingTimer hasFiles={
+                            (attachedFiles.length > 0) ||
+                            (sendMutation.variables?.files?.length ? sendMutation.variables.files.length > 0 : false)
+                          } />
                         </Group>
                       </Paper>
                     </Box>
@@ -496,10 +451,14 @@ export function ChatPage() {
                 style={{ borderTop: '1px solid var(--mantine-color-default-border)' }}
               >
                 <Group gap="xs" wrap="wrap">
-                  {attachedFiles.map((file, idx) => (
+                  {attachedFiles.map((file, idx) => {
+                    const ft = getFileTypeFromName(file.name);
+                    return (
                     <Paper key={idx} withBorder p="4px 8px" radius="sm">
                       <Group gap={4}>
-                        <IconFile size={14} />
+                        <Badge size="xs" color={FILE_TYPE_COLORS[ft] || 'gray'} variant="light">
+                          {ft}
+                        </Badge>
                         <Text size="xs" maw={150} truncate="end">
                           {file.name}
                         </Text>
@@ -516,7 +475,8 @@ export function ChatPage() {
                         </ActionIcon>
                       </Group>
                     </Paper>
-                  ))}
+                    );
+                  })}
                 </Group>
               </Box>
             )}
@@ -699,6 +659,25 @@ export function ChatPage() {
         </Box>
       )}
     </Box>
+  );
+}
+
+function ThinkingTimer({ hasFiles }: { hasFiles: boolean }) {
+  const [seconds, setSeconds] = useState(0);
+
+  useEffect(() => {
+    const interval = setInterval(() => setSeconds((s) => s + 1), 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  const time = mins > 0 ? `${mins}:${secs.toString().padStart(2, '0')}` : `${secs}с`;
+
+  return (
+    <Text size="sm" c="dimmed">
+      {hasFiles ? 'Обрабатываю файлы и думаю' : 'Думаю'}... {time}
+    </Text>
   );
 }
 

@@ -25,10 +25,12 @@ import {
   IconMessage,
   IconPlus,
   IconRobot,
+  IconArrowLeft,
+  IconChevronRight,
 } from '@tabler/icons-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../hooks/useAuth';
-import { chatsApi } from '../api/endpoints';
+import { chatsApi, tenantsApi } from '../api/endpoints';
 
 export function AppShellLayout() {
   const [opened, setOpened] = useState(false);
@@ -57,6 +59,13 @@ export function AppShellLayout() {
 
   const queryClient = useQueryClient();
 
+  // Load tenant info when on tenant page
+  const { data: tenant } = useQuery({
+    queryKey: ['tenants', tenantId],
+    queryFn: () => tenantsApi.get(tenantId!),
+    enabled: !!tenantId,
+  });
+
   const { data: chatsData, isLoading: chatsLoading } = useQuery({
     queryKey: ['tenants', tenantId, 'chats', 'list'],
     queryFn: () => chatsApi.list(tenantId!, 1, 10),
@@ -83,7 +92,7 @@ export function AppShellLayout() {
     >
       <MantineAppShell.Header>
         <Group h="100%" px="md" justify="space-between">
-          <Group>
+          <Group gap="xs">
             <Burger
               opened={opened}
               onClick={() => setOpened((o) => !o)}
@@ -97,6 +106,28 @@ export function AppShellLayout() {
             >
               AI Platform
             </Title>
+            {tenant && tenantId && (
+              <>
+                <IconChevronRight size={16} color="var(--mantine-color-dimmed)" />
+                <ActionIcon
+                  variant="subtle"
+                  size="sm"
+                  onClick={() => navigate(`/tenants/${tenantId}`)}
+                  aria-label="К настройкам тенанта"
+                >
+                  <IconArrowLeft size={16} />
+                </ActionIcon>
+                <Text
+                  size="sm"
+                  fw={500}
+                  c="dimmed"
+                  style={{ cursor: 'pointer' }}
+                  onClick={() => navigate(`/tenants/${tenantId}`)}
+                >
+                  {tenant.name}
+                </Text>
+              </>
+            )}
           </Group>
           <Group>
             <ActionIcon
