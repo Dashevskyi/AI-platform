@@ -23,6 +23,7 @@ from app.core.security import decrypt_value, redact_for_log
 from app.services.tools.executor import execute_tool
 from app.services.kb.embedder import search_kb_chunks
 from app.services.llm.model_resolver import resolve_model
+from app.services.llm.context_compressor import compress_history, trim_tool_definitions
 
 logger = logging.getLogger(__name__)
 
@@ -178,14 +179,22 @@ async def chat_completion(
     messages: list[dict] = []
     if system_parts:
         messages.append({"role": "system", "content": "\n\n".join(system_parts)})
-    for m in recent_msgs:
-        messages.append({"role": m.role, "content": m.content})
+
+    # Compress history: summarize old messages, keep recent in full
+    history_dicts = [{"role": m.role, "content": m.content} for m in recent_msgs]
+    if len(history_dicts) > 6:
+        history_dicts = await compress_history(history_dicts, provider, model_name)
+        logger.info(f"[{correlation_id}] History compressed to {len(history_dicts)} messages")
+
+    for m in history_dicts:
+        messages.append(m)
     # Append current user message explicitly (excluded from DB query to avoid duplication)
     messages.append({"role": "user", "content": user_content})
 
-    # Merge tenant tools + attachment search tools
+    # Merge tenant tools + attachment search tools, trim descriptions
     tool_defs = [t.config_json for t in tools if t.config_json] if tools else []
     tool_defs = tool_defs + attachment_tool_defs
+    tool_defs = trim_tool_definitions(tool_defs) if tool_defs else None
     if not tool_defs:
         tool_defs = None
 
