@@ -1904,6 +1904,7 @@ function MemoryTab({ tenantId }: { tenantId: string }) {
   const [editId, setEditId] = useState<string | null>(null);
   const [memType, setMemType] = useState('');
   const [memContent, setMemContent] = useState('');
+  const [memChatId, setMemChatId] = useState<string | null>(null);
   const [memPriority, setMemPriority] = useState(0);
   const [memPinned, setMemPinned] = useState(false);
 
@@ -1912,10 +1913,29 @@ function MemoryTab({ tenantId }: { tenantId: string }) {
     queryFn: () => memoryApi.list(tenantId, page, 20, typeFilter || undefined),
   });
 
+  // Load chats for chat name display and selection
+  const { data: chatsData } = useQuery({
+    queryKey: ['tenants', tenantId, 'chats', 'admin', 1, 100],
+    queryFn: () => chatsApi.listAdmin(tenantId, 1, 100),
+  });
+
+  const chatMap = new Map(
+    (chatsData?.items || []).map((c) => [c.id, c.title || c.description || `Чат ${c.id.slice(0, 8)}`])
+  );
+
+  const chatSelectData = [
+    { value: '', label: 'Глобальная (все чаты)' },
+    ...(chatsData?.items || []).map((c) => ({
+      value: c.id,
+      label: c.title || c.description || `Чат ${c.id.slice(0, 8)}`,
+    })),
+  ];
+
   const openCreate = () => {
     setEditId(null);
     setMemType('');
     setMemContent('');
+    setMemChatId(null);
     setMemPriority(0);
     setMemPinned(false);
     setModalOpen(true);
@@ -1925,6 +1945,7 @@ function MemoryTab({ tenantId }: { tenantId: string }) {
     setEditId(entry.id);
     setMemType(entry.memory_type);
     setMemContent(entry.content);
+    setMemChatId(entry.chat_id);
     setMemPriority(entry.priority);
     setMemPinned(entry.is_pinned);
     setModalOpen(true);
@@ -1973,6 +1994,7 @@ function MemoryTab({ tenantId }: { tenantId: string }) {
       createMutation.mutate({
         memory_type: memType,
         content: memContent,
+        chat_id: memChatId || undefined,
         priority: memPriority,
         is_pinned: memPinned,
       });
@@ -2014,6 +2036,7 @@ function MemoryTab({ tenantId }: { tenantId: string }) {
             <Table.Thead>
               <Table.Tr>
                 <Table.Th>Тип</Table.Th>
+                <Table.Th>Область</Table.Th>
                 <Table.Th>Содержание</Table.Th>
                 <Table.Th>Приоритет</Table.Th>
                 <Table.Th>Действия</Table.Th>
@@ -2023,6 +2046,15 @@ function MemoryTab({ tenantId }: { tenantId: string }) {
               {data.items.map((entry) => (
                 <Table.Tr key={entry.id} style={{ cursor: 'pointer' }} onClick={() => openEdit(entry)}>
                   <Table.Td><Badge variant="light">{entry.memory_type}</Badge></Table.Td>
+                  <Table.Td>
+                    {entry.chat_id ? (
+                      <Badge variant="dot" size="sm" color="blue">
+                        {chatMap.get(entry.chat_id) || entry.chat_id.slice(0, 8)}
+                      </Badge>
+                    ) : (
+                      <Badge variant="dot" size="sm" color="orange">Глобальная</Badge>
+                    )}
+                  </Table.Td>
                   <Table.Td>
                     <Text size="sm" lineClamp={2}>{entry.content}</Text>
                   </Table.Td>
@@ -2056,7 +2088,7 @@ function MemoryTab({ tenantId }: { tenantId: string }) {
       <Modal opened={modalOpen} onClose={() => setModalOpen(false)} title={editId ? 'Редактировать запись памяти' : 'Создать запись памяти'}>
         <Text size="sm" c="dimmed" mb="md">
           Память позволяет LLM помнить факты о тенанте или чате.
-          Записи подмешиваются в системный промпт при каждом запросе.
+          Глобальная память попадает во все чаты, привязанная к чату — только в конкретный.
         </Text>
         <Stack gap="md">
           <Select
@@ -2068,6 +2100,24 @@ function MemoryTab({ tenantId }: { tenantId: string }) {
             required
             allowDeselect={false}
           />
+          {!editId && (
+            <Select
+              label="Область действия"
+              description="Глобальная — попадает во все чаты тенанта. Конкретный чат — только в выбранный."
+              data={chatSelectData}
+              value={memChatId || ''}
+              onChange={(val) => setMemChatId(val || null)}
+              searchable
+              clearable
+            />
+          )}
+          {editId && (
+            <TextInput
+              label="Область действия"
+              value={memChatId ? (chatMap.get(memChatId) || memChatId.slice(0, 8)) : 'Глобальная (все чаты)'}
+              disabled
+            />
+          )}
           <Textarea
             label="Содержание"
             description="Текст записи, например: 'Клиент предпочитает общение на русском языке'"
