@@ -19,6 +19,7 @@ import {
   ActionIcon,
   Tooltip,
   Pagination,
+  SimpleGrid,
 } from '@mantine/core';
 import {
   IconPlus,
@@ -186,103 +187,107 @@ export function ModelsPage() {
   const totalPages = data ? Math.ceil(data.total_count / 50) : 0;
 
   return (
-    <Stack gap="lg">
-      <Group justify="space-between">
-        <Title order={2}>Каталог моделей</Title>
-        <Button leftSection={<IconPlus size={16} />} onClick={openCreate}>
-          Добавить модель
-        </Button>
-      </Group>
+    <>
+      <Stack gap="lg">
+        <Group justify="space-between">
+          <Title order={2}>Каталог моделей</Title>
+          <Button leftSection={<IconPlus size={16} />} onClick={openCreate}>
+            Добавить модель
+          </Button>
+        </Group>
 
-      <Text size="sm" c="dimmed">
-        Глобальный каталог LLM-моделей. Модели из каталога доступны для выбора всем тенантам.
-        Каждая модель может иметь свой провайдер, ключ и настройки.
-      </Text>
+        <Text size="sm" c="dimmed">
+          Глобальный каталог LLM-моделей. Модели из каталога доступны для выбора всем тенантам.
+          Каждая модель может иметь свой провайдер, ключ и настройки.
+        </Text>
 
-      {isLoading ? (
-        <Center py="xl"><Loader /></Center>
-      ) : !data?.items.length ? (
-        <Card withBorder p="xl">
-          <Text ta="center" c="dimmed">Каталог пуст. Добавьте первую модель.</Text>
-        </Card>
-      ) : (
-        <>
-          <Table striped highlightOnHover>
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th>Название</Table.Th>
-                <Table.Th>Провайдер</Table.Th>
-                <Table.Th>Model ID</Table.Th>
-                <Table.Th>Уровень</Table.Th>
-                <Table.Th>Возможности</Table.Th>
-                <Table.Th>Статус</Table.Th>
-                <Table.Th>Действия</Table.Th>
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {data.items.map((m) => (
-                <Table.Tr key={m.id} style={{ cursor: 'pointer' }} onClick={() => openEdit(m)}>
-                  <Table.Td>
-                    <Text size="sm" fw={500}>{m.name}</Text>
-                    {m.base_url && (
-                      <Text size="xs" c="dimmed" truncate="end" maw={200}>{m.base_url}</Text>
-                    )}
-                  </Table.Td>
-                  <Table.Td>
-                    <Badge variant="light" size="sm">
-                      {PROVIDER_OPTIONS.find((o) => o.value === m.provider_type)?.label || m.provider_type}
-                    </Badge>
-                  </Table.Td>
-                  <Table.Td>
-                    <Text size="sm" ff="monospace">{m.model_id}</Text>
-                  </Table.Td>
-                  <Table.Td>
-                    <Badge color={TIER_COLORS[m.tier] || 'gray'} size="sm">{m.tier}</Badge>
-                  </Table.Td>
-                  <Table.Td>
-                    <Group gap={4}>
-                      {m.supports_tools && <Badge variant="dot" size="xs" color="blue">Tools</Badge>}
-                      {m.supports_vision && <Badge variant="dot" size="xs" color="grape">Vision</Badge>}
-                    </Group>
-                  </Table.Td>
-                  <Table.Td>
-                    <Badge color={m.is_active ? 'green' : 'gray'} size="sm">
-                      {m.is_active ? 'Активна' : 'Выкл'}
-                    </Badge>
-                  </Table.Td>
-                  <Table.Td>
-                    <Group gap={4}>
-                      <Tooltip label="Редактировать">
-                        <ActionIcon variant="subtle" color="blue" size="sm" onClick={(e) => { e.stopPropagation(); openEdit(m); }}>
-                          <IconEdit size={14} />
-                        </ActionIcon>
-                      </Tooltip>
-                      <Tooltip label="Удалить">
-                        <ActionIcon
-                          variant="subtle"
-                          color="red"
-                          size="sm"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            if (window.confirm(`Удалить модель "${m.name}"?`)) deleteMutation.mutate(m.id);
-                          }}
-                        >
-                          <IconTrash size={14} />
-                        </ActionIcon>
-                      </Tooltip>
-                    </Group>
-                  </Table.Td>
-                </Table.Tr>
-              ))}
-            </Table.Tbody>
-          </Table>
-          {totalPages > 1 && (
-            <Center><Pagination total={totalPages} value={page} onChange={setPage} /></Center>
-          )}
-        </>
-      )}
+        {isLoading ? (
+          <Center py="xl"><Loader /></Center>
+        ) : !data?.items.length ? (
+          <Card withBorder p="xl">
+            <Text ta="center" c="dimmed">Каталог пуст. Добавьте первую модель.</Text>
+          </Card>
+        ) : (
+          <>
+            <Card withBorder p={0}>
+              <Table striped highlightOnHover>
+                <Table.Thead>
+                  <Table.Tr>
+                    <Table.Th>Название</Table.Th>
+                    <Table.Th>Провайдер</Table.Th>
+                    <Table.Th>Model ID</Table.Th>
+                    <Table.Th>Уровень</Table.Th>
+                    <Table.Th>Возможности</Table.Th>
+                    <Table.Th>Статус</Table.Th>
+                    <Table.Th>Действия</Table.Th>
+                  </Table.Tr>
+                </Table.Thead>
+                <Table.Tbody>
+                  {data.items.map((m) => (
+                    <Table.Tr key={m.id} style={{ cursor: 'pointer' }} onClick={() => openEdit(m)}>
+                      <Table.Td>
+                        <Text size="sm" fw={500}>{m.name}</Text>
+                        {m.base_url && (
+                          <Text size="xs" c="dimmed" truncate="end" maw={200}>{m.base_url}</Text>
+                        )}
+                      </Table.Td>
+                      <Table.Td>
+                        <Badge variant="light" size="sm">
+                          {PROVIDER_OPTIONS.find((o) => o.value === m.provider_type)?.label || m.provider_type}
+                        </Badge>
+                      </Table.Td>
+                      <Table.Td>
+                        <Text size="sm" ff="monospace">{m.model_id}</Text>
+                      </Table.Td>
+                      <Table.Td>
+                        <Badge color={TIER_COLORS[m.tier] || 'gray'} size="sm">{m.tier}</Badge>
+                      </Table.Td>
+                      <Table.Td>
+                        <Group gap={4}>
+                          {m.supports_tools && <Badge variant="dot" size="xs" color="blue">Tools</Badge>}
+                          {m.supports_vision && <Badge variant="dot" size="xs" color="grape">Vision</Badge>}
+                        </Group>
+                      </Table.Td>
+                      <Table.Td>
+                        <Badge color={m.is_active ? 'green' : 'gray'} size="sm">
+                          {m.is_active ? 'Активна' : 'Выкл'}
+                        </Badge>
+                      </Table.Td>
+                      <Table.Td>
+                        <Group gap={4}>
+                          <Tooltip label="Редактировать">
+                            <ActionIcon variant="subtle" color="blue" size="sm" onClick={(e) => { e.stopPropagation(); openEdit(m); }}>
+                              <IconEdit size={14} />
+                            </ActionIcon>
+                          </Tooltip>
+                          <Tooltip label="Удалить">
+                            <ActionIcon
+                              variant="subtle"
+                              color="red"
+                              size="sm"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (window.confirm(`Удалить модель "${m.name}"?`)) deleteMutation.mutate(m.id);
+                              }}
+                            >
+                              <IconTrash size={14} />
+                            </ActionIcon>
+                          </Tooltip>
+                        </Group>
+                      </Table.Td>
+                    </Table.Tr>
+                  ))}
+                </Table.Tbody>
+              </Table>
+            </Card>
+            {totalPages > 1 && (
+              <Center><Pagination total={totalPages} value={page} onChange={setPage} /></Center>
+            )}
+          </>
+        )}
+      </Stack>
 
-      {/* Create/Edit Modal */}
+      {/* Create/Edit Modal — вынесена за пределы Stack */}
       <Modal
         opened={modalOpen}
         onClose={() => setModalOpen(false)}
@@ -299,9 +304,10 @@ export function ModelsPage() {
             required
           />
 
-          <Group grow>
+          <SimpleGrid cols={2}>
             <Select
               label="Провайдер"
+              description="Тип подключения к LLM"
               data={PROVIDER_OPTIONS}
               value={providerType}
               onChange={(v) => setProviderType(v || 'ollama')}
@@ -310,14 +316,14 @@ export function ModelsPage() {
             />
             <Select
               label="Уровень"
-              description="Определяет выбор модели в авто-режиме"
+              description="Для авто-режима"
               data={TIER_OPTIONS}
               value={tier}
               onChange={(v) => setTier(v || 'medium')}
               required
               allowDeselect={false}
             />
-          </Group>
+          </SimpleGrid>
 
           <TextInput
             label="Базовый URL"
@@ -357,16 +363,18 @@ export function ModelsPage() {
             />
           </Group>
 
-          <Group grow>
+          <SimpleGrid cols={3}>
             <NumberInput
-              label="Макс. контекст (токенов)"
+              label="Макс. контекст"
+              description="Токенов"
               placeholder="128000"
               value={maxContextTokens}
               onChange={(v) => setMaxContextTokens(v === '' ? '' : Number(v))}
               min={0}
             />
             <NumberInput
-              label="Стоимость ввода ($/1K токенов)"
+              label="Цена ввода"
+              description="$/1K токенов"
               placeholder="0.0025"
               value={costInput}
               onChange={(v) => setCostInput(v === '' ? '' : Number(v))}
@@ -375,7 +383,8 @@ export function ModelsPage() {
               step={0.0001}
             />
             <NumberInput
-              label="Стоимость вывода ($/1K токенов)"
+              label="Цена вывода"
+              description="$/1K токенов"
               placeholder="0.01"
               value={costOutput}
               onChange={(v) => setCostOutput(v === '' ? '' : Number(v))}
@@ -383,7 +392,7 @@ export function ModelsPage() {
               decimalScale={6}
               step={0.0001}
             />
-          </Group>
+          </SimpleGrid>
 
           <Switch
             label="Активна"
@@ -391,7 +400,7 @@ export function ModelsPage() {
             onChange={(e) => setIsActive(e.currentTarget.checked)}
           />
 
-          <Group justify="space-between">
+          <Group justify="space-between" mt="sm">
             <Button
               variant="outline"
               leftSection={<IconPlugConnected size={16} />}
@@ -412,6 +421,6 @@ export function ModelsPage() {
           </Group>
         </Stack>
       </Modal>
-    </Stack>
+    </>
   );
 }

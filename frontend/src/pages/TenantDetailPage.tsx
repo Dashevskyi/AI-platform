@@ -28,6 +28,7 @@ import {
   Drawer,
   CopyButton,
   ScrollArea,
+  SimpleGrid,
 } from '@mantine/core';
 import {
   IconDeviceFloppy,
@@ -702,215 +703,218 @@ function ModelConfigTab({ tenantId }: { tenantId: string }) {
   }
 
   return (
-    <Stack gap="lg">
-      <Card withBorder padding="lg" maw={800}>
-        <Stack gap="md">
-          <Title order={4}>Выбор модели</Title>
-          <Text size="sm" c="dimmed">
-            Выберите режим работы: конкретная модель или автоматический выбор на основе сложности запроса.
-          </Text>
+    <>
+      <Stack gap="lg">
+        <Card withBorder padding="lg" maw={800}>
+          <Stack gap="md">
+            <Title order={4}>Выбор модели</Title>
+            <Text size="sm" c="dimmed">
+              Выберите режим работы: конкретная модель или автоматический выбор на основе сложности запроса.
+            </Text>
 
-          {dirty && (
-            <Alert icon={<IconAlertCircle size={16} />} color="yellow" variant="light">
-              У вас есть несохранённые изменения.
-            </Alert>
-          )}
+            {dirty && (
+              <Alert icon={<IconAlertCircle size={16} />} color="yellow" variant="light">
+                У вас есть несохранённые изменения.
+              </Alert>
+            )}
 
-          <Select
-            label="Режим выбора модели"
-            data={[
-              { value: 'manual', label: 'Вручную — одна конкретная модель' },
-              { value: 'auto', label: 'Автоматически — по сложности запроса' },
-            ]}
-            value={mode}
-            onChange={(v) => { setMode(v || 'manual'); markDirty(); }}
-            allowDeselect={false}
-          />
+            <Select
+              label="Режим выбора модели"
+              data={[
+                { value: 'manual', label: 'Вручную — одна конкретная модель' },
+                { value: 'auto', label: 'Автоматически — по сложности запроса' },
+              ]}
+              value={mode}
+              onChange={(v) => { setMode(v || 'manual'); markDirty(); }}
+              allowDeselect={false}
+            />
 
-          {mode === 'manual' && (
-            <Stack gap="sm">
-              <Text size="sm" fw={500}>Выберите модель из каталога:</Text>
-              <Select
-                label="Модель из каталога"
-                placeholder="Выберите модель..."
-                data={catalogOptions}
-                value={manualModelId}
-                onChange={(v) => { setManualModelId(v); setManualCustomModelId(null); markDirty(); }}
-                clearable
-                searchable
-              />
-              <Text size="xs" c="dimmed" ta="center">— или приватная модель —</Text>
-              <Select
-                label="Приватная модель"
-                placeholder="Выберите модель..."
-                data={customOptions}
-                value={manualCustomModelId}
-                onChange={(v) => { setManualCustomModelId(v); setManualModelId(null); markDirty(); }}
-                clearable
-                searchable
-              />
-            </Stack>
-          )}
-
-          {mode === 'auto' && (
-            <Stack gap="md">
-              <Text size="sm" c="dimmed">
-                Система классифицирует сложность запроса (0-1).
-                Если ниже порога — используется лёгкая модель, иначе — мощная.
-              </Text>
-
-              <Card withBorder padding="sm">
-                <Text size="sm" fw={500} mb="xs" c="green">Лёгкая модель (простые запросы)</Text>
-                <Group grow>
-                  <Select
-                    label="Из каталога"
-                    placeholder="Выберите..."
-                    data={catalogOptions}
-                    value={autoLightModelId}
-                    onChange={(v) => { setAutoLightModelId(v); setAutoLightCustomId(null); markDirty(); }}
-                    clearable
-                    searchable
-                  />
-                  <Select
-                    label="Или приватная"
-                    placeholder="Выберите..."
-                    data={customOptions}
-                    value={autoLightCustomId}
-                    onChange={(v) => { setAutoLightCustomId(v); setAutoLightModelId(null); markDirty(); }}
-                    clearable
-                    searchable
-                  />
-                </Group>
-              </Card>
-
-              <Card withBorder padding="sm">
-                <Text size="sm" fw={500} mb="xs" c="violet">Мощная модель (сложные запросы)</Text>
-                <Group grow>
-                  <Select
-                    label="Из каталога"
-                    placeholder="Выберите..."
-                    data={catalogOptions}
-                    value={autoHeavyModelId}
-                    onChange={(v) => { setAutoHeavyModelId(v); setAutoHeavyCustomId(null); markDirty(); }}
-                    clearable
-                    searchable
-                  />
-                  <Select
-                    label="Или приватная"
-                    placeholder="Выберите..."
-                    data={customOptions}
-                    value={autoHeavyCustomId}
-                    onChange={(v) => { setAutoHeavyCustomId(v); setAutoHeavyModelId(null); markDirty(); }}
-                    clearable
-                    searchable
-                  />
-                </Group>
-              </Card>
-
-              <div>
-                <Text size="sm" fw={500} mb={2}>
-                  Порог сложности: {threshold.toFixed(2)}
-                </Text>
-                <Text size="xs" c="dimmed" mb="xs">
-                  Запросы с complexity &lt; {threshold.toFixed(2)} → лёгкая модель, остальные → мощная
-                </Text>
-                <Slider
-                  min={0}
-                  max={1}
-                  step={0.05}
-                  value={threshold}
-                  onChange={(v) => { setThreshold(v); markDirty(); }}
-                  marks={[
-                    { value: 0, label: '0' },
-                    { value: 0.25, label: '0.25' },
-                    { value: 0.5, label: '0.5' },
-                    { value: 0.75, label: '0.75' },
-                    { value: 1, label: '1' },
-                  ]}
+            {mode === 'manual' && (
+              <Stack gap="sm">
+                <Text size="sm" fw={500}>Выберите модель из каталога:</Text>
+                <Select
+                  label="Модель из каталога"
+                  placeholder="Выберите модель..."
+                  data={catalogOptions}
+                  value={manualModelId}
+                  onChange={(v) => { setManualModelId(v); setManualCustomModelId(null); markDirty(); }}
+                  clearable
+                  searchable
                 />
+                <Text size="xs" c="dimmed" ta="center">— или приватная модель —</Text>
+                <Select
+                  label="Приватная модель"
+                  placeholder="Выберите модель..."
+                  data={customOptions}
+                  value={manualCustomModelId}
+                  onChange={(v) => { setManualCustomModelId(v); setManualModelId(null); markDirty(); }}
+                  clearable
+                  searchable
+                />
+              </Stack>
+            )}
+
+            {mode === 'auto' && (
+              <Stack gap="md">
+                <Text size="sm" c="dimmed">
+                  Система классифицирует сложность запроса (0-1).
+                  Если ниже порога — используется лёгкая модель, иначе — мощная.
+                </Text>
+
+                <Card withBorder padding="sm">
+                  <Text size="sm" fw={500} mb="xs" c="green">Лёгкая модель (простые запросы)</Text>
+                  <Stack gap="xs">
+                    <Select
+                      label="Из каталога"
+                      placeholder="Выберите..."
+                      data={catalogOptions}
+                      value={autoLightModelId}
+                      onChange={(v) => { setAutoLightModelId(v); setAutoLightCustomId(null); markDirty(); }}
+                      clearable
+                      searchable
+                    />
+                    <Select
+                      label="Или приватная"
+                      placeholder="Выберите..."
+                      data={customOptions}
+                      value={autoLightCustomId}
+                      onChange={(v) => { setAutoLightCustomId(v); setAutoLightModelId(null); markDirty(); }}
+                      clearable
+                      searchable
+                    />
+                  </Stack>
+                </Card>
+
+                <Card withBorder padding="sm">
+                  <Text size="sm" fw={500} mb="xs" c="violet">Мощная модель (сложные запросы)</Text>
+                  <Stack gap="xs">
+                    <Select
+                      label="Из каталога"
+                      placeholder="Выберите..."
+                      data={catalogOptions}
+                      value={autoHeavyModelId}
+                      onChange={(v) => { setAutoHeavyModelId(v); setAutoHeavyCustomId(null); markDirty(); }}
+                      clearable
+                      searchable
+                    />
+                    <Select
+                      label="Или приватная"
+                      placeholder="Выберите..."
+                      data={customOptions}
+                      value={autoHeavyCustomId}
+                      onChange={(v) => { setAutoHeavyCustomId(v); setAutoHeavyModelId(null); markDirty(); }}
+                      clearable
+                      searchable
+                    />
+                  </Stack>
+                </Card>
+
+                <div>
+                  <Text size="sm" fw={500} mb={2}>
+                    Порог сложности: {threshold.toFixed(2)}
+                  </Text>
+                  <Text size="xs" c="dimmed" mb="xs">
+                    Запросы с complexity &lt; {threshold.toFixed(2)} → лёгкая модель, остальные → мощная
+                  </Text>
+                  <Slider
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={threshold}
+                    onChange={(v) => { setThreshold(v); markDirty(); }}
+                    marks={[
+                      { value: 0, label: '0' },
+                      { value: 0.25, label: '0.25' },
+                      { value: 0.5, label: '0.5' },
+                      { value: 0.75, label: '0.75' },
+                      { value: 1, label: '1' },
+                    ]}
+                    mb="xl"
+                  />
+                </div>
+              </Stack>
+            )}
+
+            <Group justify="flex-end">
+              <Button
+                leftSection={<IconDeviceFloppy size={16} />}
+                onClick={handleSave}
+                loading={saveMutation.isPending}
+                disabled={!dirty}
+              >
+                Сохранить
+              </Button>
+            </Group>
+          </Stack>
+        </Card>
+
+        {/* Custom models section */}
+        <Card withBorder padding="lg" maw={800}>
+          <Stack gap="md">
+            <Group justify="space-between">
+              <div>
+                <Title order={4}>Приватные модели тенанта</Title>
+                <Text size="sm" c="dimmed">
+                  Модели, добавленные этим тенантом. Видны только ему.
+                </Text>
               </div>
-            </Stack>
-          )}
+              <Button leftSection={<IconPlus size={16} />} size="sm" onClick={openCreateCustom}>
+                Добавить
+              </Button>
+            </Group>
 
-          <Group justify="flex-end">
-            <Button
-              leftSection={<IconDeviceFloppy size={16} />}
-              onClick={handleSave}
-              loading={saveMutation.isPending}
-              disabled={!dirty}
-            >
-              Сохранить
-            </Button>
-          </Group>
-        </Stack>
-      </Card>
-
-      {/* Custom models section */}
-      <Card withBorder padding="lg" maw={800}>
-        <Stack gap="md">
-          <Group justify="space-between">
-            <div>
-              <Title order={4}>Приватные модели тенанта</Title>
-              <Text size="sm" c="dimmed">
-                Модели, добавленные этим тенантом. Видны только ему.
-              </Text>
-            </div>
-            <Button leftSection={<IconPlus size={16} />} size="sm" onClick={openCreateCustom}>
-              Добавить
-            </Button>
-          </Group>
-
-          {!customModels.length ? (
-            <Text c="dimmed" ta="center" py="md">Приватных моделей нет.</Text>
-          ) : (
-            <Table striped>
-              <Table.Thead>
-                <Table.Tr>
-                  <Table.Th>Название</Table.Th>
-                  <Table.Th>Провайдер</Table.Th>
-                  <Table.Th>Model ID</Table.Th>
-                  <Table.Th>Уровень</Table.Th>
-                  <Table.Th>Статус</Table.Th>
-                  <Table.Th>Действия</Table.Th>
-                </Table.Tr>
-              </Table.Thead>
-              <Table.Tbody>
-                {customModels.map((m: TenantCustomModel) => (
-                  <Table.Tr key={m.id} style={{ cursor: 'pointer' }} onClick={() => openEditCustom(m)}>
-                    <Table.Td><Text size="sm" fw={500}>{m.name}</Text></Table.Td>
-                    <Table.Td><Badge variant="light" size="sm">{m.provider_type}</Badge></Table.Td>
-                    <Table.Td><Text size="sm" ff="monospace">{m.model_id}</Text></Table.Td>
-                    <Table.Td><Badge size="sm">{m.tier}</Badge></Table.Td>
-                    <Table.Td>
-                      <Badge color={m.is_active ? 'green' : 'gray'} size="sm">
-                        {m.is_active ? 'Активна' : 'Выкл'}
-                      </Badge>
-                    </Table.Td>
-                    <Table.Td>
-                      <Group gap={4}>
-                        <ActionIcon variant="subtle" color="blue" size="sm" onClick={(e) => { e.stopPropagation(); openEditCustom(m); }}>
-                          <IconEdit size={14} />
-                        </ActionIcon>
-                        <ActionIcon
-                          variant="subtle" color="red" size="sm"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            if (window.confirm(`Удалить "${m.name}"?`)) deleteCustomMutation.mutate(m.id);
-                          }}
-                        >
-                          <IconTrash size={14} />
-                        </ActionIcon>
-                      </Group>
-                    </Table.Td>
+            {!customModels.length ? (
+              <Text c="dimmed" ta="center" py="md">Приватных моделей нет.</Text>
+            ) : (
+              <Table striped>
+                <Table.Thead>
+                  <Table.Tr>
+                    <Table.Th>Название</Table.Th>
+                    <Table.Th>Провайдер</Table.Th>
+                    <Table.Th>Model ID</Table.Th>
+                    <Table.Th>Уровень</Table.Th>
+                    <Table.Th>Статус</Table.Th>
+                    <Table.Th>Действия</Table.Th>
                   </Table.Tr>
-                ))}
-              </Table.Tbody>
-            </Table>
-          )}
-        </Stack>
-      </Card>
+                </Table.Thead>
+                <Table.Tbody>
+                  {customModels.map((m: TenantCustomModel) => (
+                    <Table.Tr key={m.id} style={{ cursor: 'pointer' }} onClick={() => openEditCustom(m)}>
+                      <Table.Td><Text size="sm" fw={500}>{m.name}</Text></Table.Td>
+                      <Table.Td><Badge variant="light" size="sm">{m.provider_type}</Badge></Table.Td>
+                      <Table.Td><Text size="sm" ff="monospace">{m.model_id}</Text></Table.Td>
+                      <Table.Td><Badge size="sm">{m.tier}</Badge></Table.Td>
+                      <Table.Td>
+                        <Badge color={m.is_active ? 'green' : 'gray'} size="sm">
+                          {m.is_active ? 'Активна' : 'Выкл'}
+                        </Badge>
+                      </Table.Td>
+                      <Table.Td>
+                        <Group gap={4}>
+                          <ActionIcon variant="subtle" color="blue" size="sm" onClick={(e) => { e.stopPropagation(); openEditCustom(m); }}>
+                            <IconEdit size={14} />
+                          </ActionIcon>
+                          <ActionIcon
+                            variant="subtle" color="red" size="sm"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (window.confirm(`Удалить "${m.name}"?`)) deleteCustomMutation.mutate(m.id);
+                            }}
+                          >
+                            <IconTrash size={14} />
+                          </ActionIcon>
+                        </Group>
+                      </Table.Td>
+                    </Table.Tr>
+                  ))}
+                </Table.Tbody>
+              </Table>
+            )}
+          </Stack>
+        </Card>
+      </Stack>
 
-      {/* Custom Model Create/Edit Modal */}
+      {/* Custom Model Create/Edit Modal — вне Stack */}
       <Modal
         opened={customModalOpen}
         onClose={() => setCustomModalOpen(false)}
@@ -919,39 +923,67 @@ function ModelConfigTab({ tenantId }: { tenantId: string }) {
       >
         <Stack gap="md">
           <TextInput
-            label="Название" placeholder="My GPT-4o" value={cmName}
-            onChange={(e) => setCmName(e.currentTarget.value)} required
+            label="Название"
+            placeholder="My GPT-4o"
+            value={cmName}
+            onChange={(e) => setCmName(e.currentTarget.value)}
+            required
           />
-          <Group grow>
-            <Select label="Провайдер" data={PROVIDER_OPTIONS_MODEL} value={cmProvider}
-              onChange={(v) => setCmProvider(v || 'ollama')} allowDeselect={false} />
-            <Select label="Уровень" data={[
-              { value: 'light', label: 'Light' },
-              { value: 'medium', label: 'Medium' },
-              { value: 'heavy', label: 'Heavy' },
-            ]} value={cmTier} onChange={(v) => setCmTier(v || 'medium')} allowDeselect={false} />
-          </Group>
-          <TextInput label="Базовый URL" placeholder="http://localhost:11434" value={cmBaseUrl}
-            onChange={(e) => setCmBaseUrl(e.currentTarget.value)} />
-          <PasswordInput label="API ключ"
+          <SimpleGrid cols={2}>
+            <Select
+              label="Провайдер"
+              data={PROVIDER_OPTIONS_MODEL}
+              value={cmProvider}
+              onChange={(v) => setCmProvider(v || 'ollama')}
+              allowDeselect={false}
+            />
+            <Select
+              label="Уровень"
+              data={[
+                { value: 'light', label: 'Light' },
+                { value: 'medium', label: 'Medium' },
+                { value: 'heavy', label: 'Heavy' },
+              ]}
+              value={cmTier}
+              onChange={(v) => setCmTier(v || 'medium')}
+              allowDeselect={false}
+            />
+          </SimpleGrid>
+          <TextInput
+            label="Базовый URL"
+            placeholder="http://localhost:11434"
+            value={cmBaseUrl}
+            onChange={(e) => setCmBaseUrl(e.currentTarget.value)}
+          />
+          <PasswordInput
+            label="API ключ"
             description={editCustomId ? 'Оставьте пустым, чтобы не менять' : ''}
-            value={cmApiKey} onChange={(e) => setCmApiKey(e.currentTarget.value)} />
-          <TextInput label="Model ID" placeholder="gpt-4o" value={cmModelId}
-            onChange={(e) => setCmModelId(e.currentTarget.value)} required />
+            value={cmApiKey}
+            onChange={(e) => setCmApiKey(e.currentTarget.value)}
+          />
+          <TextInput
+            label="Model ID"
+            placeholder="gpt-4o"
+            value={cmModelId}
+            onChange={(e) => setCmModelId(e.currentTarget.value)}
+            required
+          />
           <Group>
             <Switch label="Tools" checked={cmTools} onChange={(e) => setCmTools(e.currentTarget.checked)} />
             <Switch label="Vision" checked={cmVision} onChange={(e) => setCmVision(e.currentTarget.checked)} />
           </Group>
           <Group justify="flex-end">
             <Button variant="default" onClick={() => setCustomModalOpen(false)}>Отмена</Button>
-            <Button onClick={handleSaveCustom}
-              loading={createCustomMutation.isPending || updateCustomMutation.isPending}>
+            <Button
+              onClick={handleSaveCustom}
+              loading={createCustomMutation.isPending || updateCustomMutation.isPending}
+            >
               {editCustomId ? 'Обновить' : 'Создать'}
             </Button>
           </Group>
         </Stack>
       </Modal>
-    </Stack>
+    </>
   );
 }
 

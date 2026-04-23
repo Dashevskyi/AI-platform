@@ -6,6 +6,7 @@ import {
   Stack,
   Text,
   TextInput,
+  Textarea,
   Button,
   ScrollArea,
   NavLink,
@@ -35,9 +36,15 @@ import { notifications } from '@mantine/notifications';
 import { chatsApi } from '../shared/api/endpoints';
 import type { Message, AttachmentBrief } from '../shared/api/types';
 
+// If pasted text is longer than this, offer to attach as file instead
+const PASTE_AS_FILE_THRESHOLD = 2000;
+
 const FILE_TYPE_COLORS: Record<string, string> = {
   pdf: 'red',
   image: 'grape',
+  audio: 'pink',
+  docx: 'blue',
+  xlsx: 'green',
   csv: 'teal',
   json: 'orange',
   html: 'cyan',
@@ -243,6 +250,40 @@ export function ChatPage() {
     }
   }, [addFiles]);
 
+  // Paste handler: images from clipboard + large text as file
+  const handlePaste = useCallback((e: React.ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    // Check for pasted files (images from clipboard)
+    const pastedFiles: File[] = [];
+    for (const item of Array.from(items)) {
+      if (item.kind === 'file') {
+        const file = item.getAsFile();
+        if (file) pastedFiles.push(file);
+      }
+    }
+    if (pastedFiles.length > 0) {
+      e.preventDefault();
+      addFiles(pastedFiles);
+      return;
+    }
+
+    // Check for large text paste
+    const pastedText = e.clipboardData?.getData('text/plain') || '';
+    if (pastedText.length > PASTE_AS_FILE_THRESHOLD) {
+      e.preventDefault();
+      const blob = new Blob([pastedText], { type: 'text/plain' });
+      const file = new File([blob], `pasted_text_${Date.now()}.txt`, { type: 'text/plain' });
+      addFiles([file]);
+      notifications.show({
+        title: 'Текст вставлен как файл',
+        message: `Большой текст (${pastedText.length} символов) прикреплён как файл для анализа`,
+        color: 'blue',
+      });
+    }
+  }, [addFiles]);
+
   // Get last assistant message for debug info
   const lastAssistantMessage = [...messages].reverse().find((m) => m.role === 'assistant');
 
@@ -348,7 +389,7 @@ export function ChatPage() {
                 Перетащите файлы сюда
               </Text>
               <Text size="sm" c="dimmed">
-                PDF, TXT, CSV, JSON, HTML, MD, изображения
+                PDF, DOCX, XLSX, TXT, CSV, JSON, изображения, аудио
               </Text>
             </Stack>
           </Box>
@@ -491,7 +532,7 @@ export function ChatPage() {
                   multiple
                   ref={fileInputRef}
                   style={{ display: 'none' }}
-                  accept=".pdf,.txt,.md,.csv,.log,.json,.xml,.html,.png,.jpg,.jpeg,.gif,.webp"
+                  accept=".pdf,.txt,.md,.csv,.log,.json,.xml,.html,.png,.jpg,.jpeg,.gif,.webp,.tiff,.bmp,.docx,.xlsx,.xls,.mp3,.wav,.ogg,.flac,.m4a,.aac,.webm"
                   onChange={(e) => {
                     if (e.target.files?.length) {
                       addFiles(e.target.files);
@@ -505,27 +546,33 @@ export function ChatPage() {
                     size="lg"
                     onClick={() => fileInputRef.current?.click()}
                     disabled={sendMutation.isPending}
+                    style={{ alignSelf: 'flex-end', marginBottom: 4 }}
                   >
                     <IconPaperclip size={18} />
                   </ActionIcon>
                 </Tooltip>
-                <TextInput
+                <Textarea
                   placeholder={
                     attachedFiles.length > 0
                       ? `Сообщение (${attachedFiles.length} файл(ов) приложено)...`
-                      : 'Введите сообщение...'
+                      : 'Введите сообщение... (Shift+Enter — новая строка)'
                   }
                   value={messageText}
                   onChange={(e) => setMessageText(e.currentTarget.value)}
                   onKeyDown={handleKeyDown}
+                  onPaste={handlePaste}
                   style={{ flex: 1 }}
                   disabled={sendMutation.isPending}
+                  autosize
+                  minRows={1}
+                  maxRows={8}
                 />
                 <Button
                   leftSection={<IconSend size={16} />}
                   onClick={handleSend}
                   loading={sendMutation.isPending}
                   disabled={!messageText.trim()}
+                  style={{ alignSelf: 'flex-end', marginBottom: 4 }}
                 >
                   Отправить
                 </Button>

@@ -46,8 +46,14 @@ def get_file_type(filename: str) -> str:
     lower = filename.lower()
     if lower.endswith(".pdf"):
         return "pdf"
-    elif lower.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")):
+    elif lower.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff")):
         return "image"
+    elif lower.endswith((".mp3", ".wav", ".ogg", ".flac", ".m4a", ".wma", ".aac", ".webm")):
+        return "audio"
+    elif lower.endswith(".docx"):
+        return "docx"
+    elif lower.endswith((".xlsx", ".xls")):
+        return "xlsx"
     elif lower.endswith((".csv",)):
         return "csv"
     elif lower.endswith((".json",)):
