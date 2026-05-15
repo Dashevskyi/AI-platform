@@ -87,6 +87,26 @@ export type StreamEvent = {
 /** Status of an attachment as it is processed by the server. */
 export type AttachmentStatus = 'processing' | 'done' | 'error';
 
+/** Short-form artifact (no content) for list views. */
+export interface ArtifactBrief {
+  id: string;
+  chat_id: string;
+  source_message_id: string | null;
+  kind: string;
+  label: string;
+  lang: string | null;
+  version: number;
+  parent_artifact_id: string | null;
+  tokens_estimate: number;
+  last_referenced_at: string | null;
+  created_at: string;
+}
+
+/** Full artifact, including the verbatim content. */
+export interface ArtifactDetail extends ArtifactBrief {
+  content: string;
+}
+
 /** Args for sending a message. idempotencyKey defaults to crypto.randomUUID(). */
 export type SendArgs = {
   content: string;

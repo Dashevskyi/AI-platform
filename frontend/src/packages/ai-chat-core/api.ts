@@ -8,6 +8,8 @@
 import type {
   AiChatApiVariant,
   AttachmentBrief,
+  ArtifactBrief,
+  ArtifactDetail,
   AuthMode,
   Chat,
   Message,
@@ -23,6 +25,8 @@ export type AiChatApi = {
   listAttachments: (tenantId: string, chatId: string) => Promise<AttachmentBrief[]>;
   sendMessage: (tenantId: string, chatId: string, data: MessageSend) => Promise<Message>;
   sendMessageWithFiles: (tenantId: string, chatId: string, content: string, files: File[], idempotencyKey?: string, attachmentIds?: string[]) => Promise<Message>;
+  listArtifacts: (tenantId: string, chatId: string) => Promise<ArtifactBrief[]>;
+  getArtifact: (tenantId: string, chatId: string, artifactId: string) => Promise<ArtifactDetail>;
   uploadDraftAttachment: (tenantId: string, chatId: string, file: File) => Promise<AttachmentBrief>;
   getDraftAttachment: (tenantId: string, chatId: string, attachmentId: string) => Promise<AttachmentBrief>;
   deleteDraftAttachment: (tenantId: string, chatId: string, attachmentId: string) => Promise<void>;
@@ -135,6 +139,18 @@ export function getAiChatApi(options: GetAiChatApiOptions = {}): AiChatApi {
       return jsonFetch<Message>(u(`${prefix(tenantId)}/${chatId}/messages/upload`), {
         method: 'POST',
         body: fd,
+        authHeaders,
+      });
+    },
+    listArtifacts: async (tenantId, chatId) => {
+      return jsonFetch<ArtifactBrief[]>(u(`${prefix(tenantId)}/${chatId}/artifacts`), {
+        method: 'GET',
+        authHeaders,
+      });
+    },
+    getArtifact: async (tenantId, chatId, artifactId) => {
+      return jsonFetch<ArtifactDetail>(u(`${prefix(tenantId)}/${chatId}/artifacts/${artifactId}`), {
+        method: 'GET',
         authHeaders,
       });
     },

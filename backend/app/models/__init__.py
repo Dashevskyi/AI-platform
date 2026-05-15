@@ -19,6 +19,7 @@ from app.models.tenant_model_config import TenantModelConfig
 from app.models.message_attachment import MessageAttachment
 from app.models.message_attachment_chunk import MessageAttachmentChunk
 from app.models.gpu_metric_snapshot import GPUMetricSnapshot
+from app.models.artifact import Artifact
 
 __all__ = [
     "AdminUser", "Tenant", "TenantApiKey", "TenantApiKeyGroup", "TenantShellConfig",
@@ -26,4 +27,5 @@ __all__ = [
     "KBChunk", "MemoryEntry", "Chat", "Message", "LLMRequestLog", "AdminAuditLog",
     "LLMModel", "TenantCustomModel", "TenantModelConfig",
     "MessageAttachment", "MessageAttachmentChunk", "GPUMetricSnapshot",
+    "Artifact",
 ]

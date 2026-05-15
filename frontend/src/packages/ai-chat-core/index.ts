@@ -14,6 +14,9 @@ export type { UseAiChatMessagesResult } from './useAiChatMessages';
 export { useAiChatAttachments } from './useAiChatAttachments';
 export type { UseAiChatAttachmentsResult } from './useAiChatAttachments';
 
+export { useAiChatArtifacts } from './useAiChatArtifacts';
+export type { UseAiChatArtifactsResult } from './useAiChatArtifacts';
+
 export { useAiChatSend } from './useAiChatSend';
 export type {
   UseAiChatSendOptions,
@@ -37,4 +40,6 @@ export type {
   SendArgs,
   ConnectionOptions,
   AuthMode,
+  ArtifactBrief,
+  ArtifactDetail,
 } from './types';

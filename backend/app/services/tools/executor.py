@@ -24,7 +24,9 @@ from app.core.security import decrypt_value
 
 logger = logging.getLogger(__name__)
 
-TOOL_TIMEOUT_SECONDS = 15
+# 30s — covers CPU-Ollama nomic-embed-text calls (find_artifacts, recall_chat)
+# under load. Individual tools can override via tool_config.timeout_seconds.
+TOOL_TIMEOUT_SECONDS = 30
 PING_BATCH_TIMEOUT_SECONDS = 60
 MAX_TOOL_TIMEOUT_SECONDS = 120
 
@@ -88,10 +90,16 @@ async def execute_tool(tool_name: str, arguments: dict, tool_config: dict | None
         result = await asyncio.wait_for(handler(arguments, tool_config), timeout=timeout)
         return result
     except asyncio.TimeoutError:
-        return ToolResult(success=False, output="", error=f"Таймаут выполнения ({timeout}с)")
+        # Log the actual tool name + args so we can see WHICH call timed out
+        # (used to be invisible — the model just got a generic "Таймаут").
+        logger.warning(
+            "[tool-timeout] handler=%s timeout=%ss args=%r",
+            handler_name, timeout, {k: v for k, v in arguments.items() if k != "_context"},
+        )
+        return ToolResult(success=False, output="", error=f"Таймаут выполнения {handler_name} ({timeout}с)")
     except Exception as e:
         logger.exception(f"Tool execution error: {handler_name}")
-        return ToolResult(success=False, output="", error=f"Ошибка: {str(e)[:300]}")
+        return ToolResult(success=False, output="", error=f"Ошибка {handler_name}: {str(e)[:300]}")
 
 
 # ============================================================
@@ -1625,9 +1633,9 @@ async def get_message_handler(arguments: dict, tool_config: dict | None = None) 
 
 @register_tool("find_artifacts")
 async def find_artifacts_handler(arguments: dict, tool_config: dict | None = None) -> ToolResult:
-    """Search past messages for artifacts (code, scripts, configs, instructions).
-    Returns list of {message_id, kind, label, created_at, similarity?}.
-    Call get_message(id) afterwards to fetch the full content."""
+    """Search the first-class artifacts table for code/configs/scripts/SQL.
+    Returns a list of {artifact_id, kind, label, created_at, similarity?}.
+    Caller fetches full content via get_artifact(id)."""
     import uuid as _uuid
     from sqlalchemy import select, text as sa_text
     from app.core.database import async_session
@@ -1650,70 +1658,51 @@ async def find_artifacts_handler(arguments: dict, tool_config: dict | None = Non
 
     try:
         async with async_session() as db:
-            # Cross-chat scope requires tenant opt-in (same flag as recall_chat).
-            if scope == "tenant":
-                cfg = (await db.execute(
-                    select(TenantShellConfig).where(TenantShellConfig.tenant_id == _uuid.UUID(tenant_id_s))
-                )).scalar_one_or_none()
-                if not (cfg and getattr(cfg, "recall_cross_chat_enabled", False)):
-                    scope = "chat"
+            cfg = (await db.execute(
+                select(TenantShellConfig).where(TenantShellConfig.tenant_id == _uuid.UUID(tenant_id_s))
+            )).scalar_one_or_none()
+            if scope == "tenant" and not (cfg and getattr(cfg, "recall_cross_chat_enabled", False)):
+                scope = "chat"  # cross-chat blocked by tenant policy
 
-            # Build embedding only if a query is provided AND embedding model configured.
+            # Query embedding — semantic ranking when both query and tenant
+            # embedding model are present. Otherwise fall back to recency.
             qvec_str: str | None = None
-            if query:
-                cfg = (await db.execute(
-                    select(TenantShellConfig).where(TenantShellConfig.tenant_id == _uuid.UUID(tenant_id_s))
-                )).scalar_one_or_none()
-                if cfg and cfg.embedding_model_name:
+            if query and cfg and cfg.embedding_model_name:
+                try:
                     provider = get_provider("ollama", app_settings.OLLAMA_BASE_URL or "http://localhost:11434")
                     vectors = await provider.embed(query, cfg.embedding_model_name)
                     if vectors:
                         qvec_str = "[" + ",".join(f"{float(x):.6f}" for x in vectors[0]) + "]"
+                except Exception:
+                    logger.exception("find_artifacts: embed failed; falling back to recency")
 
             params: dict = {"tid": _uuid.UUID(tenant_id_s), "limit": limit}
-            where_clauses = [
-                "m.tenant_id = :tid",
-                "m.role = 'assistant'",
-                "m.artifacts IS NOT NULL",
-                "jsonb_typeof(m.artifacts) = 'array'",
-                "jsonb_array_length(m.artifacts) > 0",
-            ]
+            where_clauses = ["a.tenant_id = :tid", "a.deleted_at IS NULL"]
             if scope == "chat":
                 if not chat_id_s:
                     return ToolResult(success=False, output="", error="find_artifacts: chat context missing for scope=chat")
                 params["cid"] = _uuid.UUID(chat_id_s)
-                where_clauses.append("m.chat_id = :cid")
+                where_clauses.append("a.chat_id = :cid")
             if kind:
                 params["kind"] = kind
-                where_clauses.append(
-                    "EXISTS (SELECT 1 FROM jsonb_array_elements(m.artifacts) elt "
-                    "WHERE lower(elt->>'kind') = :kind)"
-                )
+                where_clauses.append("lower(a.kind) = :kind")
 
             select_extra = ""
-            order_clause = "ORDER BY m.created_at DESC"
+            order_clause = "ORDER BY a.created_at DESC"
             if qvec_str:
                 params["qvec"] = qvec_str
-                # Use resume_embedding similarity (lives on the matching USER row in same chat).
-                select_extra = (
-                    ", (SELECT 1 - (mu.resume_embedding <=> CAST(:qvec AS vector)) "
-                    "   FROM messages mu "
-                    "   WHERE mu.chat_id = m.chat_id AND mu.role = 'user' "
-                    "         AND mu.resume_embedding IS NOT NULL "
-                    "         AND mu.created_at <= m.created_at "
-                    "   ORDER BY mu.created_at DESC LIMIT 1) AS similarity"
-                )
-                order_clause = "ORDER BY similarity DESC NULLS LAST, m.created_at DESC"
+                select_extra = ", (1 - (a.embedding <=> CAST(:qvec AS vector))) AS similarity"
+                # Artifacts without embeddings still appear (NULLS LAST), but ranked behind.
+                order_clause = "ORDER BY similarity DESC NULLS LAST, a.created_at DESC"
 
             where_sql = " AND ".join(where_clauses)
             sql = sa_text(f"""
                 SELECT
-                    m.id::text AS message_id,
-                    m.chat_id::text AS chat_id,
-                    m.created_at,
-                    m.artifacts
+                    a.id::text AS artifact_id,
+                    a.kind, a.label, a.lang,
+                    a.version, a.tokens_estimate, a.created_at
                     {select_extra}
-                FROM messages m
+                FROM artifacts a
                 WHERE {where_sql}
                 {order_clause}
                 LIMIT :limit
@@ -1721,28 +1710,27 @@ async def find_artifacts_handler(arguments: dict, tool_config: dict | None = Non
             rows = (await db.execute(sql, params)).fetchall()
 
         if not rows:
-            cond = []
-            if kind: cond.append(f"kind={kind}")
-            if query: cond.append(f"query={query!r}")
-            cond.append(f"scope={scope}")
-            return ToolResult(success=True, output=f"(артефактов не найдено: {', '.join(cond)})")
+            conds = []
+            if kind: conds.append(f"kind={kind}")
+            if query: conds.append(f"query={query!r}")
+            conds.append(f"scope={scope}")
+            return ToolResult(success=True, output=f"(артефактов не найдено: {', '.join(conds)})")
 
-        lines = [f"Найдено {len(rows)} (scope={scope}{', kind=' + kind if kind else ''}):"]
+        header = f"Найдено {len(rows)} артефакт(ов) (scope={scope}"
+        if kind: header += f", kind={kind}"
+        header += "):"
+        lines = [header]
         for r in rows:
             ts = r.created_at.strftime("%Y-%m-%d %H:%M") if r.created_at else "—"
             sim_str = ""
             if qvec_str and getattr(r, "similarity", None) is not None:
                 sim_str = f" sim={r.similarity:.2f}"
-            arts = r.artifacts or []
-            # Filter to the requested kind for display if specified
-            shown = [a for a in arts if (not kind or (a.get("kind") or "").lower() == kind)] or arts
-            for a in shown[:3]:  # max 3 artifacts per message in list view
-                lines.append(
-                    f"- [{r.message_id}] {ts}{sim_str}\n"
-                    f"  📎 [{a.get('kind') or 'code'}] {a.get('label') or '(no label)'}"
-                    + (f" (lang={a.get('lang')})" if a.get("lang") else "")
-                )
-        lines.append("\nДля получения полного текста — вызови get_message(id).")
+            lang_str = f" (lang={r.lang})" if r.lang else ""
+            lines.append(
+                f"- [{r.artifact_id}] [{r.kind}] {r.label}{lang_str}\n"
+                f"  v{r.version}, ~{r.tokens_estimate} tok, {ts}{sim_str}"
+            )
+        lines.append("\nЧтобы получить полный текст артефакта — вызови get_artifact(id).")
         return ToolResult(success=True, output="\n".join(lines))
     except Exception as e:
         logger.exception("find_artifacts failed")
@@ -1803,3 +1791,66 @@ async def memory_save_handler(arguments: dict, tool_config: dict | None = None) 
     except Exception as e:
         logger.exception("memory_save failed")
         return ToolResult(success=False, output="", error=f"Не удалось сохранить: {str(e)[:200]}")
+
+
+@register_tool("get_artifact")
+async def get_artifact_handler(arguments: dict, tool_config: dict | None = None) -> ToolResult:
+    """Fetch the verbatim content of an artifact by id (from the artifacts
+    table — the immutable source of truth). Use this whenever the user asks
+    about details of a script/SQL/config that was produced earlier — never
+    answer from the resume/history block, those don't carry concrete values."""
+    import uuid as _uuid
+    from sqlalchemy import select, update
+    from datetime import datetime, timezone
+    from app.core.database import async_session
+    from app.models.artifact import Artifact
+
+    ctx = (tool_config or {}).get("_context") or {}
+    tenant_id_s = ctx.get("tenant_id")
+    if not tenant_id_s:
+        return ToolResult(success=False, output="", error="get_artifact: tenant context missing")
+
+    aid_s = (arguments.get("id") or "").strip()
+    if not aid_s:
+        return ToolResult(success=False, output="", error="get_artifact: 'id' is required")
+    try:
+        aid = _uuid.UUID(aid_s)
+    except ValueError:
+        return ToolResult(success=False, output="", error=f"get_artifact: invalid id '{aid_s}'")
+
+    try:
+        async with async_session() as db:
+            art = (await db.execute(
+                select(Artifact).where(
+                    Artifact.id == aid,
+                    Artifact.tenant_id == _uuid.UUID(tenant_id_s),
+                )
+            )).scalar_one_or_none()
+            if not art:
+                return ToolResult(success=False, output="", error=f"get_artifact: id {aid_s} not found")
+            if art.deleted_at is not None:
+                return ToolResult(success=False, output="", error=f"get_artifact: id {aid_s} deleted")
+            # Touch — pulling an artifact via tool is a clear signal it's hot.
+            await db.execute(
+                update(Artifact)
+                .where(Artifact.id == aid)
+                .values(last_referenced_at=datetime.now(timezone.utc))
+            )
+            await db.commit()
+
+        header_lines = [
+            f"id: {art.id}",
+            f"kind: {art.kind}",
+            f"label: {art.label}",
+            f"lang: {art.lang or '—'}",
+            f"version: v{art.version}",
+            f"source_message_id: {art.source_message_id or '—'}",
+            f"tokens_estimate: {art.tokens_estimate}",
+            f"created_at: {art.created_at}",
+        ]
+        fence_lang = art.lang or ""
+        body = f"```{fence_lang}\n{art.content}\n```"
+        return ToolResult(success=True, output="\n".join(header_lines) + "\n\n" + body)
+    except Exception as e:
+        logger.exception("get_artifact failed")
+        return ToolResult(success=False, output="", error=f"get_artifact: {str(e)[:200]}")

@@ -624,7 +624,7 @@ async def _chat_completion_inner(
 
     # Collect long_term memory items from API key and its group (scoped to chats with this key)
     api_key_memory_items: list[str] = []
-    if False:  # === [BLOCK-MEMORY-A] memory_prompt from api_key / group ===
+    if True:  # === [BLOCK-MEMORY-A] memory_prompt from api_key / group ===
         if api_key_id:
             api_key = (
                 await db.execute(
@@ -647,6 +647,13 @@ async def _chat_completion_inner(
                 ).scalar_one_or_none()
                 if group and group.memory_prompt and group.memory_prompt.strip():
                     api_key_memory_items.append(group.memory_prompt.strip())
+        # Inject as its own system block — these are explicit tenant configs
+        # for the active API key / group, not LLM-saved memory.
+        if api_key_memory_items:
+            system_parts.append(
+                "## Память API-ключа\n"
+                + "\n".join(f"- {item}" for item in api_key_memory_items)
+            )
 
     _memory_block_text: str | None = None
     _kb_block_text: str | None = None
@@ -694,6 +701,35 @@ async def _chat_completion_inner(
             _attachments_block_text = header + "\n".join(att_lines)
             system_parts.append(_attachments_block_text)
 
+    # === [BLOCK-ACTIVE-ARTIFACTS] — auto-grounding ===
+    # Pull the artifacts the user's question is most likely about (semantic
+    # match + recency hot-set). VERBATIM content is later inlined directly
+    # INTO the user message (not system) so the model attends to it the same
+    # way it attends to the question itself — matches how Cursor/ChatGPT
+    # present open files. Block payload is built here, attached below.
+    active_artifacts_block_text: str | None = None
+    try:
+        from app.services.artifacts.grounding import (
+            resolve_active_artifacts,
+            format_active_artifacts_block,
+        )
+        active_artifacts = await resolve_active_artifacts(
+            db=db,
+            tenant_id=tenant_id,
+            chat_id=chat_id,
+            user_content=user_content,
+        )
+        if active_artifacts:
+            active_artifacts_block_text = format_active_artifacts_block(active_artifacts)
+            logger.info(
+                "[%s] grounded %d artifact(s): %s",
+                correlation_id,
+                len(active_artifacts),
+                ", ".join(f"{a.kind}:{str(a.id)[:8]}" for a in active_artifacts),
+            )
+    except Exception:
+        logger.exception("[pipeline] artifact auto-grounding failed (non-fatal)")
+
     # === [BLOCK-HISTORY-RESUMES] — agentic memory ===
     # Inject the last N pair-resumes (user-question summary + assistant-response summary)
     # as a compact markdown block, BEFORE building the system message. Full original
@@ -737,20 +773,29 @@ async def _chat_completion_inner(
                 anchor_id = str(asst.id) if asst else str(u.id)
                 resume_lines.append(f"- [{anchor_id}] Q: {q_resume} → A: {resp_resume}")
                 # 📎 markers: one line per artifact attached to the assistant reply.
+                # The JSONB now stores refs to rows in `artifacts` — include the
+                # artifact_id so the model can fetch it via get_artifact(id).
                 arts = (asst.artifacts if asst else None) or []
                 for a in arts:
                     kind = (a.get("kind") or "").strip() or "code"
                     label = (a.get("label") or "").strip()
-                    if label:
+                    aid = (a.get("id") or "").strip()
+                    if not label:
+                        continue
+                    if aid:
+                        resume_lines.append(f"  📎 [{kind}] {label} (artifact_id={aid})")
+                    else:
                         resume_lines.append(f"  📎 [{kind}] {label}")
             if resume_lines:
                 system_parts.append(
                     "## Recent conversation (резюме последних обменов)\n"
                     + "\n".join(resume_lines)
-                    + "\n\nЕсли пользователь хочет изменить/продолжить обмен с маркером 📎 — "
-                    + "вызови `get_message(id)`, чтобы получить полный текст артефакта.\n"
-                    + "Если артефакт упомянут, но его нет в списке выше — `find_artifacts(kind=..., query=...)`.\n"
-                    + "Если резюме недостаточно — `recall_chat` (semantic search по всей истории)."
+                    + "\n\nРезюме не содержат конкретных значений (IP, числа, имена) — это специально, "
+                    + "чтобы исключить искажения. Конкретику бери ТОЛЬКО из:\n"
+                    + "- блока «Активные артефакты» (если есть),\n"
+                    + "- вызова `get_artifact(artifact_id)` для маркера 📎 из списка выше,\n"
+                    + "- `find_artifacts(kind=..., query=...)` если артефакт не упомянут,\n"
+                    + "- `recall_chat` / `get_message(id)` для контекста самого обмена."
                 )
     except Exception:
         logger.exception("[pipeline] failed to assemble HISTORY-RESUMES block")
@@ -826,9 +871,16 @@ async def _chat_completion_inner(
     if image_payloads:
         inline_attachments = [a for a in inline_attachments if a.file_type != "image"]
     current_block = _build_current_attachments_block(inline_attachments, tools_enabled)
-    composed_user_content = (
-        f"{current_block}\n\n{user_content}" if current_block else user_content
-    )
+    # Stack order matters for attention: artifacts (the "open file") first,
+    # then current-message attachments, then the question. Mirrors how Cursor
+    # presents context to the model.
+    composed_parts: list[str] = []
+    if active_artifacts_block_text:
+        composed_parts.append(active_artifacts_block_text)
+    if current_block:
+        composed_parts.append(current_block)
+    composed_parts.append(user_content)
+    composed_user_content = "\n\n".join(composed_parts)
 
     if image_payloads:
         messages.append(

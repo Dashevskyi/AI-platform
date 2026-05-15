@@ -24,6 +24,7 @@ import {
   IconPlus,
   IconMessageCircle,
   IconInfoCircle,
+  IconCode,
   IconPencil,
   IconPaperclip,
   IconFile,
@@ -47,6 +48,7 @@ import {
   useAiChatSend,
   getAiChatApi,
 } from '../../packages/ai-chat-core';
+import { ArtifactsPanel } from './ArtifactsPanel';
 import type { AuthMode } from '../../packages/ai-chat-core';
 
 export type AiChatMode = 'admin' | 'end-user';
@@ -180,6 +182,7 @@ export function AiChat({
 
   const [messageText, setMessageText] = useState('');
   const [showDebug, setShowDebug] = useState(false);
+  const [showArtifacts, setShowArtifacts] = useState(false);
   const [editChatId, setEditChatId] = useState<string | null>(null);
   const [editChatTitle, setEditChatTitle] = useState('');
   // Drafts the user attached to the upcoming message. Files are uploaded to the
@@ -639,16 +642,26 @@ export function AiChat({
                     </Tooltip>
                   )}
                 </Group>
-                {features.showStats && (
-                  <Tooltip label="Отладочная информация">
+                <Group gap={4}>
+                  <Tooltip label="Артефакты чата">
                     <ActionIcon
-                      variant={showDebug ? 'filled' : 'subtle'}
-                      onClick={() => setShowDebug(!showDebug)}
+                      variant={showArtifacts ? 'filled' : 'subtle'}
+                      onClick={() => setShowArtifacts(!showArtifacts)}
                     >
-                      <IconInfoCircle size={18} />
+                      <IconCode size={18} />
                     </ActionIcon>
                   </Tooltip>
-                )}
+                  {features.showStats && (
+                    <Tooltip label="Отладочная информация">
+                      <ActionIcon
+                        variant={showDebug ? 'filled' : 'subtle'}
+                        onClick={() => setShowDebug(!showDebug)}
+                      >
+                        <IconInfoCircle size={18} />
+                      </ActionIcon>
+                    </Tooltip>
+                  )}
+                </Group>
               </Group>
             )}
 
@@ -855,6 +868,30 @@ export function AiChat({
           </Stack>
         </form>
       </Modal>
+
+      {/* Artifacts panel */}
+      {showArtifacts && activeChatId && (
+        <Box
+          style={{
+            width: 380,
+            borderLeft: '1px solid var(--mantine-color-default-border)',
+            overflow: 'hidden',
+          }}
+        >
+          <ArtifactsPanel
+            tenantId={tenantId}
+            chatId={activeChatId}
+            mode={mode}
+            apiBase={apiBase}
+            apiKey={apiKey}
+            authBearer={
+              mode === 'admin' && typeof localStorage !== 'undefined'
+                ? (localStorage.getItem('auth_token') || undefined)
+                : undefined
+            }
+          />
+        </Box>
+      )}
 
       {/* Debug panel */}
       {features.showStats && showDebug && activeChatId && (

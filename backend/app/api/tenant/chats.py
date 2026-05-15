@@ -21,8 +21,10 @@ from app.models.tenant import Tenant
 from app.models.chat import Chat
 from app.models.message import Message
 from app.models.message_attachment import MessageAttachment
+from app.models.artifact import Artifact
 from app.schemas.chat import ChatCreate, ChatResponse, MessageSend, MessageResponse, PublicMessageResponse
 from app.schemas.attachment import AttachmentBrief
+from app.schemas.artifact import ArtifactBrief, ArtifactDetail
 from app.schemas.common import PaginatedResponse
 from app.api.deps import TenantAuthContext, get_current_tenant_auth_context
 
@@ -30,6 +32,39 @@ router = APIRouter(
     prefix="/api/tenants/{tenant_id}/chats",
     tags=["tenant-chats"],
 )
+
+
+def _artifact_to_brief(a: Artifact) -> ArtifactBrief:
+    return ArtifactBrief(
+        id=str(a.id),
+        chat_id=str(a.chat_id),
+        source_message_id=str(a.source_message_id) if a.source_message_id else None,
+        kind=a.kind,
+        label=a.label,
+        lang=a.lang,
+        version=a.version,
+        parent_artifact_id=str(a.parent_artifact_id) if a.parent_artifact_id else None,
+        tokens_estimate=a.tokens_estimate,
+        last_referenced_at=a.last_referenced_at,
+        created_at=a.created_at,
+    )
+
+
+def _artifact_to_detail(a: Artifact) -> ArtifactDetail:
+    return ArtifactDetail(
+        id=str(a.id),
+        chat_id=str(a.chat_id),
+        source_message_id=str(a.source_message_id) if a.source_message_id else None,
+        kind=a.kind,
+        label=a.label,
+        lang=a.lang,
+        version=a.version,
+        parent_artifact_id=str(a.parent_artifact_id) if a.parent_artifact_id else None,
+        tokens_estimate=a.tokens_estimate,
+        last_referenced_at=a.last_referenced_at,
+        created_at=a.created_at,
+        content=a.content,
+    )
 
 
 def _chat_to_response(c: Chat) -> ChatResponse:
@@ -979,3 +1014,64 @@ async def delete_draft_attachment(
     await db.delete(att)
     await db.commit()
     return None
+
+
+# ============================================================================
+# Artifacts — first-class entities (scripts, configs, SQL, ...) extracted from
+# chat messages. Read-only from the tenant side: artifacts are produced by
+# the LLM pipeline, not authored by API clients.
+# ============================================================================
+
+
+@router.get("/{chat_id}/artifacts", response_model=list[ArtifactBrief])
+async def list_artifacts(
+    tenant_id: uuid.UUID,
+    chat_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    auth: TenantAuthContext = Depends(get_current_tenant_auth_context),
+):
+    """List artifacts in this chat (briefs without content). Latest first."""
+    _verify_tenant_access(tenant_id, auth.tenant)
+    chat_result = await db.execute(
+        _chat_scope_query(tenant_id, auth.api_key.id).where(Chat.id == chat_id)
+    )
+    if not chat_result.scalars().first():
+        raise HTTPException(status_code=404, detail="Chat not found.")
+    rows = (await db.execute(
+        select(Artifact)
+        .where(
+            Artifact.tenant_id == tenant_id,
+            Artifact.chat_id == chat_id,
+            Artifact.deleted_at.is_(None),
+        )
+        .order_by(Artifact.created_at.desc())
+    )).scalars().all()
+    return [_artifact_to_brief(a) for a in rows]
+
+
+@router.get("/{chat_id}/artifacts/{artifact_id}", response_model=ArtifactDetail)
+async def get_artifact(
+    tenant_id: uuid.UUID,
+    chat_id: uuid.UUID,
+    artifact_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    auth: TenantAuthContext = Depends(get_current_tenant_auth_context),
+):
+    """Fetch one artifact with full content."""
+    _verify_tenant_access(tenant_id, auth.tenant)
+    chat_result = await db.execute(
+        _chat_scope_query(tenant_id, auth.api_key.id).where(Chat.id == chat_id)
+    )
+    if not chat_result.scalars().first():
+        raise HTTPException(status_code=404, detail="Chat not found.")
+    art = (await db.execute(
+        select(Artifact).where(
+            Artifact.id == artifact_id,
+            Artifact.tenant_id == tenant_id,
+            Artifact.chat_id == chat_id,
+            Artifact.deleted_at.is_(None),
+        )
+    )).scalar_one_or_none()
+    if not art:
+        raise HTTPException(status_code=404, detail="Artifact not found.")
+    return _artifact_to_detail(art)

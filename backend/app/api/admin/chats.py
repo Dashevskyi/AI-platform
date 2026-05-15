@@ -21,8 +21,10 @@ from app.models.tenant import Tenant
 from app.models.chat import Chat
 from app.models.message import Message
 from app.models.message_attachment import MessageAttachment
+from app.models.artifact import Artifact
 from app.schemas.chat import ChatCreate, ChatUpdate, ChatResponse, MessageSend, MessageResponse
 from app.schemas.attachment import AttachmentResponse, AttachmentBrief
+from app.schemas.artifact import ArtifactBrief, ArtifactDetail
 from app.schemas.common import PaginatedResponse
 from app.api.deps import require_role, require_tenant_access, require_permission
 
@@ -1007,3 +1009,85 @@ async def delete_draft_attachment_admin(
     await db.delete(att)
     await db.commit()
     return None
+
+
+# ============================================================================
+# Artifacts (admin mirror of tenant endpoints).
+# ============================================================================
+
+
+def _admin_artifact_to_brief(a: Artifact) -> ArtifactBrief:
+    return ArtifactBrief(
+        id=str(a.id),
+        chat_id=str(a.chat_id),
+        source_message_id=str(a.source_message_id) if a.source_message_id else None,
+        kind=a.kind,
+        label=a.label,
+        lang=a.lang,
+        version=a.version,
+        parent_artifact_id=str(a.parent_artifact_id) if a.parent_artifact_id else None,
+        tokens_estimate=a.tokens_estimate,
+        last_referenced_at=a.last_referenced_at,
+        created_at=a.created_at,
+    )
+
+
+def _admin_artifact_to_detail(a: Artifact) -> ArtifactDetail:
+    return ArtifactDetail(
+        id=str(a.id),
+        chat_id=str(a.chat_id),
+        source_message_id=str(a.source_message_id) if a.source_message_id else None,
+        kind=a.kind,
+        label=a.label,
+        lang=a.lang,
+        version=a.version,
+        parent_artifact_id=str(a.parent_artifact_id) if a.parent_artifact_id else None,
+        tokens_estimate=a.tokens_estimate,
+        last_referenced_at=a.last_referenced_at,
+        created_at=a.created_at,
+        content=a.content,
+    )
+
+
+@router.get("/{chat_id}/artifacts", response_model=list[ArtifactBrief])
+async def list_artifacts_admin(
+    tenant_id: uuid.UUID,
+    chat_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: AdminUser = Depends(require_role("superadmin", "tenant_admin")),
+):
+    """List artifacts in this chat (admin)."""
+    await _verify_tenant(tenant_id, db)
+    rows = (await db.execute(
+        select(Artifact)
+        .where(
+            Artifact.tenant_id == tenant_id,
+            Artifact.chat_id == chat_id,
+            Artifact.deleted_at.is_(None),
+        )
+        .order_by(Artifact.created_at.desc())
+    )).scalars().all()
+    return [_admin_artifact_to_brief(a) for a in rows]
+
+
+@router.get("/{chat_id}/artifacts/{artifact_id}", response_model=ArtifactDetail)
+async def get_artifact_admin(
+    tenant_id: uuid.UUID,
+    chat_id: uuid.UUID,
+    artifact_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: AdminUser = Depends(require_role("superadmin", "tenant_admin")),
+):
+    """Fetch one artifact with full content (admin)."""
+    await _verify_tenant(tenant_id, db)
+    art = (await db.execute(
+        select(Artifact).where(
+            Artifact.id == artifact_id,
+            Artifact.tenant_id == tenant_id,
+            Artifact.chat_id == chat_id,
+            Artifact.deleted_at.is_(None),
+        )
+    )).scalar_one_or_none()
+    if not art:
+        raise HTTPException(status_code=404, detail="Artifact not found.")
+    return _admin_artifact_to_detail(art)
