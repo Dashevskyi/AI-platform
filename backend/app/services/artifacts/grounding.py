@@ -51,13 +51,20 @@ RECENT_WINDOW_SECONDS = 300
 #   • a tool-result is recent-pulled only inside this much shorter window;
 #   • semantic similarity to the new query still works as usual.
 TOOL_RESULT_KIND = "tool-result"
-# Recency-only window for tool-results. With nomic-embed-text we needed a
-# very tight 15 s here to defend against off-topic queries (the embedder
-# couldn't distinguish "Thank you" from "оформи таблицу пингов"). bge-m3
-# separates topics by a wide margin, so SIMILARITY_FLOOR is enough on its
-# own — and we extend the recency lane to cover realistic follow-up gaps
-# ("теперь по этим координатам найди PON" ~60 s after a geocode call).
+# Recency window for tool-results — matches non-tool-result default. The
+# protection against off-topic pulls (e.g. "спасибо" pulling the ping
+# table) is now in the similarity floor below.
 TOOL_RESULT_VERY_RECENT_SECONDS = 300
+# Stricter similarity floor for tool-result kind specifically. The labels
+# we generate ("Результат ping(...)", "Результат pon_nearby(...)") contain
+# a tool name token; bge-m3 gives that token mild similarity (~0.40-0.45)
+# to many unrelated Russian utterances, so the generic 0.40 floor lets
+# off-topic "спасибо" through. Empirically:
+#   "спасибо"                       → ping/pon_nearby ~0.44
+#   "оформи в таблицу пинги"        → ping ~0.55
+#   "поиск PON 500м от координат"   → pon_nearby ~0.65
+# A floor of 0.50 cleanly separates relevant from polite filler.
+TOOL_RESULT_SEMANTIC_FLOOR = 0.50
 
 # Don't run grounding on trivial queries — search is noisy at short lengths.
 MIN_QUERY_CHARS = 5
@@ -162,43 +169,93 @@ async def resolve_active_artifacts(
             "k": max_artifacts * 2,
         })).fetchall()
         for r in rows:
-            if r.similarity is None or r.similarity < SIMILARITY_FLOOR:
+            if r.similarity is None:
+                continue
+            floor = TOOL_RESULT_SEMANTIC_FLOOR if r.kind == TOOL_RESULT_KIND else SIMILARITY_FLOOR
+            if r.similarity < floor:
                 continue
             selected_ids.append(r.id)
             if len(selected_ids) >= max_artifacts:
                 break
 
     # 2) Recent hot-set (last_referenced_at within window).
-    #    - Code/PDF/image artifacts: pure recency — chat is clearly about them.
-    #    - Tool-result artifacts: ONLY pulled by recency if very-recent
-    #      (< TOOL_RESULT_VERY_RECENT_SECONDS, immediate follow-up turn like
-    #      "оформи в таблицу"). Outside that window they must earn their slot
-    #      via the semantic top-K above (with TOOL_RESULT_SEMANTIC_FLOOR).
-    recent_q = sa_text(
-        f"""
-        SELECT id, kind, last_referenced_at
-        FROM artifacts
-        WHERE tenant_id = :tid
-          AND chat_id = :cid
-          AND deleted_at IS NULL
-          AND last_referenced_at IS NOT NULL
-          AND (
-            (kind = :tr_kind  AND last_referenced_at >= NOW() - INTERVAL '{TOOL_RESULT_VERY_RECENT_SECONDS} seconds')
-            OR
-            (kind != :tr_kind AND last_referenced_at >= NOW() - INTERVAL '{RECENT_WINDOW_SECONDS} seconds')
-          )
-        ORDER BY last_referenced_at DESC
-        LIMIT :k
-        """
-    )
-    recent_rows = (await db.execute(recent_q, {
-        "tid": tenant_id, "cid": chat_id, "tr_kind": TOOL_RESULT_KIND, "k": max_artifacts,
-    })).fetchall()
-    for row in recent_rows:
-        if row.id not in selected_ids:
-            selected_ids.append(row.id)
-            if len(selected_ids) >= max_artifacts:
-                break
+    #
+    # Two policies:
+    #   • Non-tool-result artifacts (code/PDF/image): pure recency. The chat
+    #     is clearly working with these files; the user routinely says
+    #     "продолжи скрипт" / "поправь конфиг" without mentioning the topic
+    #     by name, and that's fine.
+    #   • Tool-result artifacts: recency PLUS a semantic match. A 5-minute
+    #     ping result is fresh enough to be a likely target IF the user is
+    #     asking something related ("now from these coords"), but absolutely
+    #     not if they pivot to "спасибо" or "what's the capital of Japan".
+    #     We compute similarity here even when we already did the top-K
+    #     pass — top-K is bounded by max_artifacts and may have missed this
+    #     row.
+    if qvec is not None:
+        # With a query embedding: tool-result must clear SIMILARITY_FLOOR.
+        recent_q = sa_text(
+            f"""
+            SELECT id, kind,
+                   1 - (embedding <=> CAST(:qvec AS vector)) AS similarity
+            FROM artifacts
+            WHERE tenant_id = :tid
+              AND chat_id = :cid
+              AND deleted_at IS NULL
+              AND last_referenced_at IS NOT NULL
+              AND embedding IS NOT NULL
+              AND embedding_model = :emodel
+              AND (
+                (kind = :tr_kind  AND last_referenced_at >= NOW() - INTERVAL '{TOOL_RESULT_VERY_RECENT_SECONDS} seconds')
+                OR
+                (kind != :tr_kind AND last_referenced_at >= NOW() - INTERVAL '{RECENT_WINDOW_SECONDS} seconds')
+              )
+            ORDER BY last_referenced_at DESC
+            LIMIT :k
+            """
+        )
+        recent_rows = (await db.execute(recent_q, {
+            "tid": tenant_id, "cid": chat_id,
+            "tr_kind": TOOL_RESULT_KIND,
+            "qvec": qvec_str, "emodel": embed_model,
+            "k": max_artifacts * 2,
+        })).fetchall()
+        for row in recent_rows:
+            if row.kind == TOOL_RESULT_KIND and (
+                row.similarity is None or row.similarity < TOOL_RESULT_SEMANTIC_FLOOR
+            ):
+                continue
+            if row.id not in selected_ids:
+                selected_ids.append(row.id)
+                if len(selected_ids) >= max_artifacts:
+                    break
+    else:
+        # No embedding (very short query, embedder offline): fall back to pure
+        # recency, but tool-results are excluded — without semantic context we
+        # have no way to tell follow-up from topic-switch.
+        recent_q = sa_text(
+            f"""
+            SELECT id, kind
+            FROM artifacts
+            WHERE tenant_id = :tid
+              AND chat_id = :cid
+              AND deleted_at IS NULL
+              AND last_referenced_at IS NOT NULL
+              AND kind != :tr_kind
+              AND last_referenced_at >= NOW() - INTERVAL '{RECENT_WINDOW_SECONDS} seconds'
+            ORDER BY last_referenced_at DESC
+            LIMIT :k
+            """
+        )
+        recent_rows = (await db.execute(recent_q, {
+            "tid": tenant_id, "cid": chat_id, "tr_kind": TOOL_RESULT_KIND,
+            "k": max_artifacts,
+        })).fetchall()
+        for row in recent_rows:
+            if row.id not in selected_ids:
+                selected_ids.append(row.id)
+                if len(selected_ids) >= max_artifacts:
+                    break
 
     # Cap at the per-message budget — semantic hits get priority, recent fills.
     selected_ids = selected_ids[:max_artifacts]
