@@ -553,3 +553,12 @@ async def process_attachment_background(attachment_id: str, tenant_id: str) -> N
         except Exception:
             await db.rollback()
             logger.exception("Attachment background processing failed", extra={"attachment_id": attachment_id})
+            return
+    # After successful processing, promote the attachment to a first-class
+    # Artifact so auto-grounding can surface it on later turns alongside
+    # code/script artifacts. Idempotent — re-processing updates in place.
+    try:
+        from app.services.artifacts.from_attachment import upsert_artifact_from_attachment
+        await upsert_artifact_from_attachment(attachment_id=uuid.UUID(str(attachment_id)))
+    except Exception:
+        logger.exception("Attachment → artifact upsert failed (non-fatal)", extra={"attachment_id": attachment_id})

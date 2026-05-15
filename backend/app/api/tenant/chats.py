@@ -738,6 +738,18 @@ async def send_message_with_files(
                 timed_out.append(attachment_id)
         await db.commit()
 
+        # Promote each successfully-processed attachment to a first-class
+        # Artifact (kind=pdf-document/image/...). Auto-grounding then surfaces
+        # them on later turns same as code artifacts.
+        from app.services.artifacts.from_attachment import upsert_artifact_from_attachment
+        for attachment_id in new_attachment_ids:
+            if attachment_id in timed_out:
+                continue  # background path will do it after processing finishes
+            try:
+                await upsert_artifact_from_attachment(attachment_id=uuid.UUID(attachment_id))
+            except Exception:
+                logger.exception("Attachment → artifact promotion failed (non-fatal)")
+
         for attachment_id in timed_out:
             background_tasks.add_task(process_attachment_background, attachment_id, str(tenant_id))
 
