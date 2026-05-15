@@ -27,6 +27,14 @@ export type AiChatApi = {
   sendMessageWithFiles: (tenantId: string, chatId: string, content: string, files: File[], idempotencyKey?: string, attachmentIds?: string[]) => Promise<Message>;
   listArtifacts: (tenantId: string, chatId: string) => Promise<ArtifactBrief[]>;
   getArtifact: (tenantId: string, chatId: string, artifactId: string) => Promise<ArtifactDetail>;
+  /** Speech-to-text: send a recorded audio blob, get back transcribed text. */
+  transcribeAudio: (tenantId: string, blob: Blob, opts?: { language?: string }) => Promise<{ text: string }>;
+  /** Text-to-speech: get a playable audio Blob from text. */
+  synthesizeAudio: (
+    tenantId: string,
+    text: string,
+    opts?: { voice?: string; format?: 'mp3' | 'wav' | 'ogg' | 'flac' | 'aac' },
+  ) => Promise<Blob>;
   uploadDraftAttachment: (tenantId: string, chatId: string, file: File) => Promise<AttachmentBrief>;
   getDraftAttachment: (tenantId: string, chatId: string, attachmentId: string) => Promise<AttachmentBrief>;
   deleteDraftAttachment: (tenantId: string, chatId: string, attachmentId: string) => Promise<void>;
@@ -147,6 +155,40 @@ export function getAiChatApi(options: GetAiChatApiOptions = {}): AiChatApi {
         method: 'GET',
         authHeaders,
       });
+    },
+    transcribeAudio: async (tenantId, blob, opts) => {
+      const fd = new FormData();
+      // Filename matters for the upstream Whisper server to detect the codec.
+      // Browsers commonly emit `audio/webm;codecs=opus`.
+      const ext = (blob.type.includes('webm') ? 'webm' :
+                   blob.type.includes('ogg')  ? 'ogg'  :
+                   blob.type.includes('mp4')  ? 'm4a'  : 'wav');
+      fd.append('file', blob, `speech.${ext}`);
+      if (opts?.language) fd.append('language', opts.language);
+      const voicePrefix = variant === 'admin'
+        ? `/api/admin/tenants/${tenantId}/voice`
+        : `/api/tenants/${tenantId}/voice`;
+      return jsonFetch<{ text: string }>(u(`${voicePrefix}/stt`), {
+        method: 'POST',
+        body: fd,
+        authHeaders,
+      });
+    },
+    synthesizeAudio: async (tenantId, text, opts) => {
+      const voicePrefix = variant === 'admin'
+        ? `/api/admin/tenants/${tenantId}/voice`
+        : `/api/tenants/${tenantId}/voice`;
+      const res = await fetch(u(`${voicePrefix}/tts`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders },
+        body: JSON.stringify({ text, voice: opts?.voice, format: opts?.format || 'mp3' }),
+      });
+      if (!res.ok) {
+        let detail = '';
+        try { detail = await res.text(); } catch { /* ignore */ }
+        throw new Error(`TTS HTTP ${res.status}: ${detail || res.statusText}`);
+      }
+      return await res.blob();
     },
     getArtifact: async (tenantId, chatId, artifactId) => {
       return jsonFetch<ArtifactDetail>(u(`${prefix(tenantId)}/${chatId}/artifacts/${artifactId}`), {

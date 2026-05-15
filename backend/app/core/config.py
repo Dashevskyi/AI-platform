@@ -21,6 +21,15 @@ class Settings(BaseSettings):
     # fixes 6→б, 0→о substitutions on mixed RU/EN technical content.
     OCR_URL: str = "http://172.10.100.9:8003/v1/ocr/auto"
     OCR_TIMEOUT_SECONDS: float = 30.0
+    # Voice in chat: STT (Whisper) and TTS (openedai-speech / XTTS-v2).
+    # Both are OpenAI-compatible endpoints on the GPU host.
+    STT_URL: str = "http://172.10.100.9:8001/v1/audio/transcriptions"
+    STT_MODEL: str = "Systran/faster-whisper-large-v3"
+    STT_TIMEOUT_SECONDS: float = 60.0
+    TTS_URL: str = "http://172.10.100.9:8002/v1/audio/speech"
+    TTS_MODEL: str = "tts-1-hd"
+    TTS_VOICE: str = "alloy"
+    TTS_TIMEOUT_SECONDS: float = 60.0
     # PDF processing — if a page has fewer than this many characters in its
     # native text layer, treat it as a scan and render → OCR via OCR_URL.
     PDF_PAGE_TEXT_LAYER_MIN_CHARS: int = 50

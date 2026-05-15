@@ -25,6 +25,7 @@ import {
   IconMessageCircle,
   IconInfoCircle,
   IconCode,
+  IconHeadphones,
   IconPencil,
   IconPaperclip,
   IconFile,
@@ -49,6 +50,9 @@ import {
   getAiChatApi,
 } from '../../packages/ai-chat-core';
 import { ArtifactsPanel } from './ArtifactsPanel';
+import { MicButton } from './MicButton';
+import { SpeakButton } from './SpeakButton';
+import { VoiceModeOverlay } from './VoiceModeOverlay';
 import type { AuthMode } from '../../packages/ai-chat-core';
 
 export type AiChatMode = 'admin' | 'end-user';
@@ -183,6 +187,7 @@ export function AiChat({
   const [messageText, setMessageText] = useState('');
   const [showDebug, setShowDebug] = useState(false);
   const [showArtifacts, setShowArtifacts] = useState(false);
+  const [voiceModeOpen, setVoiceModeOpen] = useState(false);
   const [editChatId, setEditChatId] = useState<string | null>(null);
   const [editChatTitle, setEditChatTitle] = useState('');
   // Drafts the user attached to the upcoming message. Files are uploaded to the
@@ -643,6 +648,15 @@ export function AiChat({
                   )}
                 </Group>
                 <Group gap={4}>
+                  <Tooltip label="Голосовой режим">
+                    <ActionIcon
+                      variant={voiceModeOpen ? 'filled' : 'subtle'}
+                      onClick={() => setVoiceModeOpen(true)}
+                      disabled={!activeChatId}
+                    >
+                      <IconHeadphones size={18} />
+                    </ActionIcon>
+                  </Tooltip>
                   <Tooltip label="Артефакты чата">
                     <ActionIcon
                       variant={showArtifacts ? 'filled' : 'subtle'}
@@ -688,6 +702,15 @@ export function AiChat({
                       message={msg}
                       showReasoning={features.showReasoning}
                       showStats={features.showStats}
+                      tenantId={tenantId}
+                      apiBase={apiBase}
+                      mode={mode}
+                      apiKey={apiKey}
+                      authBearer={
+                        mode === 'admin' && typeof localStorage !== 'undefined'
+                          ? (localStorage.getItem('auth_token') || undefined)
+                          : undefined
+                      }
                     />
                   ))}
                   {sendMutation.isPending && (
@@ -810,6 +833,22 @@ export function AiChat({
                         <IconPaperclip size={18} />
                       </ActionIcon>
                     </Tooltip>
+                    <MicButton
+                      tenantId={tenantId}
+                      apiBase={apiBase}
+                      mode={mode}
+                      apiKey={apiKey}
+                      authBearer={
+                        mode === 'admin' && typeof localStorage !== 'undefined'
+                          ? (localStorage.getItem('auth_token') || undefined)
+                          : undefined
+                      }
+                      disabled={sendMutation.isPending || !activeChatId}
+                      onTranscribed={(text) => {
+                        setMessageText((prev) => prev ? (prev.trim() + ' ' + text) : text);
+                        requestAnimationFrame(() => messageInputRef.current?.focus());
+                      }}
+                    />
                   </>
                 )}
                 <Textarea
@@ -868,6 +907,40 @@ export function AiChat({
           </Stack>
         </form>
       </Modal>
+
+      {/* Voice mode overlay */}
+      {voiceModeOpen && activeChatId && (
+        <VoiceModeOverlay
+          tenantId={tenantId}
+          apiBase={apiBase}
+          mode={mode}
+          apiKey={apiKey}
+          authBearer={
+            mode === 'admin' && typeof localStorage !== 'undefined'
+              ? (localStorage.getItem('auth_token') || undefined)
+              : undefined
+          }
+          onSend={async (text: string) => {
+            // Send through the normal send pipeline. We resolve with the
+            // streamed content once the server emits `final`. Falls back to
+            // the next refetched assistant message if streaming is off.
+            const before = serverMessages.length;
+            await send({ content: text });
+            // After `send` resolves, streamingContent has the final text.
+            // Use whichever is non-empty.
+            const finalText = (streamingContent || '').trim();
+            if (finalText) return finalText;
+            // Fallback: wait one tick and pull last assistant from cache.
+            await new Promise((r) => setTimeout(r, 200));
+            for (let i = serverMessages.length - 1; i >= before; i--) {
+              const m = serverMessages[i];
+              if (m.role === 'assistant' && (m.content || '').trim()) return m.content || '';
+            }
+            return '';
+          }}
+          onClose={() => setVoiceModeOpen(false)}
+        />
+      )}
 
       {/* Artifacts panel */}
       {showArtifacts && activeChatId && (
@@ -1042,8 +1115,18 @@ function MessageBubble({
   message,
   showReasoning = true,
   showStats = true,
+  tenantId,
+  apiBase,
+  mode,
+  apiKey,
+  authBearer,
 }: {
   message: Message;
+  tenantId?: string;
+  apiBase?: string;
+  mode?: 'admin' | 'end-user';
+  apiKey?: string;
+  authBearer?: string;
   showReasoning?: boolean;
   showStats?: boolean;
 }) {
@@ -1130,6 +1213,16 @@ function MessageBubble({
             </Text>
             {isAssistant && (
               <Group gap={6} wrap="nowrap">
+                {tenantId && apiBase != null && mode && (
+                  <SpeakButton
+                    tenantId={tenantId}
+                    apiBase={apiBase}
+                    mode={mode}
+                    apiKey={apiKey}
+                    authBearer={authBearer}
+                    text={message.content || ''}
+                  />
+                )}
                 {showStats && (message.total_tokens != null || message.tool_calls_count != null) && (
                   <Text size="xs" c="dimmed">
                     {message.total_tokens != null

@@ -17,6 +17,9 @@ export type { UseAiChatAttachmentsResult } from './useAiChatAttachments';
 export { useAiChatArtifacts } from './useAiChatArtifacts';
 export type { UseAiChatArtifactsResult } from './useAiChatArtifacts';
 
+export { useMediaRecorder } from './useMediaRecorder';
+export type { UseMediaRecorderResult, RecorderState } from './useMediaRecorder';
+
 export { useAiChatSend } from './useAiChatSend';
 export type {
   UseAiChatSendOptions,
