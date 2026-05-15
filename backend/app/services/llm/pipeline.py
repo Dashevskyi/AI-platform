@@ -988,6 +988,11 @@ async def _chat_completion_inner(
     total_completion_tokens = 0
     tool_calls_total = 0
     tool_outputs_current_request: list[dict[str, str]] = []
+    # Per-round token breakdown for multi-tool requests. Each entry is one
+    # LLM round-trip (round=0 = initial call, 1..N = follow-ups after each
+    # tool exec). Exposed via provider_call_done SSE + saved into assistant
+    # message metadata for later inspection in admin Logs tab.
+    round_breakdown: list[dict] = []
 
     start = time.time()
     resp = None
@@ -1031,20 +1036,31 @@ async def _chat_completion_inner(
                 bool(tool_defs),
             ),
         )
+        _round0_latency_ms = int((time.time() - provider_t0) * 1000)
+        _round0_pt = int(resp.prompt_tokens or 0)
+        _round0_ct = int(resp.completion_tokens or 0)
+        round_breakdown.append({
+            "round": 0,
+            "prompt_tokens": _round0_pt,
+            "completion_tokens": _round0_ct,
+            "latency_ms": _round0_latency_ms,
+            "has_tool_calls": bool(resp.tool_calls),
+            "tool_calls_count": len(resp.tool_calls or []) if resp.tool_calls else 0,
+        })
         await _emit("provider_call_done", {
             "round": 0,
-            "latency_ms": int((time.time() - provider_t0) * 1000),
+            "latency_ms": _round0_latency_ms,
             "has_tool_calls": bool(resp.tool_calls),
             "content_chars": len(resp.content or ""),
             "reasoning_chars": len(resp.reasoning or ""),
+            "prompt_tokens": _round0_pt,
+            "completion_tokens": _round0_ct,
         })
         if resp.reasoning:
             await _emit("reasoning", {"round": 0, "text": resp.reasoning})
 
-        if resp.prompt_tokens:
-            total_prompt_tokens += resp.prompt_tokens
-        if resp.completion_tokens:
-            total_completion_tokens += resp.completion_tokens
+        total_prompt_tokens += _round0_pt
+        total_completion_tokens += _round0_ct
 
         # Tool execution loop
         round_num = 0
@@ -1184,20 +1200,31 @@ async def _chat_completion_inner(
                     bool(tool_defs),
                 ),
             )
+            _rN_latency_ms = int((time.time() - provider_t0) * 1000)
+            _rN_pt = int(resp.prompt_tokens or 0)
+            _rN_ct = int(resp.completion_tokens or 0)
+            round_breakdown.append({
+                "round": round_num,
+                "prompt_tokens": _rN_pt,
+                "completion_tokens": _rN_ct,
+                "latency_ms": _rN_latency_ms,
+                "has_tool_calls": bool(resp.tool_calls),
+                "tool_calls_count": len(resp.tool_calls or []) if resp.tool_calls else 0,
+            })
             await _emit("provider_call_done", {
                 "round": round_num,
-                "latency_ms": int((time.time() - provider_t0) * 1000),
+                "latency_ms": _rN_latency_ms,
                 "has_tool_calls": bool(resp.tool_calls),
                 "content_chars": len(resp.content or ""),
                 "reasoning_chars": len(resp.reasoning or ""),
+                "prompt_tokens": _rN_pt,
+                "completion_tokens": _rN_ct,
             })
             if resp.reasoning:
                 await _emit("reasoning", {"round": round_num, "text": resp.reasoning})
 
-            if resp.prompt_tokens:
-                total_prompt_tokens += resp.prompt_tokens
-            if resp.completion_tokens:
-                total_completion_tokens += resp.completion_tokens
+            total_prompt_tokens += _rN_pt
+            total_completion_tokens += _rN_ct
 
         # ANTI-LAZY auto-nudge: model promised an action ("сейчас проверю / подождите")
         # but did not call any tool. Disabled by default for DeepSeek/Qwen2.5 —
