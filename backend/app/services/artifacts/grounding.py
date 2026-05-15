@@ -51,10 +51,13 @@ RECENT_WINDOW_SECONDS = 300
 #   • a tool-result is recent-pulled only inside this much shorter window;
 #   • semantic similarity to the new query still works as usual.
 TOOL_RESULT_KIND = "tool-result"
-# Tool-results are transient: a single ping/snmp snapshot the user might
-# want to format in the very next turn. Outside this brief window they must
-# earn a slot via semantic similarity like any other artifact.
-TOOL_RESULT_VERY_RECENT_SECONDS = 15
+# Recency-only window for tool-results. With nomic-embed-text we needed a
+# very tight 15 s here to defend against off-topic queries (the embedder
+# couldn't distinguish "Thank you" from "оформи таблицу пингов"). bge-m3
+# separates topics by a wide margin, so SIMILARITY_FLOOR is enough on its
+# own — and we extend the recency lane to cover realistic follow-up gaps
+# ("теперь по этим координатам найди PON" ~60 s after a geocode call).
+TOOL_RESULT_VERY_RECENT_SECONDS = 300
 
 # Don't run grounding on trivial queries — search is noisy at short lengths.
 MIN_QUERY_CHARS = 5
