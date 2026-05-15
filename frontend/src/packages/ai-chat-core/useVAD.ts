@@ -107,7 +107,16 @@ export function useVAD(options: UseVADOptions = {}): UseVADResult {
   const cleanup = useCallback(() => {
     stoppedRef.current = true;
     if (rafRef.current !== null) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
-    try { recorderRef.current?.stop(); } catch { /* ignore */ }
+    // Detach the dataavailable handler BEFORE calling .stop(). MediaRecorder
+    // fires a final ondataavailable asynchronously when stopped — if that
+    // landed in the next session's ring it would be mistaken for the init
+    // chunk (it's not — it's the tail of the OLD session, no headers) and
+    // Whisper would 500 on the first segment of the new session.
+    const oldRec = recorderRef.current;
+    if (oldRec) {
+      try { oldRec.ondataavailable = null as unknown as (e: BlobEvent) => void; } catch { /* ignore */ }
+      try { oldRec.stop(); } catch { /* ignore */ }
+    }
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
@@ -149,12 +158,16 @@ export function useVAD(options: UseVADOptions = {}): UseVADResult {
     speechStartTsRef.current = 0;
     onSpeechEndRef.current?.();
     if (slice.length === 0) return;
-    // Prepend the init chunk so the segment is a valid standalone container.
-    // Skip the prepend only if the slice already starts at chunk 0 (rare).
-    const parts: BlobPart[] =
-      initChunkRef.current && slice[0] !== initChunkRef.current
-        ? [initChunkRef.current, ...slice]
-        : slice;
+    if (!initChunkRef.current) {
+      // Init chunk hasn't arrived yet — emitting a header-less blob would
+      // just guarantee a 500 from Whisper. Discard the phrase; the user
+      // hears nothing about it and the next segment in this session will
+      // have init available.
+      return;
+    }
+    const parts: BlobPart[] = slice[0] !== initChunkRef.current
+      ? [initChunkRef.current, ...slice]
+      : slice;
     const blob = new Blob(parts, { type: mimeRef.current });
     if (blob.size > 0) onSegmentRef.current?.(blob);
   }, [opts.minSegmentMs]);

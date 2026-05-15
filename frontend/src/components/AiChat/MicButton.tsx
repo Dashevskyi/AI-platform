@@ -81,7 +81,9 @@ export function MicButton({
       >
         <ActionIcon
           variant={isOpen ? 'filled' : 'light'}
-          color={isSpeaking ? 'red' : isOpen ? 'blue' : undefined}
+          // green = mic open and listening (idle within session)
+          // red   = currently hearing speech (peak ducking)
+          color={isSpeaking ? 'red' : isOpen ? 'green' : undefined}
           size="lg"
           onClick={toggle}
           disabled={disabled || vad.state === 'requesting'}
@@ -105,8 +107,8 @@ export function MicButton({
         </Text>
       )}
       {isOpen && transcribingCount === 0 && (
-        <Text size="xs" c={isSpeaking ? 'red' : 'dimmed'} style={{ marginBottom: 6 }}>
-          {isSpeaking ? '🎙' : '...'}
+        <Text size="xs" c={isSpeaking ? 'red' : 'green'} style={{ marginBottom: 6 }}>
+          {isSpeaking ? '🎙' : '●'}
         </Text>
       )}
     </Group>
