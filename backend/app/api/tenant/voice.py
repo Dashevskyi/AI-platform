@@ -62,11 +62,15 @@ async def speech_to_text(
 
     fname = file.filename or "speech.webm"
     mime = file.content_type or "audio/webm"
+    # Default to tenant-configured (or backend default) language if the
+    # client didn't pass one. Whisper accuracy with a fixed language tag is
+    # noticeably better than auto-detect on ru/uk technical content.
+    effective_lang = (language or "").strip() or settings.STT_LANGUAGE
     try:
         async with httpx.AsyncClient(timeout=settings.STT_TIMEOUT_SECONDS) as client:
             data = {"model": (None, settings.STT_MODEL), "response_format": (None, "json")}
-            if language:
-                data["language"] = (None, language)
+            if effective_lang:
+                data["language"] = (None, effective_lang)
             resp = await client.post(
                 settings.STT_URL,
                 files={"file": (fname, audio_bytes, mime), **data},
@@ -88,6 +92,9 @@ class TTSRequest(BaseModel):
     voice: str | None = None
     # mp3 / wav / flac / opus / aac — passed to upstream as `response_format`.
     format: str = "mp3"
+    # Playback speed multiplier. None → backend default (settings.TTS_SPEED).
+    # OpenAI-spec range is 0.25..4.0; we clamp.
+    speed: float | None = None
 
 
 @router.post("/tts")
@@ -114,11 +121,15 @@ async def text_to_speech(
     mime = {"mp3": "audio/mpeg", "wav": "audio/wav", "flac": "audio/flac",
             "opus": "audio/ogg", "aac": "audio/aac"}.get(fmt, "audio/mpeg")
 
+    speed = body.speed if body.speed is not None else settings.TTS_SPEED
+    # OpenAI-spec range 0.25..4.0; clamp.
+    speed = max(0.25, min(4.0, float(speed)))
     payload = {
         "model": settings.TTS_MODEL,
         "input": text,
         "voice": voice,
         "response_format": fmt,
+        "speed": speed,
     }
     try:
         # Stream the upstream response straight to the browser — no full

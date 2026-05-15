@@ -39,11 +39,12 @@ async def speech_to_text_admin(
         raise HTTPException(status_code=413, detail="Audio too large (max 25 MB)")
     fname = file.filename or "speech.webm"
     mime = file.content_type or "audio/webm"
+    effective_lang = (language or "").strip() or settings.STT_LANGUAGE
     try:
         async with httpx.AsyncClient(timeout=settings.STT_TIMEOUT_SECONDS) as client:
             data = {"model": (None, settings.STT_MODEL), "response_format": (None, "json")}
-            if language:
-                data["language"] = (None, language)
+            if effective_lang:
+                data["language"] = (None, effective_lang)
             resp = await client.post(
                 settings.STT_URL,
                 files={"file": (fname, audio_bytes, mime), **data},
@@ -62,6 +63,7 @@ class TTSRequest(BaseModel):
     text: str
     voice: str | None = None
     format: str = "mp3"
+    speed: float | None = None
 
 
 @router.post("/tts")
@@ -81,11 +83,14 @@ async def text_to_speech_admin(
         fmt = "mp3"
     mime = {"mp3": "audio/mpeg", "wav": "audio/wav", "flac": "audio/flac",
             "opus": "audio/ogg", "aac": "audio/aac"}.get(fmt, "audio/mpeg")
+    speed = body.speed if body.speed is not None else settings.TTS_SPEED
+    speed = max(0.25, min(4.0, float(speed)))
     payload = {
         "model": settings.TTS_MODEL,
         "input": text,
         "voice": voice,
         "response_format": fmt,
+        "speed": speed,
     }
     try:
         client = httpx.AsyncClient(timeout=settings.TTS_TIMEOUT_SECONDS)

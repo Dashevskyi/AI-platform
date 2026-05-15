@@ -44,6 +44,18 @@ SIMILARITY_FLOOR = 0.4
 # zero semantic similarity — the conversation is clearly about it.
 RECENT_WINDOW_SECONDS = 300
 
+# Tool-results are transient: they're a snapshot of one ping/snmp/search call
+# that the user might want to format/restyle in the next turn — but they
+# should NOT be auto-pulled when the user pivots topic ("спасибо", "what's
+# the capital of Japan"). So we apply a stricter rule for kind=tool-result:
+#   • a tool-result is recent-pulled only inside this much shorter window;
+#   • semantic similarity to the new query still works as usual.
+TOOL_RESULT_KIND = "tool-result"
+# Tool-results are transient: a single ping/snmp snapshot the user might
+# want to format in the very next turn. Outside this brief window they must
+# earn a slot via semantic similarity like any other artifact.
+TOOL_RESULT_VERY_RECENT_SECONDS = 15
+
 # Don't run grounding on trivial queries — search is noisy at short lengths.
 MIN_QUERY_CHARS = 5
 
@@ -119,19 +131,22 @@ async def resolve_active_artifacts(
     selected_rows: dict[uuid.UUID, Artifact] = {}
 
     # 1) Semantic top-K (only if we have a query embedding AND there are
-    #    artifacts with embeddings to compare against).
+    #    artifacts with embeddings to compare against). Filter by current
+    #    embedding model so a model-swap backfill in progress doesn't yield
+    #    mismatched-dim vectors that crash the cosine-distance op.
     if qvec is not None:
         qvec_str = _vec_to_pg(qvec)
         sql = sa_text(
             """
             SELECT
-                id,
+                id, kind,
                 1 - (embedding <=> CAST(:qvec AS vector)) AS similarity
             FROM artifacts
             WHERE tenant_id = :tid
               AND chat_id = :cid
               AND deleted_at IS NULL
               AND embedding IS NOT NULL
+              AND embedding_model = :emodel
             ORDER BY embedding <=> CAST(:qvec AS vector)
             LIMIT :k
             """
@@ -140,7 +155,8 @@ async def resolve_active_artifacts(
             "tid": tenant_id,
             "cid": chat_id,
             "qvec": qvec_str,
-            "k": max_artifacts * 2,  # over-fetch then filter by floor
+            "emodel": embed_model,
+            "k": max_artifacts * 2,
         })).fetchall()
         for r in rows:
             if r.similarity is None or r.similarity < SIMILARITY_FLOOR:
@@ -149,26 +165,37 @@ async def resolve_active_artifacts(
             if len(selected_ids) >= max_artifacts:
                 break
 
-    # 2) Recent hot-set (last_referenced_at within window). Always included on
-    #    top of semantic — the chat is clearly about these artifacts.
-    recent_q = (
-        select(Artifact.id)
-        .where(
-            Artifact.tenant_id == tenant_id,
-            Artifact.chat_id == chat_id,
-            Artifact.deleted_at.is_(None),
-            Artifact.last_referenced_at.isnot(None),
-            Artifact.last_referenced_at >= sa_text(
-                f"NOW() - INTERVAL '{RECENT_WINDOW_SECONDS} seconds'"
-            ),
-        )
-        .order_by(Artifact.last_referenced_at.desc())
-        .limit(max_artifacts)
+    # 2) Recent hot-set (last_referenced_at within window).
+    #    - Code/PDF/image artifacts: pure recency — chat is clearly about them.
+    #    - Tool-result artifacts: ONLY pulled by recency if very-recent
+    #      (< TOOL_RESULT_VERY_RECENT_SECONDS, immediate follow-up turn like
+    #      "оформи в таблицу"). Outside that window they must earn their slot
+    #      via the semantic top-K above (with TOOL_RESULT_SEMANTIC_FLOOR).
+    recent_q = sa_text(
+        f"""
+        SELECT id, kind, last_referenced_at
+        FROM artifacts
+        WHERE tenant_id = :tid
+          AND chat_id = :cid
+          AND deleted_at IS NULL
+          AND last_referenced_at IS NOT NULL
+          AND (
+            (kind = :tr_kind  AND last_referenced_at >= NOW() - INTERVAL '{TOOL_RESULT_VERY_RECENT_SECONDS} seconds')
+            OR
+            (kind != :tr_kind AND last_referenced_at >= NOW() - INTERVAL '{RECENT_WINDOW_SECONDS} seconds')
+          )
+        ORDER BY last_referenced_at DESC
+        LIMIT :k
+        """
     )
-    recent_ids = [row[0] for row in (await db.execute(recent_q)).all()]
-    for rid in recent_ids:
-        if rid not in selected_ids:
-            selected_ids.append(rid)
+    recent_rows = (await db.execute(recent_q, {
+        "tid": tenant_id, "cid": chat_id, "tr_kind": TOOL_RESULT_KIND, "k": max_artifacts,
+    })).fetchall()
+    for row in recent_rows:
+        if row.id not in selected_ids:
+            selected_ids.append(row.id)
+            if len(selected_ids) >= max_artifacts:
+                break
 
     # Cap at the per-message budget — semantic hits get priority, recent fills.
     selected_ids = selected_ids[:max_artifacts]
@@ -181,21 +208,24 @@ async def resolve_active_artifacts(
     by_id = {a.id: a for a in artifact_rows}
     ordered = [by_id[aid] for aid in selected_ids if aid in by_id]
 
-    # Touch last_referenced_at so the recency signal reflects real usage.
-    # CRITICAL: use a *separate* session and commit immediately. The pipeline
-    # session stays open for the duration of the (long) LLM call; if we hold
-    # a row-lock on artifacts here, any tool call (get_artifact, version
-    # auto-detect, find_artifacts) that touches the same row deadlocks waiting
-    # for our transaction to release. Touching is a non-critical bookkeeping
-    # write — fire-and-forget on its own session.
-    if ordered:
+    # Touch last_referenced_at for non-tool-result artifacts only.
+    # Tool-results have a fixed lifetime that starts at the tool call — we
+    # MUST NOT renew them on retrieval, otherwise grounding keeps a hot
+    # ping/snmp result eternally fresh and the model can never escape its
+    # "ghost".  Code/script/document artifacts on the other hand should be
+    # touched: an actively edited script is "hotter" than a 4-day-old one.
+    #
+    # Separate session + commit (pipeline session is long-lived; row-locks
+    # here would deadlock any tool that touches the same row).
+    touch_ids = [a.id for a in ordered if a.kind != TOOL_RESULT_KIND]
+    if touch_ids:
         from app.core.database import async_session
         try:
             async with async_session() as touch_db:
                 now = datetime.now(timezone.utc)
                 await touch_db.execute(
                     update(Artifact)
-                    .where(Artifact.id.in_([a.id for a in ordered]))
+                    .where(Artifact.id.in_(touch_ids))
                     .values(last_referenced_at=now)
                 )
                 await touch_db.commit()

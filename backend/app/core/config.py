@@ -30,6 +30,13 @@ class Settings(BaseSettings):
     TTS_MODEL: str = "tts-1-hd"
     TTS_VOICE: str = "alloy"
     TTS_TIMEOUT_SECONDS: float = 60.0
+    # Default speech speed. 1.0 = XTTS-v2's natural pace (feels slow);
+    # 1.15-1.25 sounds natural for ru/uk. Client can override per request.
+    TTS_SPEED: float = 1.2
+    # Default STT language code. Empty string = let Whisper auto-detect.
+    # Fixing to "ru" significantly improves accuracy on ru/uk technical
+    # content vs auto-detect. UI may override per request.
+    STT_LANGUAGE: str = "ru"
     # PDF processing — if a page has fewer than this many characters in its
     # native text layer, treat it as a scan and render → OCR via OCR_URL.
     PDF_PAGE_TEXT_LAYER_MIN_CHARS: int = 50
