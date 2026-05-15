@@ -494,6 +494,15 @@ async def _chat_completion_inner(
             and isinstance(t.config_json.get("function"), dict)
             and t.config_json["function"].get("name")
         }
+        # Builtin tools — the system retrieval/memory/artifacts toolset.
+        # Lives in code (app/services/tools/builtin_registry.py), not in
+        # tenant_tools. Always added on top of whatever tenant tools the
+        # semantic selector chose; new tenants get them automatically.
+        from app.services.tools.builtin_registry import builtin_tool_config_map
+        for _bt_name, _bt_cfg in builtin_tool_config_map().items():
+            # Per-request copy — runtime context is injected below and we
+            # don't want to mutate the registry's singleton dicts.
+            tool_config_map[_bt_name] = dict(_bt_cfg)
         # Inject runtime context (tenant_id, chat_id) into each tool_config so
         # built-in handlers like memory_save can write to the right tenant/chat.
         # Copy is shallow but acceptable — handlers only read _context.
@@ -533,6 +542,10 @@ async def _chat_completion_inner(
             n = fn.get("name") if isinstance(fn, dict) else None
             if n:
                 all_allowed_tools_for_tenant[n] = t.config_json
+        # Builtin tools — system retrieval/memory/artifacts. Always callable.
+        from app.services.tools.builtin_registry import builtin_tool_config_map
+        for _bt_name, _bt_cfg in builtin_tool_config_map().items():
+            all_allowed_tools_for_tenant[_bt_name] = dict(_bt_cfg)
     allowed_tool_names = (
         set(tool_config_map.keys())
         | set(attachment_map.keys())
@@ -598,42 +611,45 @@ async def _chat_completion_inner(
             "KB / get_message."
         )
 
-    if False:  # === [HARDCODED-3] anti-lazy ===
+    if True:  # === [HARDCODED-3] anti-lazy — "не описывай, делай" ===
         system_parts.append(
-            "АНТИ-ЛЕНЬ — ПРАВИЛО АБСОЛЮТНОЕ:\n"
-            "ЗАПРЕЩЕНО писать «выполняю», «проверяю», «запрашиваю», «ищу», «подождите», «сейчас проверю», "
-            "«давай проверим», «найду», «посмотрю» БЕЗ одновременного вызова tool в ЭТОМ ЖЕ ответе. "
-            "Если ты собрался что-то проверить — НЕ описывай намерение, СРАЗУ вызывай tool. Текст про "
-            "«сейчас выполню» допустим ТОЛЬКО как короткое предисловие В ТОМ ЖЕ ответе, где есть tool_call. "
-            "Если намерения вызвать tool нет — отвечай по делу, без обещаний и без «подождите».\n"
-            "Если результат предыдущего tool неудачный (ошибка, пусто, не подошло) — НЕ описывай "
-            "следующий шаг словами, а сразу вызывай следующий tool. Можно цепочкой 2-3 tool_calls подряд.\n"
-            "ID, MAC, серийники, имена клиентов, названия свичей — ВСЕГДА из реального tool-результата. "
-            "НЕ ВЫДУМЫВАЙ и не подставляй «правдоподобные» значения."
+            "## Действие вместо описания\n"
+            "Если для ответа нужен факт из системы — СРАЗУ вызывай tool, без "
+            "предисловий «сейчас проверю / выполню / запрошу». Описание "
+            "намерения без сопровождающего tool_call = пустой ответ.\n"
+            "После неудачного результата tool (ошибка/пусто) — не пиши «попробую "
+            "другой способ», а сразу делай следующий вызов. Цепочка 2-3 tool_calls "
+            "подряд — норма, если задача требует."
         )
 
-    if False:  # === [HARDCODED-4] markdown table tip ===
+    if True:  # === [HARDCODED-4] markdown tables for structured data ===
         system_parts.append(
-            "Если ты возвращаешь несколько однотипных записей или сравниваешь структурированные данные, "
-            "предпочитай компактную markdown-таблицу с колонками через символ '|' вместо сплошного текста. "
-            "Не используй CSV с разделителем ';' как формат ответа в чате, CSV нужен только для копирования или экспорта."
+            "## Формат ответа\n"
+            "Однотипные записи и сравнения — компактной markdown-таблицей "
+            "(колонки через `|`), не сплошным текстом. CSV не используй "
+            "в ответах чата — он только для экспорта."
         )
 
-    if False:  # === [HARDCODED-5] tool context economy ===
+    if True:  # === [HARDCODED-5] tool context economy ===
         system_parts.append(
-            "ЭКОНОМИЯ КОНТЕКСТА при вызове tools: если запрашиваешь данные, у которых заведомо может быть много "
-            "(логи, дерево топологии, события DHCP, история заявок, leases) — ОБЯЗАТЕЛЬНО указывай разумный "
-            "limit (например 20-50) и/или конкретный фильтр (по адресу/клиенту/дате/severity). "
-            "Не запрашивай «все логи» или «всё дерево», если нет явной причины. "
-            "Между вызовами tools старые результаты предыдущих раундов автоматически сжимаются "
-            "до резюме (полностью сохраняются только значения, которые ты упомянул в ответе или последующих вызовах). "
-            "Если позже понадобятся полные данные — повтори tool с теми же параметрами."
+            "## Экономия контекста при вызове tools\n"
+            "Для tools которые могут вернуть много (логи, leases, history, дерево "
+            "топологии, события DHCP, заявки) — обязательно `limit` (20-50) "
+            "и/или фильтр (адрес/клиент/дата/severity). «Все логи» / «всё "
+            "дерево» без причины — нет.\n"
+            "Между раундами старые tool-результаты автоматически сжимаются: "
+            "полностью сохраняются только значения, которые ты упомянул в "
+            "ответе или последующих вызовах. Если полный результат снова "
+            "нужен — повтори tool с теми же аргументами."
         )
 
-    if False:  # === [HARDCODED-6] tool routing hint ===
+    if True:  # === [HARDCODED-6] tool routing hint ===
+        # Active only when a domain route is detected (e.g. PON keywords in
+        # the user query) — emits a stepwise hint telling the model the
+        # correct call order for that domain's tools.
         route_hint = _tool_route_system_hint(tool_route, allowed_tool_names)
         if route_hint:
-            system_parts.append(route_hint)
+            system_parts.append("## " + route_hint)
 
     # Collect long_term memory items from API key and its group (scoped to chats with this key)
     api_key_memory_items: list[str] = []
@@ -927,6 +943,11 @@ async def _chat_completion_inner(
     # Merge tenant tools + attachment search tools only when the request and model support tools.
     all_tool_defs = [_public_tool_def(t.config_json) for t in tools if t.config_json] if tools else []
     all_tool_defs = all_tool_defs + attachment_tool_defs
+    # Builtin tools — system toolset (memory/artifacts/RAG). Always exposed
+    # to the model regardless of semantic budget; lives in code, not DB.
+    if tools_enabled:
+        from app.services.tools.builtin_registry import builtin_tools_for_payload
+        all_tool_defs = builtin_tools_for_payload() + all_tool_defs
 
     if all_tool_defs and tools_enabled:
         tool_defs = trim_tool_definitions(all_tool_defs)
@@ -1112,6 +1133,24 @@ async def _chat_completion_inner(
                 logger.debug(f"[{correlation_id}] Tool result ({len(tool_output)} chars): {tool_output[:200]}")
                 tool_outputs_current_request.append({"tool": func_name, "output": tool_output})
 
+                # Promote successful, substantial tool results to first-class
+                # artifacts. Without this, results die at the end of this round
+                # and the next user turn ("оформи это в таблицу") has nothing
+                # to ground on — leading to hallucinated values.
+                if tool_ok:
+                    try:
+                        from app.services.artifacts.tool_result_capture import capture_tool_result_as_artifact
+                        asyncio.create_task(capture_tool_result_as_artifact(
+                            tenant_id=tenant_id,
+                            chat_id=chat_id,
+                            user_message_id=uuid.UUID(str(user_message_id)) if user_message_id else None,
+                            tool_name=func_name,
+                            arguments=func_args,
+                            output=tool_output or "",
+                        ))
+                    except Exception:
+                        logger.exception("[%s] tool-result capture scheduling failed (non-fatal)", correlation_id)
+
                 # Add tool result to messages (full content for current round) —
                 # provider decides shape (Ollama omits tool_call_id, OpenAI includes it).
                 messages.append(provider.format_tool_result_turn(
@@ -1258,6 +1297,20 @@ async def _chat_completion_inner(
                         "output_tokens": _ct(tool_output or ""),
                     })
                     tool_outputs_current_request.append({"tool": func_name, "output": tool_output})
+                    # Capture successful tool result as Artifact (auto-grounding ready).
+                    if tool_ok:
+                        try:
+                            from app.services.artifacts.tool_result_capture import capture_tool_result_as_artifact
+                            asyncio.create_task(capture_tool_result_as_artifact(
+                                tenant_id=tenant_id,
+                                chat_id=chat_id,
+                                user_message_id=uuid.UUID(str(user_message_id)) if user_message_id else None,
+                                tool_name=func_name,
+                                arguments=func_args,
+                                output=tool_output or "",
+                            ))
+                        except Exception:
+                            logger.exception("[%s] tool-result capture scheduling failed (non-fatal)", correlation_id)
                     messages.append(provider.format_tool_result_turn(
                         tool_call_id=tool_call_id,
                         content=tool_output,
