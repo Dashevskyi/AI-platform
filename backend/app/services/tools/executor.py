@@ -1854,3 +1854,165 @@ async def get_artifact_handler(arguments: dict, tool_config: dict | None = None)
     except Exception as e:
         logger.exception("get_artifact failed")
         return ToolResult(success=False, output="", error=f"get_artifact: {str(e)[:200]}")
+
+
+@register_tool("search_kb")
+async def search_kb_handler(arguments: dict, tool_config: dict | None = None) -> ToolResult:
+    """Semantic search over the tenant's Knowledge Base — wider/looser than
+    the auto-grounded KB block. Use when the auto-grounded excerpts are off
+    or absent. Returns short summaries with doc title + source + relevance."""
+    import uuid as _uuid
+    from sqlalchemy import select
+    from app.core.database import async_session
+    from app.core.config import settings as app_settings
+    from app.models.tenant_shell_config import TenantShellConfig
+    from app.providers.factory import get_provider
+    from app.services.kb.embedder import search_kb_chunks
+
+    ctx = (tool_config or {}).get("_context") or {}
+    tenant_id_s = ctx.get("tenant_id")
+    if not tenant_id_s:
+        return ToolResult(success=False, output="", error="search_kb: tenant context missing")
+
+    query = (arguments.get("query") or "").strip()
+    if not query:
+        return ToolResult(success=False, output="", error="search_kb: 'query' is required")
+    limit = max(1, min(int(arguments.get("limit") or 5), 15))
+
+    try:
+        async with async_session() as db:
+            cfg = (await db.execute(
+                select(TenantShellConfig).where(TenantShellConfig.tenant_id == _uuid.UUID(tenant_id_s))
+            )).scalar_one_or_none()
+            if not cfg or not cfg.embedding_model_name:
+                return ToolResult(success=False, output="", error="search_kb: no embedding_model_name configured")
+            if not cfg.knowledge_base_enabled:
+                return ToolResult(success=False, output="", error="search_kb: KB disabled for this tenant")
+            provider = get_provider("ollama", app_settings.OLLAMA_BASE_URL or "http://localhost:11434")
+            chunks = await search_kb_chunks(
+                tenant_id=tenant_id_s,
+                query=query,
+                db=db,
+                provider=provider,
+                embedding_model=cfg.embedding_model_name,
+                max_results=limit,
+            )
+        if not chunks:
+            return ToolResult(success=True, output=f"(в KB ничего не найдено по запросу: {query!r})")
+
+        MAX_CONTENT_CHARS = 600
+        lines = [f"Найдено {len(chunks)} фрагмент(ов) в KB:"]
+        for c in chunks:
+            doc = getattr(c, "doc_title", None) or "(без названия)"
+            src = getattr(c, "source_url", None) or ""
+            src_type = getattr(c, "source_type", None) or "manual"
+            content = (c.content or "").strip()
+            if len(content) > MAX_CONTENT_CHARS:
+                content = content[:MAX_CONTENT_CHARS].rstrip() + " …"
+            line = f"- [{doc}] ({src_type})"
+            if src:
+                line += f" src: {src}"
+            line += f"\n  {content}"
+            lines.append(line)
+        return ToolResult(success=True, output="\n".join(lines))
+    except Exception as e:
+        logger.exception("search_kb failed")
+        return ToolResult(success=False, output="", error=f"search_kb: {str(e)[:200]}")
+
+
+@register_tool("recall_memory")
+async def recall_memory_handler(arguments: dict, tool_config: dict | None = None) -> ToolResult:
+    """Semantic search over the tenant's memory_entries (user-saved facts).
+    Pinned items already live in the system prompt; use this to look up
+    everything else by topic. Returns short list with id+content+type."""
+    import uuid as _uuid
+    from sqlalchemy import select, text as sa_text
+    from app.core.database import async_session
+    from app.core.config import settings as app_settings
+    from app.models.tenant_shell_config import TenantShellConfig
+    from app.providers.factory import get_provider
+
+    ctx = (tool_config or {}).get("_context") or {}
+    tenant_id_s = ctx.get("tenant_id")
+    chat_id_s = ctx.get("chat_id")
+    if not tenant_id_s:
+        return ToolResult(success=False, output="", error="recall_memory: tenant context missing")
+
+    query = (arguments.get("query") or "").strip()
+    if not query:
+        return ToolResult(success=False, output="", error="recall_memory: 'query' is required")
+    limit = max(1, min(int(arguments.get("limit") or 5), 20))
+    scope = (arguments.get("scope") or "chat").strip()
+    memory_type = (arguments.get("memory_type") or "").strip().lower() or None
+
+    try:
+        async with async_session() as db:
+            cfg = (await db.execute(
+                select(TenantShellConfig).where(TenantShellConfig.tenant_id == _uuid.UUID(tenant_id_s))
+            )).scalar_one_or_none()
+            if not cfg or not cfg.embedding_model_name:
+                return ToolResult(success=False, output="", error="recall_memory: no embedding_model_name configured")
+            # cross-chat scope guarded by the same flag as recall_chat
+            if scope == "tenant" and not getattr(cfg, "recall_cross_chat_enabled", False):
+                scope = "chat"
+
+            provider = get_provider("ollama", app_settings.OLLAMA_BASE_URL or "http://localhost:11434")
+            vectors = await provider.embed(query, cfg.embedding_model_name)
+            if not vectors:
+                return ToolResult(success=False, output="", error="recall_memory: embedding failed")
+            qvec_str = "[" + ",".join(f"{float(x):.6f}" for x in vectors[0]) + "]"
+
+            params: dict = {"tid": _uuid.UUID(tenant_id_s), "qvec": qvec_str, "limit": limit}
+            where_clauses = [
+                "tenant_id = :tid",
+                "deleted_at IS NULL",
+                "embedding IS NOT NULL",
+                # Pinned entries are already in the system prompt — no point
+                # returning them here (duplicate context + token bloat).
+                "is_pinned = false",
+            ]
+            if scope == "chat" and chat_id_s:
+                params["cid"] = _uuid.UUID(chat_id_s)
+                # chat-scope: items scoped to this chat OR tenant-wide (chat_id IS NULL)
+                where_clauses.append("(chat_id = :cid OR chat_id IS NULL)")
+            if memory_type:
+                params["mtype"] = memory_type
+                where_clauses.append("lower(memory_type) = :mtype")
+
+            where_sql = " AND ".join(where_clauses)
+            sql = sa_text(f"""
+                SELECT
+                    id::text AS id,
+                    memory_type,
+                    content,
+                    chat_id::text AS chat_id,
+                    created_at,
+                    1 - (embedding <=> CAST(:qvec AS vector)) AS similarity
+                FROM memory_entries
+                WHERE {where_sql}
+                ORDER BY embedding <=> CAST(:qvec AS vector)
+                LIMIT :limit
+            """)
+            rows = (await db.execute(sql, params)).fetchall()
+
+        if not rows:
+            return ToolResult(success=True, output=f"(в памяти ничего не найдено: query={query!r}, scope={scope})")
+        # Per-row content cap — long blobs are abusive in a tool response.
+        # Caller can re-query with a tighter query or open the entry by id.
+        MAX_CONTENT_CHARS = 300
+        lines = [f"Найдено {len(rows)} записей в памяти (scope={scope}, без pinned):"]
+        for r in rows:
+            sim = f"sim={r.similarity:.2f}" if r.similarity is not None else "sim=—"
+            scope_tag = "tenant" if r.chat_id is None else "chat"
+            ts = r.created_at.strftime("%Y-%m-%d") if r.created_at else "—"
+            content = (r.content or "").strip()
+            if len(content) > MAX_CONTENT_CHARS:
+                content = content[:MAX_CONTENT_CHARS].rstrip() + " …"
+            lines.append(
+                f"- [{r.id}] [{r.memory_type}|{scope_tag}] {sim} {ts}\n"
+                f"  {content}"
+            )
+        return ToolResult(success=True, output="\n".join(lines))
+    except Exception as e:
+        logger.exception("recall_memory failed")
+        return ToolResult(success=False, output="", error=f"recall_memory: {str(e)[:200]}")

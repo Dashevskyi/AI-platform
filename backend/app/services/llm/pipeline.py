@@ -579,10 +579,23 @@ async def _chat_completion_inner(
             "Технические термины (IP, MAC, DHCP, VLAN, BGP) оставляй как есть."
         )
 
-    if False:  # === [HARDCODED-2] anti-hallucination ===
+    if True:  # === [HARDCODED-2] anti-hallucination ===
         system_parts.append(
-            "Никогда не утверждай, что ты что-то проверил, измерил, выполнил команду или получил факт из файла/сети, "
-            "если у тебя нет прямого результата из инструмента, базы знаний или приложенного документа."
+            "## Источники истины\n"
+            "Конкретные значения (IP, MAC, числа, имена, идентификаторы, версии, цены, "
+            "коды ошибок, фрагменты кода) бери ТОЛЬКО из явных источников:\n"
+            "- результат вызова tool в этом ответе;\n"
+            "- блок «Активные артефакты» в текущем сообщении (artifacts.content);\n"
+            "- блок «Knowledge Base» в system;\n"
+            "- блок «Закреплённая память»;\n"
+            "- содержимое прикреплённого к этому сообщению файла.\n\n"
+            "Если значения нет ни в одном из этих источников — НЕ выдумывай. "
+            "Скажи прямо: «у меня нет данных», «не вижу этого в источниках», "
+            "«нужно вызвать tool/посмотреть документ». Допустимо предложить "
+            "способ узнать (какой tool вызвать, какой документ открыть).\n\n"
+            "Резюме в Recent conversation НЕ источник конкретных значений — оно "
+            "содержит только тему обмена. За конкретикой иди в артефакт / память / "
+            "KB / get_message."
         )
 
     if False:  # === [HARDCODED-3] anti-lazy ===
@@ -658,14 +671,30 @@ async def _chat_completion_inner(
     _memory_block_text: str | None = None
     _kb_block_text: str | None = None
     _attachments_block_text: str | None = None
-    if False:  # === [BLOCK-MEMORY-B] memory_entries from DB ===
-        if memory_entries or api_key_memory_items:
-            mem_lines = [f"- [long_term] {item}" for item in api_key_memory_items]
-            mem_lines += [f"- [{m.memory_type}] {m.content}" for m in memory_entries]
-            _memory_block_text = "Memory:\n" + "\n".join(mem_lines)
+    if True:  # === [BLOCK-MEMORY-B] PINNED memory entries from DB ===
+        # Only pinned entries land here — they're explicit "always remember
+        # this" facts. Non-pinned entries stay out of the system prompt and
+        # are reachable on-demand via the `recall_memory` tool (semantic
+        # search). This keeps the system block from ballooning as memory
+        # grows, and avoids the self-poisoning risk where every save_memory
+        # entry permanently lives in attention.
+        pinned_only = [m for m in memory_entries if getattr(m, "is_pinned", False)]
+        if pinned_only:
+            mem_lines = [f"- [{m.memory_type}] {m.content}" for m in pinned_only]
+            _memory_block_text = (
+                "## Закреплённая память (always-on facts)\n"
+                + "\n".join(mem_lines)
+                + "\n\nДля поиска по остальной памяти — вызови tool `recall_memory(query=...)`."
+            )
             system_parts.append(_memory_block_text)
 
-    if False:  # === [BLOCK-KB] knowledge base excerpts ===
+    if True:  # === [BLOCK-KB] knowledge base excerpts ===
+        # Semantic top-K KB chunks for the current user message. These are
+        # background domain knowledge — not the user's artifacts. Stays in
+        # `system` (not user-message) because it's reference material, not
+        # something we expect the model to edit or treat as the subject.
+        # Empty/low-quality result → nothing emitted; modèle can fall back to
+        # the `search_kb` tool for a wider query.
         if kb_chunks:
             kb_parts = []
             for c in kb_chunks:
@@ -677,8 +706,10 @@ async def _chat_completion_inner(
                 entry += f"\n{c.content}"
                 kb_parts.append(entry)
             _kb_block_text = (
-                "Knowledge Base (relevant excerpts):\n---\n"
+                "## Knowledge Base (релевантные выдержки)\n"
                 + "\n---\n".join(kb_parts)
+                + "\n\nЭто справочные материалы. Если нужного нет — вызови `search_kb(query=...)` "
+                + "с другой формулировкой."
             )
             system_parts.append(_kb_block_text)
 
@@ -2686,18 +2717,25 @@ async def _select_relevant_tools(
             selected = []
             selection_method = "fallback-empty"
 
-    # Merge pinned + selected, preserve order, cap to MAX_TOOLS_PER_REQUEST
+    # Pinned tools are "system-essentials" (memory/artifacts/RAG helpers).
+    # They go in ABOVE the budget — budget only constrains the non-pinned
+    # semantic/route/keyword selection. Otherwise pinned starves out the
+    # actually-relevant tools for the user query (observed: 7 pinned filled
+    # the 8-slot Qwen budget and squeezed out `ping` for a network query).
     seen_ids: set = set()
-    merged: list = []
-    for t in [*pinned, *selected]:
-        if t.id in seen_ids:
+    selected_non_pinned: list = []
+    for t in selected:
+        if t.id in pinned_ids or t.id in seen_ids:
             continue
         seen_ids.add(t.id)
-        merged.append(t)
-    final = merged[:budget]
+        selected_non_pinned.append(t)
+    # Budget cap applies only to non-pinned. Final payload = pinned + capped.
+    capped_non_pinned = selected_non_pinned[:budget]
+    final: list = [*pinned, *capped_non_pinned]
     logger.info(
-        "tool selection: tenant=%s total=%d pinned=%d %s -> %d/%d kept",
-        tenant_id, len(all_tools), len(pinned), selection_method, len(final), budget,
+        "tool selection: tenant=%s total=%d pinned=%d %s -> %d non-pinned kept (budget=%d) + %d pinned = %d total",
+        tenant_id, len(all_tools), len(pinned), selection_method,
+        len(capped_non_pinned), budget, len(pinned), len(final),
     )
     return final
 
