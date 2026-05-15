@@ -55,16 +55,16 @@ TOOL_RESULT_KIND = "tool-result"
 # protection against off-topic pulls (e.g. "спасибо" pulling the ping
 # table) is now in the similarity floor below.
 TOOL_RESULT_VERY_RECENT_SECONDS = 300
-# Stricter similarity floor for tool-result kind specifically. The labels
-# we generate ("Результат ping(...)", "Результат pon_nearby(...)") contain
-# a tool name token; bge-m3 gives that token mild similarity (~0.40-0.45)
-# to many unrelated Russian utterances, so the generic 0.40 floor lets
-# off-topic "спасибо" through. Empirically:
-#   "спасибо"                       → ping/pon_nearby ~0.44
-#   "оформи в таблицу пинги"        → ping ~0.55
-#   "поиск PON 500м от координат"   → pon_nearby ~0.65
-# A floor of 0.50 cleanly separates relevant from polite filler.
-TOOL_RESULT_SEMANTIC_FLOOR = 0.50
+# Auto-generated labels "Результат ping(ips=[13 items])" don't carry enough
+# semantic content for bge-m3 to clearly separate relevant follow-ups from
+# off-topic chatter on SHORT Russian queries — "спасибо" and "оформи в
+# таблицу пинги" both land at ~0.43 against the same ping result. Until
+# tool-result labels are LLM-summarised (TODO #99 'LLM-generated labels
+# for tool-result artifacts'), we keep the default floor for them too and
+# accept the trade-off: occasionally an off-topic short query pulls a
+# recent tool result into context (model is good enough to ignore irrelevant
+# context, and it doesn't poison anything — content is verbatim).
+TOOL_RESULT_SEMANTIC_FLOOR = SIMILARITY_FLOOR
 
 # Don't run grounding on trivial queries — search is noisy at short lengths.
 MIN_QUERY_CHARS = 5
