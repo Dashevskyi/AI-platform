@@ -908,10 +908,11 @@ export function AiChat({
         </form>
       </Modal>
 
-      {/* Voice mode overlay */}
+      {/* Voice mode overlay — streams TTS sentence-by-sentence */}
       {voiceModeOpen && activeChatId && (
         <VoiceModeOverlay
           tenantId={tenantId}
+          chatId={activeChatId}
           apiBase={apiBase}
           mode={mode}
           apiKey={apiKey}
@@ -920,24 +921,7 @@ export function AiChat({
               ? (localStorage.getItem('auth_token') || undefined)
               : undefined
           }
-          onSend={async (text: string) => {
-            // Send through the normal send pipeline. We resolve with the
-            // streamed content once the server emits `final`. Falls back to
-            // the next refetched assistant message if streaming is off.
-            const before = serverMessages.length;
-            await send({ content: text });
-            // After `send` resolves, streamingContent has the final text.
-            // Use whichever is non-empty.
-            const finalText = (streamingContent || '').trim();
-            if (finalText) return finalText;
-            // Fallback: wait one tick and pull last assistant from cache.
-            await new Promise((r) => setTimeout(r, 200));
-            for (let i = serverMessages.length - 1; i >= before; i--) {
-              const m = serverMessages[i];
-              if (m.role === 'assistant' && (m.content || '').trim()) return m.content || '';
-            }
-            return '';
-          }}
+          onMessageSent={() => { onMessageSent?.(); }}
           onClose={() => setVoiceModeOpen(false)}
         />
       )}
