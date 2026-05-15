@@ -40,7 +40,8 @@ cp ../.env.example ../.env
 PYTHONPATH=. alembic upgrade head
 
 # Запуск
-PYTHONPATH=. uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+# Для замеров latency и стабильной работы с локальным Ollama лучше без --reload
+PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
 Backend доступен: http://localhost:8000
@@ -51,10 +52,21 @@ API docs: http://localhost:8000/docs
 ```bash
 cd frontend
 npm install
-npm run dev
+VITE_BACKEND_TARGET=http://127.0.0.1:8000 npm run dev
 ```
 
 Frontend доступен: http://localhost:5173
+
+Если порт `8000` в вашей системе даёт аномальную задержку на `POST /messages`,
+можно поднять backend на другом порту, например `8001`, и направить proxy туда:
+
+```bash
+cd backend
+PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8001
+
+cd ../frontend
+VITE_BACKEND_TARGET=http://127.0.0.1:8001 npm run dev
+```
 
 ### 4. Вход в систему
 
@@ -99,6 +111,17 @@ frontend/
 
 ## Провайдеры LLM
 
-- **Ollama** — локальные модели (по умолчанию qwen2.5:32b)
-- **OpenAI-compatible** — любой OpenAI API-совместимый сервис
+- **Ollama** — локальные модели через Ollama
+- **OpenAI-compatible** — любой OpenAI API-совместимый сервис, включая `vLLM`
 - **Deepseek-compatible** — Deepseek API
+
+Для `Qwen 2.5 32B` на отдельном GPU-host рекомендованный shell config:
+
+```json
+{
+  "provider_type": "openai_compatible",
+  "provider_base_url": "http://172.10.100.9:8000/v1",
+  "model_name": "qwen2.5-32b"
+}
+```
+# AI-platform
