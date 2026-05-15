@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Stack, Text, ActionIcon, Group, Tooltip, Loader } from '@mantine/core';
 import { IconMicrophone, IconMicrophoneOff, IconX, IconVolume, IconPlayerStop } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
+import { useQueryClient } from '@tanstack/react-query';
 import { useVAD, getAiChatApi } from '../../packages/ai-chat-core';
 import type { AuthMode } from '../../packages/ai-chat-core';
 
@@ -61,6 +62,24 @@ export function VoiceModeOverlay({
     return getAiChatApi({ variant: mode === 'admin' ? 'admin' : 'tenant', apiBase, auth });
   }, [mode, apiBase, apiKey, authBearer]);
 
+  const queryClient = useQueryClient();
+
+  /**
+   * Voice mode bypasses useAiChatSend and calls sendMessageStream directly,
+   * so it never triggers the hook's invalidateAfterSend. The user/assistant
+   * turns ARE persisted server-side, but the host AiChat's react-query
+   * caches keep stale data and the messages never show up in the chat
+   * timeline. Match the same invalidation set used by useAiChatSend.
+   */
+  const invalidateChatCaches = () => {
+    queryClient.invalidateQueries({ queryKey: ['ai-chat-core', 'messages', tenantId, chatId, mode] });
+    queryClient.invalidateQueries({ queryKey: ['ai-chat-core', 'attachments', tenantId, chatId, mode] });
+    queryClient.invalidateQueries({ queryKey: ['ai-chat-core', 'list', tenantId, mode] });
+    queryClient.invalidateQueries({ queryKey: ['tenants', tenantId, 'chats', chatId, 'messages'] });
+    queryClient.invalidateQueries({ queryKey: ['tenants', tenantId, 'chats', chatId, 'attachments'] });
+    queryClient.invalidateQueries({ queryKey: ['tenants', tenantId, 'chats', 'list'] });
+  };
+
   const [phase, setPhase] = useState<Phase>('idle');
   const [transcript, setTranscript] = useState<string>('');
   const [assistantText, setAssistantText] = useState<string>('');
@@ -72,11 +91,17 @@ export function VoiceModeOverlay({
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const llmStreamingRef = useRef(false);
+  // Hard kill-switch — set on closeAll(). Every async callback (TTS resolve,
+  // queue loop, LLM stream callback) bails when this flips. Without it,
+  // TTS requests in flight when the user closes the overlay still resolve
+  // and push audio into the queue, which keeps playing after dismissal.
+  const closedRef = useRef(false);
 
   const stopAudio = () => {
     audioQueueRef.current = [];
     if (currentAudioRef.current) {
       try { currentAudioRef.current.pause(); } catch { /* ignore */ }
+      try { currentAudioRef.current.src = ''; } catch { /* ignore */ }
       currentAudioRef.current = null;
     }
     for (const u of urlsRef.current) {
@@ -93,10 +118,11 @@ export function VoiceModeOverlay({
   };
 
   const playQueueLoop = async () => {
-    if (queueRunningRef.current) return;
+    if (queueRunningRef.current || closedRef.current) return;
     queueRunningRef.current = true;
     setPhase('speaking');
     while (audioQueueRef.current.length > 0) {
+      if (closedRef.current) { audioQueueRef.current = []; break; }
       const audio = audioQueueRef.current.shift()!;
       currentAudioRef.current = audio;
       await new Promise<void>((resolve) => {
@@ -105,18 +131,20 @@ export function VoiceModeOverlay({
         audio.play().catch(() => resolve());
       });
       currentAudioRef.current = null;
+      if (closedRef.current) break;
     }
     queueRunningRef.current = false;
-    if (!llmStreamingRef.current) {
-      // Both LLM stream and TTS queue empty → back to plain listening.
+    if (!llmStreamingRef.current && !closedRef.current) {
       setPhase('listening');
     }
   };
 
   const enqueueSpeech = async (sentence: string) => {
-    if (!sentence.trim()) return;
+    if (!sentence.trim() || closedRef.current) return;
     try {
       const blob = await api.synthesizeAudio(tenantId, sentence);
+      // Overlay may have closed while the TTS request was in flight.
+      if (closedRef.current) return;
       const url = URL.createObjectURL(blob);
       urlsRef.current.push(url);
       const audio = new Audio(url);
@@ -163,7 +191,7 @@ export function VoiceModeOverlay({
         chatId,
         { content: userText },
         (eventType, payload) => {
-          if (controller.signal.aborted) return;
+          if (controller.signal.aborted || closedRef.current) return;
           if (eventType === 'content_chunk' && typeof payload.text === 'string') {
             buffer += payload.text as string;
             setAssistantText(buffer);
@@ -186,7 +214,12 @@ export function VoiceModeOverlay({
         },
         controller.signal,
       );
-      onMessageSent?.();
+      // Round-trip persisted server-side; refresh local caches so the
+      // user/assistant turns show up in the underlying chat timeline.
+      if (!closedRef.current) {
+        invalidateChatCaches();
+        onMessageSent?.();
+      }
     } catch (e) {
       if (!controller.signal.aborted) {
         notifications.show({ title: 'Voice', message: (e as Error).message || '', color: 'red' });
@@ -236,9 +269,12 @@ export function VoiceModeOverlay({
   }, [vad.state, vad.error, phase]);
 
   const closeAll = () => {
-    vad.stop();
+    // Flip the kill-switch FIRST so any in-flight TTS/LLM callbacks bail
+    // before they push more audio into the queue.
+    closedRef.current = true;
     abortLLM();
     stopAudio();
+    vad.stop();
     onClose();
   };
 
