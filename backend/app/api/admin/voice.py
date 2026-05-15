@@ -25,6 +25,11 @@ class STTResponse(BaseModel):
     text: str
 
 
+# Drop Whisper-large-v3 hallucinations on silence (it falls back to YouTube
+# subtitle boilerplate). See app/api/tenant/voice.py for the rationale.
+from app.api.tenant.voice import _is_hallucination  # noqa: E402
+
+
 @router.post("/stt", response_model=STTResponse)
 async def speech_to_text_admin(
     tenant_id: uuid.UUID,
@@ -50,7 +55,11 @@ async def speech_to_text_admin(
                 files={"file": (fname, audio_bytes, mime), **data},
             )
             resp.raise_for_status()
-            return STTResponse(text=(resp.json().get("text") or "").strip())
+            text = (resp.json().get("text") or "").strip()
+            if _is_hallucination(text):
+                logger.info("STT dropped hallucination: %r", text[:200])
+                return STTResponse(text="")
+            return STTResponse(text=text)
     except httpx.HTTPStatusError as e:
         logger.error("STT HTTP %s: %s", e.response.status_code, (e.response.text or "")[:300])
         raise HTTPException(status_code=502, detail=f"STT upstream error {e.response.status_code}")

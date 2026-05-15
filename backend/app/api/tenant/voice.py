@@ -44,6 +44,37 @@ class STTResponse(BaseModel):
     text: str
 
 
+# Whisper large-v3 was trained on a lot of YouTube-subtitle data and falls
+# back to common subtitle boilerplate when given silence, near-silence, or
+# unparseable noise. These show up as "valid" transcripts and would otherwise
+# get sent to the LLM as if the user said them. List grows over time as new
+# hallucinations are spotted in the wild — match case-insensitively.
+import re as _re
+_HALLUCINATION_PATTERNS = [
+    _re.compile(p, _re.IGNORECASE)
+    for p in (
+        r"\bсубтитры\s+(?:сделал|подготовил|создал|перевод)\b",
+        r"\bdimatorzok\b",
+        r"продолжение\s+следует",
+        r"спасибо\s+за\s+просмотр",
+        r"подпис(ывайтесь|ка)\s+на\s+канал",
+        r"редактор\s+субтитров",
+        r"корректор\s+(?:а\.|субтитров)",
+        r"\bthanks?\s+for\s+watching\b",
+        r"\bplease\s+(?:like\s+and\s+)?subscribe\b",
+        r"\bcorrect(?:ion)?s?\s+by\b",
+    )
+]
+
+
+def _is_hallucination(text: str) -> bool:
+    """Cheap check: Whisper boilerplate fired on silence/noise. The model
+    rarely produces these for real speech, so dropping them is safe."""
+    if not text or len(text.strip()) < 2:
+        return False
+    return any(p.search(text) for p in _HALLUCINATION_PATTERNS)
+
+
 @router.post("/stt", response_model=STTResponse)
 async def speech_to_text(
     tenant_id: uuid.UUID,
@@ -78,6 +109,9 @@ async def speech_to_text(
             resp.raise_for_status()
             payload = resp.json()
             text = (payload.get("text") or "").strip()
+            if _is_hallucination(text):
+                logger.info("STT dropped hallucination: %r", text[:200])
+                return STTResponse(text="")
             return STTResponse(text=text)
     except httpx.HTTPStatusError as e:
         logger.error("STT HTTP %s: %s", e.response.status_code, (e.response.text or "")[:300])

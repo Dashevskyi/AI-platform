@@ -54,7 +54,10 @@ const DEFAULTS = {
   endLevel: 0.04,
   activationMs: 120,
   silenceMs: 1500,
-  minSegmentMs: 300,
+  // 600ms: shorter than that and Whisper large-v3 starts hallucinating
+  // YouTube-subtitle boilerplate (Spanish/Russian common phrases) on the
+  // sub-decodable audio. The bigger window costs at most ~300ms of UX.
+  minSegmentMs: 600,
 };
 
 export function useVAD(options: UseVADOptions = {}): UseVADResult {
