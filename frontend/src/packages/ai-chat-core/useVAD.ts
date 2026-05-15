@@ -73,6 +73,11 @@ export function useVAD(options: UseVADOptions = {}): UseVADResult {
   // On segment emit we slice by speech-start ts.
   type Chunk = { ts: number; data: Blob };
   const chunksRef = useRef<Chunk[]>([]);
+  // The very FIRST chunk MediaRecorder emits carries the container init
+  // (EBML headers for WebM, ftyp/moov for MP4). Subsequent chunks are
+  // media-only. We MUST prepend it to every segment blob — Whisper rejects
+  // a header-less blob with HTTP 500.
+  const initChunkRef = useRef<Blob | null>(null);
 
   // VAD state.
   const speechActiveRef = useRef(false);
@@ -114,6 +119,7 @@ export function useVAD(options: UseVADOptions = {}): UseVADResult {
     analyserRef.current = null;
     ctxRef.current = null;
     chunksRef.current = [];
+    initChunkRef.current = null;
     speechActiveRef.current = false;
     setLevel(0);
   }, []);
@@ -143,7 +149,13 @@ export function useVAD(options: UseVADOptions = {}): UseVADResult {
     speechStartTsRef.current = 0;
     onSpeechEndRef.current?.();
     if (slice.length === 0) return;
-    const blob = new Blob(slice, { type: mimeRef.current });
+    // Prepend the init chunk so the segment is a valid standalone container.
+    // Skip the prepend only if the slice already starts at chunk 0 (rare).
+    const parts: BlobPart[] =
+      initChunkRef.current && slice[0] !== initChunkRef.current
+        ? [initChunkRef.current, ...slice]
+        : slice;
+    const blob = new Blob(parts, { type: mimeRef.current });
     if (blob.size > 0) onSegmentRef.current?.(blob);
   }, [opts.minSegmentMs]);
 
@@ -218,6 +230,11 @@ export function useVAD(options: UseVADOptions = {}): UseVADResult {
       recorderRef.current = rec;
       rec.ondataavailable = (e) => {
         if (e.data && e.data.size > 0) {
+          // Capture the init chunk on first arrival — required for every
+          // future segment blob (webm/mp4 wants the header in front).
+          if (initChunkRef.current === null) {
+            initChunkRef.current = e.data;
+          }
           chunksRef.current.push({ ts: performance.now(), data: e.data });
           // Cap ring at ~30 s worth of chunks (250 ms × 120) so memory doesn't
           // grow during long silent stretches.
