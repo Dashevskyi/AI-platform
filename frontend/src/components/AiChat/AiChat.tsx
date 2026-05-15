@@ -355,8 +355,10 @@ export function AiChat({
     });
     try {
       await send({ content: text, attachmentIds });
-      setMessageText('');
-      setDrafts([]);
+      // NB: messageText and drafts are already cleared by handleSend() BEFORE
+      // the await — clearing them again here wipes whatever the user typed
+      // while the assistant was generating its reply (which can take
+      // seconds on tool-heavy requests).
       requestAnimationFrame(() => {
         messageInputRef.current?.focus();
       });
