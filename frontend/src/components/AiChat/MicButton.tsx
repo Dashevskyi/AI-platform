@@ -1,8 +1,8 @@
-import { useState, useMemo, useEffect } from 'react';
-import { ActionIcon, Tooltip, Loader, Text } from '@mantine/core';
-import { IconMicrophone, IconMicrophoneOff, IconPlayerStop } from '@tabler/icons-react';
+import { useEffect, useMemo, useState } from 'react';
+import { ActionIcon, Tooltip, Loader, Text, Group } from '@mantine/core';
+import { IconMicrophone, IconMicrophoneOff } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
-import { useMediaRecorder, getAiChatApi } from '../../packages/ai-chat-core';
+import { useVAD, getAiChatApi } from '../../packages/ai-chat-core';
 import type { AuthMode } from '../../packages/ai-chat-core';
 
 type Props = {
@@ -16,14 +16,13 @@ type Props = {
 };
 
 /**
- * MicButton — hold-to-record + auto-transcribe.
+ * MicButton — click toggles a continuous mic session. While listening, the
+ * VAD splits speech into phrases automatically (pause ≥ silenceMs ends one),
+ * each phrase is transcribed via /voice/stt and appended to the input. No
+ * stop button — user clicks the mic again to close the session.
  *
- * Click toggles recording. The duration counter and a tiny level dot show
- * the user that the mic is live. Click again → stops → posts the blob to
- * `/voice/stt` → calls `onTranscribed(text)`.
- *
- * On error (denied permission, browser unsupported) a notification appears
- * and the button reverts to idle.
+ * This is push-to-talk-free: speak, pause, speak again — each phrase shows
+ * up in the input as a separate burst. Reduces friction vs hold-and-release.
  */
 export function MicButton({
   tenantId, apiBase, mode, apiKey, authBearer, disabled, onTranscribed,
@@ -35,79 +34,81 @@ export function MicButton({
     return getAiChatApi({ variant: mode === 'admin' ? 'admin' : 'tenant', apiBase, auth });
   }, [mode, apiBase, apiKey, authBearer]);
 
-  const recorder = useMediaRecorder();
-  const [transcribing, setTranscribing] = useState(false);
+  const [transcribingCount, setTranscribingCount] = useState(0);
 
-  // Surface a notification on recorder errors so the user knows it died.
-  useEffect(() => {
-    if (recorder.state === 'error' && recorder.error) {
-      notifications.show({
-        title: 'Микрофон',
-        message: recorder.error,
-        color: 'red',
-      });
-    }
-  }, [recorder.state, recorder.error]);
-
-  const isRecording = recorder.state === 'recording';
-  const isBusy = transcribing || recorder.state === 'requesting' || recorder.state === 'stopping';
-
-  const handleClick = async () => {
-    if (isRecording) {
-      const blob = await recorder.stop();
-      if (!blob) return;
-      setTranscribing(true);
-      try {
-        const { text } = await api.transcribeAudio(tenantId, blob);
-        if (text.trim()) {
-          onTranscribed(text.trim());
-        } else {
-          notifications.show({ title: 'Микрофон', message: 'Ничего не распознано', color: 'gray' });
-        }
-      } catch (e) {
-        notifications.show({ title: 'STT ошибка', message: (e as Error).message || '', color: 'red' });
-      } finally {
-        setTranscribing(false);
-      }
-    } else {
-      await recorder.start();
+  const transcribeSegment = async (blob: Blob) => {
+    setTranscribingCount((c) => c + 1);
+    try {
+      const { text } = await api.transcribeAudio(tenantId, blob);
+      if (text && text.trim()) onTranscribed(text.trim());
+    } catch (e) {
+      notifications.show({ title: 'STT', message: (e as Error).message || '', color: 'red' });
+    } finally {
+      setTranscribingCount((c) => Math.max(0, c - 1));
     }
   };
 
-  const seconds = Math.floor(recorder.durationMs / 1000);
-  const mins = Math.floor(seconds / 60);
-  const ss = (seconds % 60).toString().padStart(2, '0');
-  const timeLabel = `${mins}:${ss}`;
+  const vad = useVAD({
+    silenceMs: 1500,
+    onSegment: (blob) => { void transcribeSegment(blob); },
+  });
 
-  // While recording — show stop icon + a level-pulsing red border via box-shadow.
-  const recordingStyle = isRecording
-    ? { boxShadow: `0 0 0 ${1 + Math.round(recorder.level * 8)}px rgba(255, 75, 75, 0.35)` }
-    : undefined;
+  useEffect(() => {
+    if (vad.state === 'error' && vad.error) {
+      notifications.show({ title: 'Микрофон', message: vad.error, color: 'red' });
+    }
+  }, [vad.state, vad.error]);
+
+  const isOpen = vad.state === 'listening' || vad.state === 'speaking';
+  const isSpeaking = vad.state === 'speaking';
+
+  const toggle = async () => {
+    if (isOpen) vad.stop();
+    else await vad.start();
+  };
+
+  const seconds = Math.floor(transcribingCount > 0 ? 0 : 0); // placeholder for future timer
+  void seconds;
 
   return (
-    <div style={{ display: 'flex', alignItems: 'flex-end', gap: 4, marginBottom: 4 }}>
+    <Group gap={4} style={{ alignItems: 'flex-end', marginBottom: 4 }}>
       <Tooltip
-        label={isRecording ? `Остановить запись (${timeLabel})` :
-               disabled ? 'Микрофон недоступен' : 'Записать голосовое сообщение'}
+        label={
+          isOpen
+            ? 'Микрофон включён — говорите. Паузы автоматически разделяют фразы. Клик ещё раз — выключить.'
+            : disabled ? 'Микрофон недоступен' : 'Голосовой ввод (VAD: пауза = конец фразы)'
+        }
       >
         <ActionIcon
-          variant={isRecording ? 'filled' : 'light'}
-          color={isRecording ? 'red' : undefined}
+          variant={isOpen ? 'filled' : 'light'}
+          color={isSpeaking ? 'red' : isOpen ? 'blue' : undefined}
           size="lg"
-          onClick={handleClick}
-          disabled={disabled || isBusy}
-          style={{ alignSelf: 'flex-end', ...recordingStyle, transition: 'box-shadow 60ms linear' }}
+          onClick={toggle}
+          disabled={disabled || vad.state === 'requesting'}
+          style={{
+            alignSelf: 'flex-end',
+            boxShadow: isSpeaking
+              ? `0 0 0 ${1 + Math.round(vad.level * 8)}px rgba(255, 75, 75, 0.35)`
+              : undefined,
+            transition: 'box-shadow 60ms linear',
+          }}
           aria-label="Микрофон"
         >
-          {isBusy ? <Loader size={14} /> :
-           isRecording ? <IconPlayerStop size={18} /> :
-           recorder.state === 'error' ? <IconMicrophoneOff size={18} /> :
+          {vad.state === 'requesting' ? <Loader size={14} /> :
+           vad.state === 'error' ? <IconMicrophoneOff size={18} /> :
            <IconMicrophone size={18} />}
         </ActionIcon>
       </Tooltip>
-      {isRecording && (
-        <Text size="xs" c="red" style={{ minWidth: 36, marginBottom: 6 }}>{timeLabel}</Text>
+      {isOpen && transcribingCount > 0 && (
+        <Text size="xs" c="dimmed" style={{ marginBottom: 6 }}>
+          обработка…
+        </Text>
       )}
-    </div>
+      {isOpen && transcribingCount === 0 && (
+        <Text size="xs" c={isSpeaking ? 'red' : 'dimmed'} style={{ marginBottom: 6 }}>
+          {isSpeaking ? '🎙' : '...'}
+        </Text>
+      )}
+    </Group>
   );
 }

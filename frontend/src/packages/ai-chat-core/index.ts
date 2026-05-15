@@ -20,6 +20,9 @@ export type { UseAiChatArtifactsResult } from './useAiChatArtifacts';
 export { useMediaRecorder } from './useMediaRecorder';
 export type { UseMediaRecorderResult, RecorderState } from './useMediaRecorder';
 
+export { useVAD } from './useVAD';
+export type { UseVADResult, UseVADOptions, VadState } from './useVAD';
+
 export { useAiChatSend } from './useAiChatSend';
 export type {
   UseAiChatSendOptions,

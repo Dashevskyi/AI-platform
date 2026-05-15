@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Stack, Text, ActionIcon, Group, Tooltip, Loader } from '@mantine/core';
-import { IconMicrophone, IconPlayerStop, IconX, IconVolume } from '@tabler/icons-react';
+import { IconMicrophone, IconMicrophoneOff, IconX, IconVolume, IconPlayerStop } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
-import { useMediaRecorder, getAiChatApi } from '../../packages/ai-chat-core';
+import { useVAD, getAiChatApi } from '../../packages/ai-chat-core';
 import type { AuthMode } from '../../packages/ai-chat-core';
 
 type Phase = 'idle' | 'listening' | 'transcribing' | 'thinking' | 'speaking' | 'error';
@@ -14,30 +14,33 @@ type Props = {
   mode: 'admin' | 'end-user';
   apiKey?: string;
   authBearer?: string;
-  /** Called after each round-trip completes so the host chat can refetch
-   *  its message list (the user/assistant turn is persisted server-side). */
   onMessageSent?: () => void;
   onClose: () => void;
 };
 
 /**
- * Sentence-based chunker.
+ * Hands-free voice mode.
  *
- * Returns the index in `buffer` AFTER which we can safely split off a TTS
- * chunk. We look for sentence-final punctuation that is followed by whitespace
- * or end-of-buffer. We require a minimum chunk length so short interjections
- * ("Ну,") aren't sent as their own audio request.
+ *   listen  → user speaks → VAD detects pause (silenceMs)
+ *     ↓
+ *   transcribe (POST /voice/stt)
+ *     ↓
+ *   thinking + speaking (in parallel):
+ *     • LLM streams content_chunk events
+ *     • sentence chunker emits sentences → TTS per sentence → audio queue
+ *     • the audio queue plays sequentially
+ *     • mic stays open the whole time
+ *     ↓
+ *   listen again (VAD never paused — same session continues)
  *
- * Returns -1 if no good split point yet.
+ * INTERRUPT: if VAD fires onSpeechStart while audio is playing or LLM is
+ * still streaming, we cut the audio queue, abort the LLM stream, and start
+ * collecting a new user phrase. No button press required.
  */
 function findSentenceSplit(buffer: string, minLen = 30): number {
   if (buffer.length < minLen) return -1;
-  // Avoid splitting inside a code fence — once we see ``` we wait for the
-  // closing fence before resuming sentence splitting.
   const fences = (buffer.match(/```/g) || []).length;
   if (fences % 2 === 1) return -1;
-
-  // Look for [.!?…] followed by space/newline/end. Prefer the latest one.
   const re = /[.!?…](?=\s|$)|\n{2,}/g;
   let lastIdx = -1;
   let m: RegExpExecArray | null;
@@ -58,35 +61,24 @@ export function VoiceModeOverlay({
     return getAiChatApi({ variant: mode === 'admin' ? 'admin' : 'tenant', apiBase, auth });
   }, [mode, apiBase, apiKey, authBearer]);
 
-  const recorder = useMediaRecorder();
   const [phase, setPhase] = useState<Phase>('idle');
   const [transcript, setTranscript] = useState<string>('');
   const [assistantText, setAssistantText] = useState<string>('');
 
-  // Audio queue: FIFO of (objectURL, audio). Played strictly sequentially —
-  // we kick off TTS synth in parallel but never play audio_N+1 before
-  // audio_N finishes, so sentences come out in the right order.
+  // Refs we mutate from VAD callbacks without re-rendering.
   const audioQueueRef = useRef<HTMLAudioElement[]>([]);
   const urlsRef = useRef<string[]>([]);
   const queueRunningRef = useRef(false);
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
-  const stoppedRef = useRef(false);
+  const llmStreamingRef = useRef(false);
 
-  useEffect(() => {
-    return () => { stopAll(); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const stopAll = () => {
-    stoppedRef.current = true;
-    abortRef.current?.abort();
-    abortRef.current = null;
+  const stopAudio = () => {
+    audioQueueRef.current = [];
     if (currentAudioRef.current) {
       try { currentAudioRef.current.pause(); } catch { /* ignore */ }
       currentAudioRef.current = null;
     }
-    audioQueueRef.current = [];
     for (const u of urlsRef.current) {
       try { URL.revokeObjectURL(u); } catch { /* ignore */ }
     }
@@ -94,12 +86,17 @@ export function VoiceModeOverlay({
     queueRunningRef.current = false;
   };
 
+  const abortLLM = () => {
+    try { abortRef.current?.abort(); } catch { /* ignore */ }
+    abortRef.current = null;
+    llmStreamingRef.current = false;
+  };
+
   const playQueueLoop = async () => {
     if (queueRunningRef.current) return;
     queueRunningRef.current = true;
     setPhase('speaking');
     while (audioQueueRef.current.length > 0) {
-      if (stoppedRef.current) break;
       const audio = audioQueueRef.current.shift()!;
       currentAudioRef.current = audio;
       await new Promise<void>((resolve) => {
@@ -110,18 +107,16 @@ export function VoiceModeOverlay({
       currentAudioRef.current = null;
     }
     queueRunningRef.current = false;
-    if (!stoppedRef.current && phase !== 'listening') {
-      setPhase('idle');
-      // Auto-restart listening so the dialog flows naturally.
-      void recorder.start();
+    if (!llmStreamingRef.current) {
+      // Both LLM stream and TTS queue empty → back to plain listening.
+      setPhase('listening');
     }
   };
 
   const enqueueSpeech = async (sentence: string) => {
-    if (!sentence.trim() || stoppedRef.current) return;
+    if (!sentence.trim()) return;
     try {
       const blob = await api.synthesizeAudio(tenantId, sentence);
-      if (stoppedRef.current) return;
       const url = URL.createObjectURL(blob);
       urlsRef.current.push(url);
       const audio = new Audio(url);
@@ -132,45 +127,46 @@ export function VoiceModeOverlay({
       audioQueueRef.current.push(audio);
       void playQueueLoop();
     } catch (e) {
-      // Per-chunk TTS error doesn't kill the whole exchange — log + continue.
-      // eslint-disable-next-line no-console
       console.warn('TTS chunk failed', e);
     }
   };
 
-  // Map recorder errors to phase
-  useEffect(() => {
-    if (recorder.state === 'recording') setPhase('listening');
-    else if (recorder.state === 'error') {
-      setPhase('error');
-      if (recorder.error) {
-        notifications.show({ title: 'Микрофон', message: recorder.error, color: 'red' });
-      }
-    }
-  }, [recorder.state, recorder.error]);
+  /** User speech segment: STT → submit → stream LLM → per-sentence TTS. */
+  const handleSegment = async (blob: Blob) => {
+    // If we are currently speaking or thinking — drop those, this is a new turn.
+    abortLLM();
+    stopAudio();
 
-  const submitTranscript = async (text: string) => {
-    if (!text.trim()) return;
-    stoppedRef.current = false;
+    setPhase('transcribing');
+    let userText = '';
+    try {
+      const { text } = await api.transcribeAudio(tenantId, blob);
+      userText = (text || '').trim();
+      setTranscript(userText);
+    } catch (e) {
+      setPhase('listening');
+      notifications.show({ title: 'STT', message: (e as Error).message || '', color: 'red' });
+      return;
+    }
+    if (!userText) { setPhase('listening'); return; }
+
     setAssistantText('');
     setPhase('thinking');
-
     let buffer = '';
     let splitOffset = 0;
+    llmStreamingRef.current = true;
     const controller = new AbortController();
     abortRef.current = controller;
-
     try {
       await api.sendMessageStream(
         tenantId,
         chatId,
-        { content: text },
+        { content: userText },
         (eventType, payload) => {
-          if (stoppedRef.current) return;
+          if (controller.signal.aborted) return;
           if (eventType === 'content_chunk' && typeof payload.text === 'string') {
             buffer += payload.text as string;
             setAssistantText(buffer);
-            // Slide a sentence-split window across the unflushed tail.
             const tail = buffer.slice(splitOffset);
             const cut = findSentenceSplit(tail);
             if (cut > 0) {
@@ -182,87 +178,91 @@ export function VoiceModeOverlay({
             buffer = payload.content as string;
             setAssistantText(buffer);
           } else if (eventType === 'final') {
-            // Flush whatever's left after the last split point.
             const remaining = buffer.slice(splitOffset).trim();
             if (remaining) void enqueueSpeech(remaining);
           } else if (eventType === 'error' && typeof payload.message === 'string') {
-            notifications.show({
-              title: 'LLM',
-              message: String(payload.message),
-              color: 'red',
-            });
+            notifications.show({ title: 'LLM', message: String(payload.message), color: 'red' });
           }
         },
         controller.signal,
       );
       onMessageSent?.();
     } catch (e) {
-      if (!stoppedRef.current) {
+      if (!controller.signal.aborted) {
         notifications.show({ title: 'Voice', message: (e as Error).message || '', color: 'red' });
-        setPhase('error');
+      }
+    } finally {
+      llmStreamingRef.current = false;
+      if (audioQueueRef.current.length === 0 && !currentAudioRef.current) {
+        setPhase('listening');
       }
     }
   };
 
-  const handleMicTap = async () => {
-    if (phase === 'speaking') {
-      // User wants to interrupt the assistant — kill audio + start fresh recording.
-      stopAll();
-      stoppedRef.current = false;
-      await recorder.start();
-      return;
-    }
-    if (phase === 'listening') {
-      const blob = await recorder.stop();
-      if (!blob) { setPhase('idle'); return; }
-      setPhase('transcribing');
-      try {
-        const { text } = await api.transcribeAudio(tenantId, blob);
-        const clean = (text || '').trim();
-        setTranscript(clean);
-        if (!clean) { setPhase('idle'); return; }
-        await submitTranscript(clean);
-      } catch (e) {
-        setPhase('error');
-        notifications.show({ title: 'STT', message: (e as Error).message || '', color: 'red' });
+  // VAD: silenceMs=1500 is comfortable for most languages; tune later.
+  const vad = useVAD({
+    silenceMs: 1500,
+    onSegment: (blob) => { void handleSegment(blob); },
+    // INTERRUPT: as soon as the user starts speaking again, kill whatever
+    // the assistant is doing — TTS queue + in-flight LLM stream.
+    onSpeechStart: () => {
+      if (currentAudioRef.current || audioQueueRef.current.length > 0 || llmStreamingRef.current) {
+        abortLLM();
+        stopAudio();
+        setPhase('listening');
       }
-      return;
+    },
+  });
+
+  // Start listening as soon as the overlay mounts.
+  useEffect(() => {
+    void vad.start();
+    return () => {
+      vad.stop();
+      abortLLM();
+      stopAudio();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Mirror VAD state to UI phase when nothing more interesting is happening.
+  useEffect(() => {
+    if (vad.state === 'error' && vad.error) {
+      notifications.show({ title: 'Микрофон', message: vad.error, color: 'red' });
+      setPhase('error');
+    } else if (vad.state === 'listening' && phase === 'idle') {
+      setPhase('listening');
     }
-    await recorder.start();
-  };
+  }, [vad.state, vad.error, phase]);
 
   const closeAll = () => {
-    stopAll();
-    if (recorder.state === 'recording') recorder.cancel();
+    vad.stop();
+    abortLLM();
+    stopAudio();
     onClose();
   };
 
-  const phaseLabel = {
-    idle: 'Нажми, чтобы говорить',
-    listening: 'Слушаю…',
+  const phaseLabel = ({
+    idle: 'Готов',
+    listening: vad.state === 'speaking' ? '🎙 Слушаю…' : 'Жду речи…',
     transcribing: 'Распознаю…',
     thinking: 'Думаю…',
     speaking: 'Отвечаю…',
     error: 'Ошибка',
-  }[phase];
+  } as Record<Phase, string>)[phase];
 
-  const isListening = phase === 'listening';
+  const isUserSpeaking = vad.state === 'speaking';
 
   return (
     <Box
       style={{
-        position: 'fixed',
-        inset: 0,
-        zIndex: 1000,
-        background: 'rgba(0, 0, 0, 0.65)',
-        backdropFilter: 'blur(8px)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
+        position: 'fixed', inset: 0, zIndex: 1000,
+        background: 'rgba(0, 0, 0, 0.65)', backdropFilter: 'blur(8px)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
       }}
       onClick={(e) => { if (e.target === e.currentTarget) closeAll(); }}
     >
-      <Stack gap="lg" align="center" style={{ color: 'white', textAlign: 'center', maxWidth: 480 }}>
+      <Stack gap="lg" align="center" style={{ color: 'white', textAlign: 'center', maxWidth: 520, padding: 24 }}>
         <Box style={{ position: 'absolute', top: 16, right: 16 }}>
           <Tooltip label="Закрыть голосовой режим">
             <ActionIcon variant="subtle" color="gray" onClick={closeAll}>
@@ -277,30 +277,48 @@ export function VoiceModeOverlay({
           <Text size="lg" fw={500}>{phaseLabel}</Text>
         </Group>
 
-        <Box style={{ position: 'relative' }}>
-          <ActionIcon
-            variant="filled"
-            color={isListening ? 'red' : phase === 'speaking' ? 'blue' : 'gray'}
-            size={120}
-            radius={9999}
-            onClick={handleMicTap}
-            disabled={phase === 'transcribing'}
-            style={{
-              boxShadow: isListening
-                ? `0 0 0 ${4 + Math.round(recorder.level * 24)}px rgba(255, 75, 75, 0.35)`
-                : '0 8px 20px rgba(0,0,0,0.4)',
-              transition: 'box-shadow 60ms linear',
-            }}
-            aria-label="Микрофон"
-          >
-            {phase === 'transcribing' ? <Loader size={42} color="white" /> :
-             isListening ? <IconPlayerStop size={56} /> :
-             <IconMicrophone size={56} />}
-          </ActionIcon>
+        {/* Big indicator orb. No buttons — hands-free. */}
+        <Box
+          style={{
+            width: 120, height: 120, borderRadius: 9999,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            background: isUserSpeaking ? 'var(--mantine-color-red-7)'
+                     : phase === 'speaking' ? 'var(--mantine-color-blue-7)'
+                     : 'var(--mantine-color-gray-7)',
+            boxShadow: isUserSpeaking
+              ? `0 0 0 ${6 + Math.round(vad.level * 30)}px rgba(255, 75, 75, 0.30)`
+              : phase === 'speaking'
+              ? '0 0 0 12px rgba(0, 122, 255, 0.20)'
+              : '0 8px 20px rgba(0,0,0,0.4)',
+            transition: 'box-shadow 60ms linear, background 200ms ease',
+          }}
+        >
+          {phase === 'transcribing' ? <Loader size={42} color="white" /> :
+           phase === 'speaking' ? <IconVolume size={56} color="white" /> :
+           vad.state === 'error' ? <IconMicrophoneOff size={56} color="white" /> :
+           <IconMicrophone size={56} color="white" />}
         </Box>
 
+        <Text size="xs" c="dimmed" style={{ maxWidth: 360 }}>
+          Просто говорите. Пауза 1.5 с автоматически отправляет фразу.
+          Чтобы прервать ассистента — начните говорить.
+        </Text>
+
+        {/* Tiny "force-stop everything and listen now" button as escape hatch. */}
+        {(phase === 'speaking' || phase === 'thinking') && (
+          <Tooltip label="Прервать и слушать">
+            <ActionIcon
+              variant="light" color="red" size="md"
+              onClick={() => { abortLLM(); stopAudio(); setPhase('listening'); }}
+              style={{ position: 'absolute', bottom: 24, right: 24 }}
+            >
+              <IconPlayerStop size={16} />
+            </ActionIcon>
+          </Tooltip>
+        )}
+
         {transcript && (
-          <Box>
+          <Box style={{ maxWidth: 480 }}>
             <Text size="xs" c="dimmed">Вы сказали:</Text>
             <Text size="sm" c="white">{transcript}</Text>
           </Box>

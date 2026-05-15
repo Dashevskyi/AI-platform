@@ -2487,7 +2487,10 @@ function ToolsTab({ tenantId }: { tenantId: string }) {
     }
   };
 
-  const totalPages = data ? Math.ceil(data.total_count / 20) : 0;
+  // page_size matches the value passed to toolsApi.list above (100).
+  // Was 20 here — produced phantom pages: clicking page 2 hit an empty
+  // backend offset and the list went blank until the tab was switched.
+  const totalPages = data ? Math.ceil(data.total_count / 100) : 0;
   const existingGroups = Array.from(new Set((data?.items || []).map((t) => t.group).filter(Boolean) as string[]))
     .sort()
     .map((g) => ({ value: g, label: g }));
