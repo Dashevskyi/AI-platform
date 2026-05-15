@@ -28,7 +28,13 @@ export function useAuth() {
       const response = await authApi.login(credentials);
       localStorage.setItem('auth_token', response.access_token);
       await queryClient.invalidateQueries({ queryKey: ['auth', 'me'] });
-      navigate('/dashboard');
+      const me = await authApi.me();
+      queryClient.setQueryData(['auth', 'me'], me);
+      if (me.role === 'tenant_admin' && me.tenant_id) {
+        navigate(`/tenants/${me.tenant_id}`);
+      } else {
+        navigate('/dashboard');
+      }
     },
     [queryClient, navigate]
   );

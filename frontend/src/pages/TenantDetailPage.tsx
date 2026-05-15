@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useEffect, useState, Fragment } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   Tabs,
@@ -9,7 +9,8 @@ import {
   Textarea,
   Switch,
   Select,
-  Slider,
+  MultiSelect,
+  TagsInput,
   NumberInput,
   Table,
   Badge,
@@ -20,67 +21,127 @@ import {
   Center,
   Card,
   Alert,
-  PasswordInput,
   ActionIcon,
   Tooltip,
   Pagination,
   Code,
-  Drawer,
   CopyButton,
-  ScrollArea,
   SimpleGrid,
+  Autocomplete,
+  Checkbox,
 } from '@mantine/core';
 import {
-  IconDeviceFloppy,
   IconPlus,
   IconTrash,
   IconRefresh,
   IconPlayerStop,
-  IconPlugConnected,
   IconArrowLeft,
   IconAlertCircle,
   IconCopy,
   IconCheck,
   IconEdit,
+  IconGripVertical,
+  IconTool,
+  IconTerminal2,
+  IconNetwork,
+  IconDatabase,
+  IconApi,
+  IconWorldWww,
+  IconRouter,
 } from '@tabler/icons-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { notifications } from '@mantine/notifications';
 import {
   tenantsApi,
   keysApi,
-  shellApi,
+  keyGroupsApi,
   toolsApi,
-  kbApi,
-  memoryApi,
-  chatsApi,
-  logsApi,
-  modelsApi,
-  modelConfigApi,
-  customModelsApi,
+  dataSourcesApi,
 } from '../shared/api/endpoints';
 import type {
-  ShellConfigUpdate,
+  TenantApiKey,
+  TenantApiKeyGroup,
   Tool,
   ToolCreate,
   ToolUpdate,
-  KBDocument,
-  KBDocumentCreate,
-  KBDocumentUpdate,
-  MemoryEntry,
-  MemoryEntryCreate,
-  MemoryEntryUpdate,
-  LLMLogDetail,
-  LLMModelBrief,
-  TenantModelConfigUpdate,
-  TenantCustomModel,
-  TenantCustomModelCreate,
-  TenantCustomModelUpdate,
 } from '../shared/api/types';
+import { GeneralTab } from './tenant-detail/GeneralTab';
+import { ChatsTab } from './tenant-detail/ChatsTab';
+import { DataSourcesTab } from './tenant-detail/DataSourcesTab';
+import { KBTab } from './tenant-detail/KBTab';
+import { LogsTab } from './tenant-detail/LogsTab';
+import { MemoryTab } from './tenant-detail/MemoryTab';
+import { ModelConfigTab } from './tenant-detail/ModelConfigTab';
+import { ShellSettingsTab } from './tenant-detail/ShellSettingsTab';
+import { StatsTab } from './TenantStatsTab';
+import { ApiInfoTab } from './TenantApiInfoTab';
+import { UsersTab } from './tenant-detail/UsersTab';
+import { usePermissions } from '../shared/hooks/usePermissions';
+
+type ToolPreset = {
+  label: string;
+  description: string;
+  tags: string[];
+  all?: boolean;
+  none?: boolean;
+};
+
+const TOOL_PERMISSION_PRESETS: ToolPreset[] = [
+  {
+    label: 'Все tools',
+    description: 'Полный доступ без ограничений.',
+    tags: [],
+    all: true,
+  },
+  {
+    label: 'Без tools',
+    description: 'Полный запрет использования tools.',
+    tags: [],
+    none: true,
+  },
+  {
+    label: 'Сеть',
+    description: 'Проверка доступности и диагностика сети.',
+    tags: ['network', 'diagnostics'],
+  },
+  {
+    label: 'Поиск данных',
+    description: 'Поиск по БД и API-источникам tenant-а.',
+    tags: ['data_search', 'db_search', 'api_search', 'records'],
+  },
+  {
+    label: 'Биллинг',
+    description: 'Платежи и начисления.',
+    tags: ['billing', 'payments'],
+  },
+];
+
+function readToolCapabilityTags(config: Record<string, unknown> | null | undefined): string[] {
+  if (!isRecord(config)) return [];
+  const runtime = isRecord(config.x_backend_config) ? config.x_backend_config : {};
+  const tags = Array.isArray(runtime.capability_tags) ? runtime.capability_tags : [];
+  return tags.map((tag) => String(tag).trim()).filter(Boolean);
+}
+
+function applyToolCapabilityTags(
+  runtime: Record<string, unknown>,
+  tags: string[],
+): Record<string, unknown> {
+  const next = { ...runtime };
+  const normalized = Array.from(new Set(tags.map((tag) => tag.trim()).filter(Boolean)));
+  if (normalized.length > 0) {
+    next.capability_tags = normalized;
+  } else if ('capability_tags' in next) {
+    delete next.capability_tags;
+  }
+  return next;
+}
 
 export function TenantDetailPage() {
   const { id } = useParams<{ id: string }>();
   const tenantId = id!;
   const navigate = useNavigate();
+  const { isSuperadmin, has } = usePermissions();
 
   const { data: tenant, isLoading } = useQuery({
     queryKey: ['tenants', tenantId],
@@ -107,9 +168,11 @@ export function TenantDetailPage() {
   return (
     <Stack gap="lg">
       <Group>
-        <ActionIcon variant="subtle" onClick={() => navigate('/tenants')}>
-          <IconArrowLeft size={20} />
-        </ActionIcon>
+        {isSuperadmin && (
+          <ActionIcon variant="subtle" onClick={() => navigate('/tenants')}>
+            <IconArrowLeft size={20} />
+          </ActionIcon>
+        )}
         <Title order={2}>{tenant.name}</Title>
         <Badge color={tenant.is_active ? 'green' : 'gray'}>
           {tenant.is_active ? 'Активный' : 'Неактивный'}
@@ -119,163 +182,85 @@ export function TenantDetailPage() {
       <Tabs defaultValue="general" keepMounted={false}>
         <Tabs.List>
           <Tabs.Tab value="general">Общее</Tabs.Tab>
-          <Tabs.Tab value="keys">API Ключи</Tabs.Tab>
-          <Tabs.Tab value="model">Модель</Tabs.Tab>
-          <Tabs.Tab value="shell">Настройки оболочки</Tabs.Tab>
-          <Tabs.Tab value="tools">Инструменты</Tabs.Tab>
-          <Tabs.Tab value="kb">База знаний</Tabs.Tab>
-          <Tabs.Tab value="memory">Память</Tabs.Tab>
-          <Tabs.Tab value="chats">Чаты</Tabs.Tab>
-          <Tabs.Tab value="logs">Логи</Tabs.Tab>
+          {has('keys') && <Tabs.Tab value="keys">API Ключи</Tabs.Tab>}
+          {has('model_config') && <Tabs.Tab value="model">Модель</Tabs.Tab>}
+          {has('shell_config') && <Tabs.Tab value="shell">Настройки оболочки</Tabs.Tab>}
+          {has('data_sources') && <Tabs.Tab value="data-sources">Источники данных</Tabs.Tab>}
+          {has('tools') && <Tabs.Tab value="tools">Инструменты</Tabs.Tab>}
+          {has('kb') && <Tabs.Tab value="kb">База знаний</Tabs.Tab>}
+          {has('memory') && <Tabs.Tab value="memory">Память</Tabs.Tab>}
+          {has('chats') && <Tabs.Tab value="chats">Чаты</Tabs.Tab>}
+          {has('logs') && <Tabs.Tab value="logs">Логи</Tabs.Tab>}
+          {isSuperadmin && <Tabs.Tab value="stats">Статистика</Tabs.Tab>}
+          {has('users') && <Tabs.Tab value="users">Пользователи</Tabs.Tab>}
+          {isSuperadmin && <Tabs.Tab value="api-info">API</Tabs.Tab>}
         </Tabs.List>
 
         <Tabs.Panel value="general" pt="md">
           <GeneralTab tenantId={tenantId} />
         </Tabs.Panel>
-        <Tabs.Panel value="keys" pt="md">
-          <ApiKeysTab tenantId={tenantId} />
-        </Tabs.Panel>
-        <Tabs.Panel value="model" pt="md">
-          <ModelConfigTab tenantId={tenantId} />
-        </Tabs.Panel>
-        <Tabs.Panel value="shell" pt="md">
-          <ShellSettingsTab tenantId={tenantId} />
-        </Tabs.Panel>
-        <Tabs.Panel value="tools" pt="md">
-          <ToolsTab tenantId={tenantId} />
-        </Tabs.Panel>
-        <Tabs.Panel value="kb" pt="md">
-          <KBTab tenantId={tenantId} />
-        </Tabs.Panel>
-        <Tabs.Panel value="memory" pt="md">
-          <MemoryTab tenantId={tenantId} />
-        </Tabs.Panel>
-        <Tabs.Panel value="chats" pt="md">
-          <ChatsTab tenantId={tenantId} />
-        </Tabs.Panel>
-        <Tabs.Panel value="logs" pt="md">
-          <LogsTab tenantId={tenantId} />
-        </Tabs.Panel>
+        {has('keys') && (
+          <Tabs.Panel value="keys" pt="md">
+            <ApiKeysTab tenantId={tenantId} />
+          </Tabs.Panel>
+        )}
+        {has('model_config') && (
+          <Tabs.Panel value="model" pt="md">
+            <ModelConfigTab tenantId={tenantId} />
+          </Tabs.Panel>
+        )}
+        {has('shell_config') && (
+          <Tabs.Panel value="shell" pt="md">
+            <ShellSettingsTab tenantId={tenantId} />
+          </Tabs.Panel>
+        )}
+        {has('data_sources') && (
+          <Tabs.Panel value="data-sources" pt="md">
+            <DataSourcesTab tenantId={tenantId} />
+          </Tabs.Panel>
+        )}
+        {has('tools') && (
+          <Tabs.Panel value="tools" pt="md">
+            <ToolsTab tenantId={tenantId} />
+          </Tabs.Panel>
+        )}
+        {has('kb') && (
+          <Tabs.Panel value="kb" pt="md">
+            <KBTab tenantId={tenantId} />
+          </Tabs.Panel>
+        )}
+        {has('memory') && (
+          <Tabs.Panel value="memory" pt="md">
+            <MemoryTab tenantId={tenantId} />
+          </Tabs.Panel>
+        )}
+        {has('chats') && (
+          <Tabs.Panel value="chats" pt="md">
+            <ChatsTab tenantId={tenantId} />
+          </Tabs.Panel>
+        )}
+        {has('logs') && (
+          <Tabs.Panel value="logs" pt="md">
+            <LogsTab tenantId={tenantId} />
+          </Tabs.Panel>
+        )}
+        {isSuperadmin && (
+          <Tabs.Panel value="stats" pt="md">
+            <StatsTab tenantId={tenantId} />
+          </Tabs.Panel>
+        )}
+        {has('users') && (
+          <Tabs.Panel value="users" pt="md">
+            <UsersTab tenantId={tenantId} />
+          </Tabs.Panel>
+        )}
+        {isSuperadmin && (
+          <Tabs.Panel value="api-info" pt="md">
+            <ApiInfoTab tenantId={tenantId} />
+          </Tabs.Panel>
+        )}
       </Tabs>
     </Stack>
-  );
-}
-
-// ===== GENERAL TAB =====
-
-function GeneralTab({ tenantId }: { tenantId: string }) {
-  const queryClient = useQueryClient();
-  const { data: tenant } = useQuery({
-    queryKey: ['tenants', tenantId],
-    queryFn: () => tenantsApi.get(tenantId),
-  });
-
-  const [name, setName] = useState('');
-  const [slug, setSlug] = useState('');
-  const [description, setDescription] = useState('');
-  const [isActive, setIsActive] = useState(true);
-  const [dirty, setDirty] = useState(false);
-
-  useEffect(() => {
-    if (tenant) {
-      setName(tenant.name);
-      setSlug(tenant.slug);
-      setDescription(tenant.description || '');
-      setIsActive(tenant.is_active);
-      setDirty(false);
-    }
-  }, [tenant]);
-
-  useEffect(() => {
-    if (!dirty) return;
-    const handler = (e: BeforeUnloadEvent) => {
-      e.preventDefault();
-    };
-    window.addEventListener('beforeunload', handler);
-    return () => window.removeEventListener('beforeunload', handler);
-  }, [dirty]);
-
-  const mutation = useMutation({
-    mutationFn: () =>
-      tenantsApi.update(tenantId, { name, slug, description, is_active: isActive }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['tenants', tenantId] });
-      queryClient.invalidateQueries({ queryKey: ['tenants', 'list'] });
-      setDirty(false);
-      notifications.show({
-        title: 'Сохранено',
-        message: 'Тенант успешно обновлён',
-        color: 'green',
-      });
-    },
-    onError: (err: unknown) => {
-      const message =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
-        'Не удалось сохранить';
-      notifications.show({ title: 'Ошибка', message, color: 'red' });
-    },
-  });
-
-  const markDirty = useCallback(
-    <T,>(setter: React.Dispatch<React.SetStateAction<T>>) =>
-      (val: T) => {
-        setter(val);
-        setDirty(true);
-      },
-    []
-  );
-
-  return (
-    <Card withBorder padding="lg" maw={600}>
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          mutation.mutate();
-        }}
-      >
-        <Stack gap="md">
-          {dirty && (
-            <Alert icon={<IconAlertCircle size={16} />} color="yellow" variant="light">
-              У вас есть несохранённые изменения.
-            </Alert>
-          )}
-          <TextInput
-            label="Название"
-            value={name}
-            onChange={(e) => markDirty(setName)(e.currentTarget.value)}
-            required
-          />
-          <TextInput
-            label="Slug"
-            value={slug}
-            onChange={(e) => markDirty(setSlug)(e.currentTarget.value)}
-            required
-          />
-          <Textarea
-            label="Описание"
-            value={description}
-            onChange={(e) => markDirty(setDescription)(e.currentTarget.value)}
-            autosize
-            minRows={2}
-          />
-          <Switch
-            label="Активный"
-            checked={isActive}
-            onChange={(e) => markDirty(setIsActive)(e.currentTarget.checked)}
-          />
-          <Group justify="flex-end">
-            <Button
-              type="submit"
-              leftSection={<IconDeviceFloppy size={16} />}
-              loading={mutation.isPending}
-              disabled={!dirty}
-            >
-              Сохранить изменения
-            </Button>
-          </Group>
-        </Stack>
-      </form>
-    </Card>
   );
 }
 
@@ -286,25 +271,113 @@ function ApiKeysTab({ tenantId }: { tenantId: string }) {
   const [page, setPage] = useState(1);
   const [createOpen, setCreateOpen] = useState(false);
   const [keyName, setKeyName] = useState('');
+  const [keyGroupId, setKeyGroupId] = useState<string | null>(null);
+  const [keyMemoryPrompt, setKeyMemoryPrompt] = useState('');
+  const [keyAllowedToolsRestricted, setKeyAllowedToolsRestricted] = useState(false);
+  const [keyAllowedToolIds, setKeyAllowedToolIds] = useState<string[]>([]);
+  const [editKey, setEditKey] = useState<TenantApiKey | null>(null);
   const [rawKey, setRawKey] = useState('');
   const [rawKeyModalOpen, setRawKeyModalOpen] = useState(false);
+  const [groupModalOpen, setGroupModalOpen] = useState(false);
+  const [editGroup, setEditGroup] = useState<TenantApiKeyGroup | null>(null);
+  const [groupName, setGroupName] = useState('');
+  const [groupMemoryPrompt, setGroupMemoryPrompt] = useState('');
+  const [groupAllowedToolsRestricted, setGroupAllowedToolsRestricted] = useState(false);
+  const [groupAllowedToolIds, setGroupAllowedToolIds] = useState<string[]>([]);
 
   const { data, isLoading } = useQuery({
     queryKey: ['tenants', tenantId, 'keys', page],
     queryFn: () => keysApi.list(tenantId, page),
   });
 
+  const { data: groupsData } = useQuery({
+    queryKey: ['tenants', tenantId, 'key-groups'],
+    queryFn: () => keyGroupsApi.list(tenantId, 1, 100),
+  });
+  const { data: toolsData } = useQuery({
+    queryKey: ['tenants', tenantId, 'tools', 'for-api-key-permissions'],
+    queryFn: () => toolsApi.list(tenantId, 1, 100),
+  });
+
+  const groups = groupsData?.items || [];
+  const tools = toolsData?.items || [];
+  const groupNameById = new Map(groups.map((group) => [group.id, group.name]));
+  const groupOptions = [
+    { value: '', label: 'Без группы' },
+    ...groups.map((group) => ({ value: group.id, label: group.name })),
+  ];
+  const toolOptions = tools.map((tool) => ({ value: tool.id, label: tool.name }));
+
+  const normalizePermissionList = (value: string[] | null | undefined) => {
+    if (value === undefined || value === null) {
+      return { restricted: false, ids: [] as string[] };
+    }
+    return { restricted: true, ids: value };
+  };
+
+  const applyToolPreset = (
+    preset: ToolPreset,
+    setRestricted: (value: boolean) => void,
+    setIds: (value: string[]) => void,
+  ) => {
+    if (preset.all) {
+      setRestricted(false);
+      setIds([]);
+      return;
+    }
+    if (preset.none) {
+      setRestricted(true);
+      setIds([]);
+      return;
+    }
+    const selectedIds = tools
+      .filter((tool) => {
+        const toolTags = readToolCapabilityTags(tool.config_json);
+        return toolTags.some((tag) => preset.tags.includes(tag));
+      })
+      .map((tool) => tool.id);
+    setRestricted(true);
+    setIds(selectedIds);
+  };
+
   const createMutation = useMutation({
-    mutationFn: () => keysApi.create(tenantId, { name: keyName }),
+    mutationFn: () => keysApi.create(tenantId, {
+      name: keyName,
+      group_id: keyGroupId || undefined,
+      memory_prompt: keyMemoryPrompt || undefined,
+      allowed_tool_ids: keyAllowedToolsRestricted ? keyAllowedToolIds : null,
+    }),
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['tenants', tenantId, 'keys'] });
       setCreateOpen(false);
       setKeyName('');
+      setKeyGroupId(null);
+      setKeyMemoryPrompt('');
+      setKeyAllowedToolsRestricted(false);
+      setKeyAllowedToolIds([]);
       setRawKey(result.raw_key);
       setRawKeyModalOpen(true);
     },
     onError: () => {
       notifications.show({ title: 'Ошибка', message: 'Не удалось создать ключ', color: 'red' });
+    },
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: ({ keyId, payload }: { keyId: string; payload: Record<string, unknown> }) =>
+      keysApi.update(tenantId, keyId, payload),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['tenants', tenantId, 'keys'] });
+      setEditKey(null);
+      setKeyName('');
+      setKeyGroupId(null);
+      setKeyMemoryPrompt('');
+      setKeyAllowedToolsRestricted(false);
+      setKeyAllowedToolIds([]);
+      notifications.show({ title: 'Обновлено', message: 'API ключ обновлён', color: 'green' });
+    },
+    onError: () => {
+      notifications.show({ title: 'Ошибка', message: 'Не удалось обновить ключ', color: 'red' });
     },
   });
 
@@ -336,7 +409,94 @@ function ApiKeysTab({ tenantId }: { tenantId: string }) {
     },
   });
 
+  const createGroupMutation = useMutation({
+    mutationFn: () => keyGroupsApi.create(tenantId, {
+      name: groupName,
+      memory_prompt: groupMemoryPrompt || undefined,
+      allowed_tool_ids: groupAllowedToolsRestricted ? groupAllowedToolIds : null,
+    }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['tenants', tenantId, 'key-groups'] });
+      setGroupModalOpen(false);
+      setGroupName('');
+      setGroupMemoryPrompt('');
+      setGroupAllowedToolsRestricted(false);
+      setGroupAllowedToolIds([]);
+      notifications.show({ title: 'Создано', message: 'Группа ключей создана', color: 'green' });
+    },
+    onError: () => {
+      notifications.show({ title: 'Ошибка', message: 'Не удалось создать группу', color: 'red' });
+    },
+  });
+
+  const updateGroupMutation = useMutation({
+    mutationFn: ({ groupId, payload }: { groupId: string; payload: Record<string, unknown> }) =>
+      keyGroupsApi.update(tenantId, groupId, payload),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['tenants', tenantId, 'key-groups'] });
+      setGroupModalOpen(false);
+      setEditGroup(null);
+      setGroupName('');
+      setGroupMemoryPrompt('');
+      setGroupAllowedToolsRestricted(false);
+      setGroupAllowedToolIds([]);
+      notifications.show({ title: 'Обновлено', message: 'Группа ключей обновлена', color: 'green' });
+    },
+    onError: () => {
+      notifications.show({ title: 'Ошибка', message: 'Не удалось обновить группу', color: 'red' });
+    },
+  });
+
+  const deleteGroupMutation = useMutation({
+    mutationFn: (groupId: string) => keyGroupsApi.delete(tenantId, groupId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['tenants', tenantId, 'key-groups'] });
+      queryClient.invalidateQueries({ queryKey: ['tenants', tenantId, 'keys'] });
+      notifications.show({ title: 'Удалено', message: 'Группа удалена', color: 'green' });
+    },
+  });
+
   const totalPages = data ? Math.ceil(data.total_count / 20) : 0;
+
+  const openCreateKey = () => {
+    setEditKey(null);
+    setKeyName('');
+    setKeyGroupId(null);
+    setKeyMemoryPrompt('');
+    setKeyAllowedToolsRestricted(false);
+    setKeyAllowedToolIds([]);
+    setCreateOpen(true);
+  };
+
+  const openEditKey = (key: TenantApiKey) => {
+    setEditKey(key);
+    setKeyName(key.name);
+    setKeyGroupId(key.group_id);
+    setKeyMemoryPrompt(key.memory_prompt || '');
+    const keyPermissions = normalizePermissionList(key.allowed_tool_ids);
+    setKeyAllowedToolsRestricted(keyPermissions.restricted);
+    setKeyAllowedToolIds(keyPermissions.ids);
+    setCreateOpen(true);
+  };
+
+  const openCreateGroup = () => {
+    setEditGroup(null);
+    setGroupName('');
+    setGroupMemoryPrompt('');
+    setGroupAllowedToolsRestricted(false);
+    setGroupAllowedToolIds([]);
+    setGroupModalOpen(true);
+  };
+
+  const openEditGroup = (group: TenantApiKeyGroup) => {
+    setEditGroup(group);
+    setGroupName(group.name);
+    setGroupMemoryPrompt(group.memory_prompt || '');
+    const groupPermissions = normalizePermissionList(group.allowed_tool_ids);
+    setGroupAllowedToolsRestricted(groupPermissions.restricted);
+    setGroupAllowedToolIds(groupPermissions.ids);
+    setGroupModalOpen(true);
+  };
 
   return (
     <Stack gap="md">
@@ -345,11 +505,75 @@ function ApiKeysTab({ tenantId }: { tenantId: string }) {
         <Button
           leftSection={<IconPlus size={16} />}
           size="sm"
-          onClick={() => setCreateOpen(true)}
+          onClick={openCreateKey}
         >
           Создать ключ
         </Button>
       </Group>
+
+      <Card withBorder>
+        <Stack gap="sm">
+          <Group justify="space-between">
+            <Text fw={500}>Группы ключей</Text>
+            <Button size="xs" variant="light" leftSection={<IconPlus size={14} />} onClick={openCreateGroup}>
+              Создать группу
+            </Button>
+          </Group>
+          {!groups.length ? (
+            <Text size="sm" c="dimmed">Групп пока нет.</Text>
+          ) : (
+            <Table striped>
+              <Table.Thead>
+                <Table.Tr>
+                  <Table.Th>Название</Table.Th>
+                  <Table.Th>Память группы</Table.Th>
+                  <Table.Th>Tools</Table.Th>
+                  <Table.Th>Действия</Table.Th>
+                </Table.Tr>
+              </Table.Thead>
+              <Table.Tbody>
+                {groups.map((group) => (
+                  <Table.Tr key={group.id}>
+                    <Table.Td>{group.name}</Table.Td>
+                    <Table.Td>
+                      <Text size="sm" lineClamp={2}>{group.memory_prompt || '—'}</Text>
+                    </Table.Td>
+                    <Table.Td>
+                      <Badge variant="light">
+                        {group.allowed_tool_ids === null
+                          ? 'Все'
+                          : `${group.allowed_tool_ids.length} tools`}
+                      </Badge>
+                    </Table.Td>
+                    <Table.Td>
+                      <Group gap="xs">
+                        <Tooltip label="Редактировать группу">
+                          <ActionIcon variant="subtle" color="blue" onClick={() => openEditGroup(group)}>
+                            <IconEdit size={16} />
+                          </ActionIcon>
+                        </Tooltip>
+                        <Tooltip label="Удалить группу">
+                          <ActionIcon
+                            variant="subtle"
+                            color="red"
+                            onClick={() => {
+                              if (window.confirm(`Удалить группу "${group.name}"? Ключи останутся без группы.`)) {
+                                deleteGroupMutation.mutate(group.id);
+                              }
+                            }}
+                          >
+                            <IconTrash size={16} />
+                          </ActionIcon>
+                        </Tooltip>
+                      </Group>
+                    </Table.Td>
+                  </Table.Tr>
+                ))}
+              </Table.Tbody>
+            </Table>
+          )}
+        </Stack>
+      </Card>
 
       {isLoading ? (
         <Center py="md">
@@ -365,8 +589,11 @@ function ApiKeysTab({ tenantId }: { tenantId: string }) {
             <Table.Thead>
               <Table.Tr>
                 <Table.Th>Название</Table.Th>
+                <Table.Th>Группа</Table.Th>
                 <Table.Th>Префикс</Table.Th>
                 <Table.Th>Статус</Table.Th>
+                <Table.Th>Память ключа</Table.Th>
+                <Table.Th>Tools</Table.Th>
                 <Table.Th>Истекает</Table.Th>
                 <Table.Th>Последнее использование</Table.Th>
                 <Table.Th>Действия</Table.Th>
@@ -375,13 +602,30 @@ function ApiKeysTab({ tenantId }: { tenantId: string }) {
             <Table.Tbody>
               {data.items.map((key) => (
                 <Table.Tr key={key.id}>
-                  <Table.Td>{key.name}</Table.Td>
+                  <Table.Td>
+                    <Button variant="subtle" size="xs" onClick={() => openEditKey(key)}>
+                      {key.name}
+                    </Button>
+                  </Table.Td>
+                  <Table.Td>{key.group_name || (key.group_id ? groupNameById.get(key.group_id) : null) || '—'}</Table.Td>
                   <Table.Td>
                     <Code>{key.key_prefix}...</Code>
                   </Table.Td>
                   <Table.Td>
                     <Badge color={key.is_active ? 'green' : 'gray'}>
                       {key.is_active ? 'Активный' : 'Неактивный'}
+                    </Badge>
+                  </Table.Td>
+                  <Table.Td>
+                    <Text size="sm" lineClamp={2}>{key.memory_prompt || '—'}</Text>
+                  </Table.Td>
+                  <Table.Td>
+                    <Badge variant="light">
+                      {key.allowed_tool_ids === null
+                        ? (key.group_id
+                            ? `Наследует: ${groupNameById.get(key.group_id) || 'группу'}`
+                            : 'Все')
+                        : `${key.allowed_tool_ids.length} tools`}
                     </Badge>
                   </Table.Td>
                   <Table.Td>
@@ -398,6 +642,15 @@ function ApiKeysTab({ tenantId }: { tenantId: string }) {
                     <Group gap="xs">
                       {key.is_active && (
                         <>
+                          <Tooltip label="Редактировать ключ">
+                            <ActionIcon
+                              variant="subtle"
+                              color="blue"
+                              onClick={() => openEditKey(key)}
+                            >
+                              <IconEdit size={16} />
+                            </ActionIcon>
+                          </Tooltip>
                           <Tooltip label="Ротировать ключ">
                             <ActionIcon
                               variant="subtle"
@@ -451,16 +704,28 @@ function ApiKeysTab({ tenantId }: { tenantId: string }) {
       <Modal
         opened={createOpen}
         onClose={() => setCreateOpen(false)}
-        title="Создать API ключ"
+        title={editKey ? 'Редактировать API ключ' : 'Создать API ключ'}
       >
         <Text size="sm" c="dimmed" mb="md">
           API ключ используется для доступа к чату от имени тенанта через REST API.
-          Полный ключ будет показан только один раз — сохраните его!
+          {editKey ? 'Здесь можно изменить группу, название и память ключа.' : 'Полный ключ будет показан только один раз — сохраните его!'}
         </Text>
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            createMutation.mutate();
+            if (editKey) {
+              updateMutation.mutate({
+                keyId: editKey.id,
+                payload: {
+                  name: keyName,
+                  group_id: keyGroupId || null,
+                  memory_prompt: keyMemoryPrompt || null,
+                  allowed_tool_ids: keyAllowedToolsRestricted ? keyAllowedToolIds : null,
+                },
+              });
+            } else {
+              createMutation.mutate();
+            }
           }}
         >
           <Stack gap="md">
@@ -472,12 +737,148 @@ function ApiKeysTab({ tenantId }: { tenantId: string }) {
               onChange={(e) => setKeyName(e.currentTarget.value)}
               required
             />
+            <Select
+              label="Группа"
+              data={groupOptions}
+              value={keyGroupId || ''}
+              onChange={(value) => setKeyGroupId(value || null)}
+            />
+            <Textarea
+              label="Память ключа"
+              description="Этот текст будет подмешиваться в запросы, выполненные через данный API ключ."
+              placeholder="Например: этот ключ используется только для биллинга и ответов по платежам."
+              autosize
+              minRows={4}
+              maxRows={14}
+              styles={{ input: { resize: 'vertical', whiteSpace: 'pre-wrap' } }}
+              value={keyMemoryPrompt}
+              onChange={(e) => setKeyMemoryPrompt(e.currentTarget.value)}
+            />
+            <Switch
+              label="Ограничить доступ к tools"
+              checked={keyAllowedToolsRestricted}
+              onChange={(e) => setKeyAllowedToolsRestricted(e.currentTarget.checked)}
+            />
+            <MultiSelect
+              label="Разрешённые tools"
+              description="Пустой список означает запрет всех tools. Если ограничение выключено, ключ сможет использовать все доступные tools."
+              data={toolOptions}
+              value={keyAllowedToolIds}
+              onChange={setKeyAllowedToolIds}
+              searchable
+              clearable
+              disabled={!keyAllowedToolsRestricted}
+              placeholder="Выберите tools"
+              nothingFoundMessage="Tools не найдены"
+            />
+            <Stack gap={6}>
+              <Text size="xs" c="dimmed">Пресеты по меткам возможностей инструмента</Text>
+              <Text size="xs" c="dimmed">
+                Работают по `capability_tags`, а не по имени или группе инструмента.
+              </Text>
+              <Group gap="xs" wrap="wrap">
+                {TOOL_PERMISSION_PRESETS.map((preset) => (
+                  <Button
+                    key={preset.label}
+                    variant="light"
+                    size="xs"
+                    onClick={() => applyToolPreset(preset, setKeyAllowedToolsRestricted, setKeyAllowedToolIds)}
+                  >
+                    {preset.label}
+                  </Button>
+                ))}
+              </Group>
+            </Stack>
             <Group justify="flex-end">
               <Button variant="default" onClick={() => setCreateOpen(false)}>
                 Отмена
               </Button>
-              <Button type="submit" loading={createMutation.isPending}>
-                Создать
+              <Button type="submit" loading={createMutation.isPending || updateMutation.isPending}>
+                {editKey ? 'Сохранить' : 'Создать'}
+              </Button>
+            </Group>
+          </Stack>
+        </form>
+      </Modal>
+
+      <Modal
+        opened={groupModalOpen}
+        onClose={() => setGroupModalOpen(false)}
+        title={editGroup ? 'Редактировать группу ключей' : 'Создать группу ключей'}
+      >
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (editGroup) {
+              updateGroupMutation.mutate({
+                groupId: editGroup.id,
+                payload: {
+                  name: groupName,
+                  memory_prompt: groupMemoryPrompt || null,
+                  allowed_tool_ids: groupAllowedToolsRestricted ? groupAllowedToolIds : null,
+                },
+              });
+            } else {
+              createGroupMutation.mutate();
+            }
+          }}
+        >
+          <Stack gap="md">
+            <TextInput
+              label="Название группы"
+              value={groupName}
+              onChange={(e) => setGroupName(e.currentTarget.value)}
+              required
+            />
+            <Textarea
+              label="Память группы"
+              description="Этот текст будет подмешиваться в запросы для всех API ключей этой группы."
+              autosize
+              minRows={4}
+              maxRows={14}
+              styles={{ input: { resize: 'vertical', whiteSpace: 'pre-wrap' } }}
+              value={groupMemoryPrompt}
+              onChange={(e) => setGroupMemoryPrompt(e.currentTarget.value)}
+            />
+            <Switch
+              label="Ограничить tools для группы"
+              checked={groupAllowedToolsRestricted}
+              onChange={(e) => setGroupAllowedToolsRestricted(e.currentTarget.checked)}
+            />
+            <MultiSelect
+              label="Разрешённые tools группы"
+              description="Пустой список означает запрет всех tools для ключей этой группы. Если ограничение выключено, применяется доступ без ограничений."
+              data={toolOptions}
+              value={groupAllowedToolIds}
+              onChange={setGroupAllowedToolIds}
+              searchable
+              clearable
+              disabled={!groupAllowedToolsRestricted}
+              placeholder="Выберите tools"
+              nothingFoundMessage="Tools не найдены"
+            />
+            <Stack gap={6}>
+              <Text size="xs" c="dimmed">Пресеты по меткам возможностей инструмента</Text>
+              <Text size="xs" c="dimmed">
+                Работают по `capability_tags`, а не по имени или группе инструмента.
+              </Text>
+              <Group gap="xs" wrap="wrap">
+                {TOOL_PERMISSION_PRESETS.map((preset) => (
+                  <Button
+                    key={preset.label}
+                    variant="light"
+                    size="xs"
+                    onClick={() => applyToolPreset(preset, setGroupAllowedToolsRestricted, setGroupAllowedToolIds)}
+                  >
+                    {preset.label}
+                  </Button>
+                ))}
+              </Group>
+            </Stack>
+            <Group justify="flex-end">
+              <Button variant="default" onClick={() => setGroupModalOpen(false)}>Отмена</Button>
+              <Button type="submit" loading={createGroupMutation.isPending || updateGroupMutation.isPending}>
+                {editGroup ? 'Сохранить' : 'Создать'}
               </Button>
             </Group>
           </Stack>
@@ -520,734 +921,973 @@ function ApiKeysTab({ tenantId }: { tenantId: string }) {
   );
 }
 
-// ===== MODEL CONFIG TAB =====
-
-const PROVIDER_OPTIONS_MODEL = [
-  { value: 'ollama', label: 'Ollama (локальный)' },
-  { value: 'openai_compatible', label: 'OpenAI Compatible' },
-  { value: 'deepseek_compatible', label: 'DeepSeek Compatible' },
-];
-
-function ModelConfigTab({ tenantId }: { tenantId: string }) {
-  const queryClient = useQueryClient();
-
-  // Load model config
-  const { data: config, isLoading: configLoading } = useQuery({
-    queryKey: ['tenants', tenantId, 'model-config'],
-    queryFn: () => modelConfigApi.get(tenantId),
-  });
-
-  // Load available models from catalog
-  const { data: catalogModels } = useQuery({
-    queryKey: ['models', 'brief'],
-    queryFn: () => modelsApi.brief(),
-  });
-
-  // Load tenant custom models
-  const { data: customModelsData } = useQuery({
-    queryKey: ['tenants', tenantId, 'custom-models'],
-    queryFn: () => customModelsApi.list(tenantId, 1, 100),
-  });
-
-  const [mode, setMode] = useState<string>('manual');
-  const [manualModelId, setManualModelId] = useState<string | null>(null);
-  const [manualCustomModelId, setManualCustomModelId] = useState<string | null>(null);
-  const [autoLightModelId, setAutoLightModelId] = useState<string | null>(null);
-  const [autoHeavyModelId, setAutoHeavyModelId] = useState<string | null>(null);
-  const [autoLightCustomId, setAutoLightCustomId] = useState<string | null>(null);
-  const [autoHeavyCustomId, setAutoHeavyCustomId] = useState<string | null>(null);
-  const [threshold, setThreshold] = useState(0.5);
-  const [dirty, setDirty] = useState(false);
-
-  // Custom model modal state
-  const [customModalOpen, setCustomModalOpen] = useState(false);
-  const [editCustomId, setEditCustomId] = useState<string | null>(null);
-  const [cmName, setCmName] = useState('');
-  const [cmProvider, setCmProvider] = useState('ollama');
-  const [cmBaseUrl, setCmBaseUrl] = useState('');
-  const [cmApiKey, setCmApiKey] = useState('');
-  const [cmModelId, setCmModelId] = useState('');
-  const [cmTier, setCmTier] = useState('medium');
-  const [cmTools, setCmTools] = useState(false);
-  const [cmVision, setCmVision] = useState(false);
-
-  useEffect(() => {
-    if (config) {
-      setMode(config.mode);
-      setManualModelId(config.manual_model_id);
-      setManualCustomModelId(config.manual_custom_model_id);
-      setAutoLightModelId(config.auto_light_model_id);
-      setAutoHeavyModelId(config.auto_heavy_model_id);
-      setAutoLightCustomId(config.auto_light_custom_model_id);
-      setAutoHeavyCustomId(config.auto_heavy_custom_model_id);
-      setThreshold(config.complexity_threshold);
-      setDirty(false);
-    }
-  }, [config]);
-
-  const saveMutation = useMutation({
-    mutationFn: (data: TenantModelConfigUpdate) => modelConfigApi.update(tenantId, data),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['tenants', tenantId, 'model-config'] });
-      setDirty(false);
-      notifications.show({ title: 'Сохранено', message: 'Конфигурация модели обновлена', color: 'green' });
-    },
-    onError: () => {
-      notifications.show({ title: 'Ошибка', message: 'Не удалось сохранить', color: 'red' });
-    },
-  });
-
-  const createCustomMutation = useMutation({
-    mutationFn: (data: TenantCustomModelCreate) => customModelsApi.create(tenantId, data),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['tenants', tenantId, 'custom-models'] });
-      setCustomModalOpen(false);
-      notifications.show({ title: 'Создано', message: 'Приватная модель добавлена', color: 'green' });
-    },
-    onError: () => {
-      notifications.show({ title: 'Ошибка', message: 'Не удалось создать модель', color: 'red' });
-    },
-  });
-
-  const updateCustomMutation = useMutation({
-    mutationFn: ({ id, data }: { id: string; data: TenantCustomModelUpdate }) =>
-      customModelsApi.update(tenantId, id, data),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['tenants', tenantId, 'custom-models'] });
-      setCustomModalOpen(false);
-      notifications.show({ title: 'Обновлено', message: 'Модель обновлена', color: 'green' });
-    },
-  });
-
-  const deleteCustomMutation = useMutation({
-    mutationFn: (id: string) => customModelsApi.delete(tenantId, id),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['tenants', tenantId, 'custom-models'] });
-      notifications.show({ title: 'Удалено', message: 'Приватная модель удалена', color: 'green' });
-    },
-  });
-
-  const handleSave = () => {
-    saveMutation.mutate({
-      mode,
-      manual_model_id: manualModelId,
-      manual_custom_model_id: manualCustomModelId,
-      auto_light_model_id: autoLightModelId,
-      auto_heavy_model_id: autoHeavyModelId,
-      auto_light_custom_model_id: autoLightCustomId,
-      auto_heavy_custom_model_id: autoHeavyCustomId,
-      complexity_threshold: threshold,
-    });
-  };
-
-  const openCreateCustom = () => {
-    setEditCustomId(null);
-    setCmName('');
-    setCmProvider('ollama');
-    setCmBaseUrl('');
-    setCmApiKey('');
-    setCmModelId('');
-    setCmTier('medium');
-    setCmTools(false);
-    setCmVision(false);
-    setCustomModalOpen(true);
-  };
-
-  const openEditCustom = (m: TenantCustomModel) => {
-    setEditCustomId(m.id);
-    setCmName(m.name);
-    setCmProvider(m.provider_type);
-    setCmBaseUrl(m.base_url || '');
-    setCmApiKey('');
-    setCmModelId(m.model_id);
-    setCmTier(m.tier);
-    setCmTools(m.supports_tools);
-    setCmVision(m.supports_vision);
-    setCustomModalOpen(true);
-  };
-
-  const handleSaveCustom = () => {
-    const data = {
-      name: cmName,
-      provider_type: cmProvider,
-      base_url: cmBaseUrl || undefined,
-      api_key: cmApiKey || undefined,
-      model_id: cmModelId,
-      tier: cmTier,
-      supports_tools: cmTools,
-      supports_vision: cmVision,
-    };
-    if (editCustomId) {
-      updateCustomMutation.mutate({ id: editCustomId, data });
-    } else {
-      createCustomMutation.mutate(data);
-    }
-  };
-
-  // Build select options
-  const catalogOptions = (catalogModels || []).map((m: LLMModelBrief) => ({
-    value: m.id,
-    label: `${m.name} (${m.model_id}) [${m.tier}]`,
-  }));
-
-  const customModels = customModelsData?.items || [];
-  const customOptions = customModels.map((m: TenantCustomModel) => ({
-    value: m.id,
-    label: `${m.name} (${m.model_id}) [приватная]`,
-  }));
-
-  const markDirty = () => setDirty(true);
-
-  if (configLoading) {
-    return <Center py="md"><Loader /></Center>;
-  }
-
-  return (
-    <>
-      <Stack gap="lg">
-        <Card withBorder padding="lg" maw={800}>
-          <Stack gap="md">
-            <Title order={4}>Выбор модели</Title>
-            <Text size="sm" c="dimmed">
-              Выберите режим работы: конкретная модель или автоматический выбор на основе сложности запроса.
-            </Text>
-
-            {dirty && (
-              <Alert icon={<IconAlertCircle size={16} />} color="yellow" variant="light">
-                У вас есть несохранённые изменения.
-              </Alert>
-            )}
-
-            <Select
-              label="Режим выбора модели"
-              data={[
-                { value: 'manual', label: 'Вручную — одна конкретная модель' },
-                { value: 'auto', label: 'Автоматически — по сложности запроса' },
-              ]}
-              value={mode}
-              onChange={(v) => { setMode(v || 'manual'); markDirty(); }}
-              allowDeselect={false}
-            />
-
-            {mode === 'manual' && (
-              <Stack gap="sm">
-                <Text size="sm" fw={500}>Выберите модель из каталога:</Text>
-                <Select
-                  label="Модель из каталога"
-                  placeholder="Выберите модель..."
-                  data={catalogOptions}
-                  value={manualModelId}
-                  onChange={(v) => { setManualModelId(v); setManualCustomModelId(null); markDirty(); }}
-                  clearable
-                  searchable
-                />
-                <Text size="xs" c="dimmed" ta="center">— или приватная модель —</Text>
-                <Select
-                  label="Приватная модель"
-                  placeholder="Выберите модель..."
-                  data={customOptions}
-                  value={manualCustomModelId}
-                  onChange={(v) => { setManualCustomModelId(v); setManualModelId(null); markDirty(); }}
-                  clearable
-                  searchable
-                />
-              </Stack>
-            )}
-
-            {mode === 'auto' && (
-              <Stack gap="md">
-                <Text size="sm" c="dimmed">
-                  Система классифицирует сложность запроса (0-1).
-                  Если ниже порога — используется лёгкая модель, иначе — мощная.
-                </Text>
-
-                <Card withBorder padding="sm">
-                  <Text size="sm" fw={500} mb="xs" c="green">Лёгкая модель (простые запросы)</Text>
-                  <Stack gap="xs">
-                    <Select
-                      label="Из каталога"
-                      placeholder="Выберите..."
-                      data={catalogOptions}
-                      value={autoLightModelId}
-                      onChange={(v) => { setAutoLightModelId(v); setAutoLightCustomId(null); markDirty(); }}
-                      clearable
-                      searchable
-                    />
-                    <Select
-                      label="Или приватная"
-                      placeholder="Выберите..."
-                      data={customOptions}
-                      value={autoLightCustomId}
-                      onChange={(v) => { setAutoLightCustomId(v); setAutoLightModelId(null); markDirty(); }}
-                      clearable
-                      searchable
-                    />
-                  </Stack>
-                </Card>
-
-                <Card withBorder padding="sm">
-                  <Text size="sm" fw={500} mb="xs" c="violet">Мощная модель (сложные запросы)</Text>
-                  <Stack gap="xs">
-                    <Select
-                      label="Из каталога"
-                      placeholder="Выберите..."
-                      data={catalogOptions}
-                      value={autoHeavyModelId}
-                      onChange={(v) => { setAutoHeavyModelId(v); setAutoHeavyCustomId(null); markDirty(); }}
-                      clearable
-                      searchable
-                    />
-                    <Select
-                      label="Или приватная"
-                      placeholder="Выберите..."
-                      data={customOptions}
-                      value={autoHeavyCustomId}
-                      onChange={(v) => { setAutoHeavyCustomId(v); setAutoHeavyModelId(null); markDirty(); }}
-                      clearable
-                      searchable
-                    />
-                  </Stack>
-                </Card>
-
-                <div>
-                  <Text size="sm" fw={500} mb={2}>
-                    Порог сложности: {threshold.toFixed(2)}
-                  </Text>
-                  <Text size="xs" c="dimmed" mb="xs">
-                    Запросы с complexity &lt; {threshold.toFixed(2)} → лёгкая модель, остальные → мощная
-                  </Text>
-                  <Slider
-                    min={0}
-                    max={1}
-                    step={0.05}
-                    value={threshold}
-                    onChange={(v) => { setThreshold(v); markDirty(); }}
-                    marks={[
-                      { value: 0, label: '0' },
-                      { value: 0.25, label: '0.25' },
-                      { value: 0.5, label: '0.5' },
-                      { value: 0.75, label: '0.75' },
-                      { value: 1, label: '1' },
-                    ]}
-                    mb="xl"
-                  />
-                </div>
-              </Stack>
-            )}
-
-            <Group justify="flex-end">
-              <Button
-                leftSection={<IconDeviceFloppy size={16} />}
-                onClick={handleSave}
-                loading={saveMutation.isPending}
-                disabled={!dirty}
-              >
-                Сохранить
-              </Button>
-            </Group>
-          </Stack>
-        </Card>
-
-        {/* Custom models section */}
-        <Card withBorder padding="lg" maw={800}>
-          <Stack gap="md">
-            <Group justify="space-between">
-              <div>
-                <Title order={4}>Приватные модели тенанта</Title>
-                <Text size="sm" c="dimmed">
-                  Модели, добавленные этим тенантом. Видны только ему.
-                </Text>
-              </div>
-              <Button leftSection={<IconPlus size={16} />} size="sm" onClick={openCreateCustom}>
-                Добавить
-              </Button>
-            </Group>
-
-            {!customModels.length ? (
-              <Text c="dimmed" ta="center" py="md">Приватных моделей нет.</Text>
-            ) : (
-              <Table striped>
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>Название</Table.Th>
-                    <Table.Th>Провайдер</Table.Th>
-                    <Table.Th>Model ID</Table.Th>
-                    <Table.Th>Уровень</Table.Th>
-                    <Table.Th>Статус</Table.Th>
-                    <Table.Th>Действия</Table.Th>
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {customModels.map((m: TenantCustomModel) => (
-                    <Table.Tr key={m.id} style={{ cursor: 'pointer' }} onClick={() => openEditCustom(m)}>
-                      <Table.Td><Text size="sm" fw={500}>{m.name}</Text></Table.Td>
-                      <Table.Td><Badge variant="light" size="sm">{m.provider_type}</Badge></Table.Td>
-                      <Table.Td><Text size="sm" ff="monospace">{m.model_id}</Text></Table.Td>
-                      <Table.Td><Badge size="sm">{m.tier}</Badge></Table.Td>
-                      <Table.Td>
-                        <Badge color={m.is_active ? 'green' : 'gray'} size="sm">
-                          {m.is_active ? 'Активна' : 'Выкл'}
-                        </Badge>
-                      </Table.Td>
-                      <Table.Td>
-                        <Group gap={4}>
-                          <ActionIcon variant="subtle" color="blue" size="sm" onClick={(e) => { e.stopPropagation(); openEditCustom(m); }}>
-                            <IconEdit size={14} />
-                          </ActionIcon>
-                          <ActionIcon
-                            variant="subtle" color="red" size="sm"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              if (window.confirm(`Удалить "${m.name}"?`)) deleteCustomMutation.mutate(m.id);
-                            }}
-                          >
-                            <IconTrash size={14} />
-                          </ActionIcon>
-                        </Group>
-                      </Table.Td>
-                    </Table.Tr>
-                  ))}
-                </Table.Tbody>
-              </Table>
-            )}
-          </Stack>
-        </Card>
-      </Stack>
-
-      {/* Custom Model Create/Edit Modal — вне Stack */}
-      <Modal
-        opened={customModalOpen}
-        onClose={() => setCustomModalOpen(false)}
-        title={editCustomId ? 'Редактировать приватную модель' : 'Добавить приватную модель'}
-        size="lg"
-      >
-        <Stack gap="md">
-          <TextInput
-            label="Название"
-            placeholder="My GPT-4o"
-            value={cmName}
-            onChange={(e) => setCmName(e.currentTarget.value)}
-            required
-          />
-          <SimpleGrid cols={2}>
-            <Select
-              label="Провайдер"
-              data={PROVIDER_OPTIONS_MODEL}
-              value={cmProvider}
-              onChange={(v) => setCmProvider(v || 'ollama')}
-              allowDeselect={false}
-            />
-            <Select
-              label="Уровень"
-              data={[
-                { value: 'light', label: 'Light' },
-                { value: 'medium', label: 'Medium' },
-                { value: 'heavy', label: 'Heavy' },
-              ]}
-              value={cmTier}
-              onChange={(v) => setCmTier(v || 'medium')}
-              allowDeselect={false}
-            />
-          </SimpleGrid>
-          <TextInput
-            label="Базовый URL"
-            placeholder="http://localhost:11434"
-            value={cmBaseUrl}
-            onChange={(e) => setCmBaseUrl(e.currentTarget.value)}
-          />
-          <PasswordInput
-            label="API ключ"
-            description={editCustomId ? 'Оставьте пустым, чтобы не менять' : ''}
-            value={cmApiKey}
-            onChange={(e) => setCmApiKey(e.currentTarget.value)}
-          />
-          <TextInput
-            label="Model ID"
-            placeholder="gpt-4o"
-            value={cmModelId}
-            onChange={(e) => setCmModelId(e.currentTarget.value)}
-            required
-          />
-          <Group>
-            <Switch label="Tools" checked={cmTools} onChange={(e) => setCmTools(e.currentTarget.checked)} />
-            <Switch label="Vision" checked={cmVision} onChange={(e) => setCmVision(e.currentTarget.checked)} />
-          </Group>
-          <Group justify="flex-end">
-            <Button variant="default" onClick={() => setCustomModalOpen(false)}>Отмена</Button>
-            <Button
-              onClick={handleSaveCustom}
-              loading={createCustomMutation.isPending || updateCustomMutation.isPending}
-            >
-              {editCustomId ? 'Обновить' : 'Создать'}
-            </Button>
-          </Group>
-        </Stack>
-      </Modal>
-    </>
-  );
-}
-
-// ===== SHELL SETTINGS TAB =====
-
-function ShellSettingsTab({ tenantId }: { tenantId: string }) {
-  const queryClient = useQueryClient();
-  const { data: config, isLoading } = useQuery({
-    queryKey: ['tenants', tenantId, 'shell'],
-    queryFn: () => shellApi.get(tenantId),
-  });
-
-  const [form, setForm] = useState<ShellConfigUpdate>({});
-  const [dirty, setDirty] = useState(false);
-
-  useEffect(() => {
-    if (config) {
-      setForm({
-        provider_type: config.provider_type,
-        provider_base_url: config.provider_base_url ?? undefined,
-        model_name: config.model_name,
-        system_prompt: config.system_prompt ?? undefined,
-        rules_text: config.rules_text ?? undefined,
-        temperature: config.temperature,
-        max_context_messages: config.max_context_messages,
-        max_tokens: config.max_tokens,
-        memory_enabled: config.memory_enabled,
-        knowledge_base_enabled: config.knowledge_base_enabled,
-        embedding_model_name: config.embedding_model_name ?? undefined,
-        kb_max_chunks: config.kb_max_chunks,
-      });
-      setDirty(false);
-    }
-  }, [config]);
-
-  useEffect(() => {
-    if (!dirty) return;
-    const handler = (e: BeforeUnloadEvent) => {
-      e.preventDefault();
-    };
-    window.addEventListener('beforeunload', handler);
-    return () => window.removeEventListener('beforeunload', handler);
-  }, [dirty]);
-
-  const updateField = <K extends keyof ShellConfigUpdate>(
-    key: K,
-    value: ShellConfigUpdate[K]
-  ) => {
-    setForm((prev) => ({ ...prev, [key]: value }));
-    setDirty(true);
-  };
-
-  const saveMutation = useMutation({
-    mutationFn: () => shellApi.update(tenantId, form),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['tenants', tenantId, 'shell'] });
-      setDirty(false);
-      notifications.show({ title: 'Сохранено', message: 'Настройки оболочки обновлены', color: 'green' });
-    },
-    onError: (err: unknown) => {
-      const message =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
-        'Не удалось сохранить';
-      notifications.show({ title: 'Ошибка', message, color: 'red' });
-    },
-  });
-
-  const testMutation = useMutation({
-    mutationFn: () => shellApi.testConnection(tenantId),
-    onSuccess: (result) => {
-      notifications.show({
-        title: result.success ? 'Соединение установлено' : 'Ошибка соединения',
-        message: result.message,
-        color: result.success ? 'green' : 'red',
-      });
-    },
-    onError: () => {
-      notifications.show({
-        title: 'Ошибка',
-        message: 'Тест соединения не удался',
-        color: 'red',
-      });
-    },
-  });
-
-  if (isLoading) {
-    return (
-      <Center py="md">
-        <Loader />
-      </Center>
-    );
-  }
-
-  return (
-    <Card withBorder padding="lg" maw={800}>
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          saveMutation.mutate();
-        }}
-      >
-        <Stack gap="md">
-          {dirty && (
-            <Alert icon={<IconAlertCircle size={16} />} color="yellow" variant="light">
-              У вас есть несохранённые изменения.
-            </Alert>
-          )}
-
-          <Select
-            label="Тип провайдера"
-            description="Ollama — локальные модели, OpenAI Compatible — любой OpenAI-совместимый API, DeepSeek — API DeepSeek"
-            data={[
-              { value: 'ollama', label: 'Ollama (локальный)' },
-              { value: 'openai_compatible', label: 'OpenAI Compatible' },
-              { value: 'deepseek_compatible', label: 'DeepSeek Compatible' },
-            ]}
-            value={form.provider_type || ''}
-            onChange={(val) => updateField('provider_type', val || '')}
-          />
-
-          <TextInput
-            label="Базовый URL провайдера"
-            description="Для Ollama: http://localhost:11434, для DeepSeek: https://api.deepseek.com"
-            placeholder="http://localhost:11434"
-            value={form.provider_base_url || ''}
-            onChange={(e) => updateField('provider_base_url', e.currentTarget.value)}
-          />
-
-          <PasswordInput
-            label="API ключ провайдера"
-            description="Ключ аутентификации у провайдера. Для локального Ollama не требуется"
-            placeholder="sk-..."
-            value={form.provider_api_key || ''}
-            onChange={(e) => updateField('provider_api_key', e.currentTarget.value)}
-          />
-
-          <TextInput
-            label="Название модели"
-            description="Точное имя модели. Ollama: qwen2.5:32b, DeepSeek: deepseek-chat, OpenAI: gpt-4o"
-            placeholder="qwen2.5:32b"
-            value={form.model_name || ''}
-            onChange={(e) => updateField('model_name', e.currentTarget.value)}
-          />
-
-          <Textarea
-            label="Системный промпт"
-            description="Основная инструкция для LLM — роль, стиль общения, язык ответов"
-            placeholder="Ты AI-ассистент компании. Отвечай вежливо и по делу."
-            value={form.system_prompt || ''}
-            onChange={(e) => updateField('system_prompt', e.currentTarget.value)}
-            autosize
-            minRows={4}
-            maxRows={12}
-          />
-
-          <Textarea
-            label="Текст правил"
-            description="Дополнительные ограничения, добавляются после системного промпта"
-            placeholder="Не обсуждай конкурентов. Отвечай кратко."
-            value={form.rules_text || ''}
-            onChange={(e) => updateField('rules_text', e.currentTarget.value)}
-            autosize
-            minRows={3}
-            maxRows={8}
-          />
-
-          <div>
-            <Text size="sm" fw={500} mb={2}>
-              Температура: {form.temperature?.toFixed(2) ?? '0.70'}
-            </Text>
-            <Text size="xs" c="dimmed" mb="xs">
-              0 — строгие, предсказуемые ответы, 1 — сбалансировано, 2 — максимально креативно
-            </Text>
-            <Slider
-              min={0}
-              max={2}
-              step={0.01}
-              value={form.temperature ?? 0.7}
-              onChange={(val) => updateField('temperature', val)}
-              marks={[
-                { value: 0, label: '0' },
-                { value: 1, label: '1' },
-                { value: 2, label: '2' },
-              ]}
-            />
-          </div>
-
-          <Group grow>
-            <NumberInput
-              label="Макс. сообщений контекста"
-              description="Сколько последних сообщений чата отправлять в LLM"
-              value={form.max_context_messages ?? 20}
-              onChange={(val) => updateField('max_context_messages', Number(val))}
-              min={1}
-              max={200}
-            />
-            <NumberInput
-              label="Макс. токенов ответа"
-              description="Максимальная длина ответа LLM в токенах"
-              value={form.max_tokens ?? 4096}
-              onChange={(val) => updateField('max_tokens', Number(val))}
-              min={1}
-              max={128000}
-            />
-          </Group>
-
-          <Group>
-            <Switch
-              label="Память включена"
-              checked={form.memory_enabled ?? false}
-              onChange={(e) => updateField('memory_enabled', e.currentTarget.checked)}
-            />
-            <Switch
-              label="База знаний включена"
-              checked={form.knowledge_base_enabled ?? false}
-              onChange={(e) => updateField('knowledge_base_enabled', e.currentTarget.checked)}
-            />
-          </Group>
-
-          {form.knowledge_base_enabled && (
-            <Group grow>
-              <TextInput
-                label="Модель эмбеддингов"
-                description="Модель для генерации эмбеддингов (например, nomic-embed-text)"
-                placeholder="nomic-embed-text"
-                value={form.embedding_model_name ?? ''}
-                onChange={(e) => updateField('embedding_model_name', e.currentTarget.value || undefined)}
-              />
-              <NumberInput
-                label="Макс. чанков KB"
-                description="Сколько релевантных чанков подмешивать в контекст"
-                min={1}
-                max={50}
-                value={form.kb_max_chunks ?? 10}
-                onChange={(val) => updateField('kb_max_chunks', typeof val === 'number' ? val : 10)}
-              />
-            </Group>
-          )}
-
-          <Group justify="space-between">
-            <Button
-              variant="outline"
-              leftSection={<IconPlugConnected size={16} />}
-              onClick={() => testMutation.mutate()}
-              loading={testMutation.isPending}
-            >
-              Тест соединения
-            </Button>
-            <Button
-              type="submit"
-              leftSection={<IconDeviceFloppy size={16} />}
-              loading={saveMutation.isPending}
-              disabled={!dirty}
-            >
-              Сохранить изменения
-            </Button>
-          </Group>
-        </Stack>
-      </form>
-    </Card>
-  );
-}
-
 // ===== TOOLS TAB =====
+
+const DB_SEARCH_TOOL_TEMPLATE = {
+  type: 'function',
+  function: {
+    name: 'search_records',
+    description:
+      'Выполняет безопасный read-only поиск записей в настроенной БД по whitelist-фильтрам и/или общему query.',
+    parameters: {
+      type: 'object',
+      properties: {
+        filters: {
+          type: 'object',
+          description: 'Набор фильтров по разрешённым alias, например {"client_id":"123","ip":"172.10.100.20"}',
+        },
+        query: { type: 'string', description: 'Свободный текстовый поиск по search_columns' },
+        limit: { type: 'integer', description: 'Сколько записей вернуть', minimum: 1, maximum: 25 },
+      },
+      additionalProperties: false,
+    },
+  },
+  x_backend_config: {
+    handler: 'search_records',
+    table: 'public.records_view',
+    filter_fields: {
+      record_id: { column: 'id', mode: 'exact' },
+      ip: { column: 'ip_address', mode: 'exact' },
+      name: { column: 'name', mode: 'contains' },
+      address: { column: 'address', mode: 'contains' },
+    },
+    search_columns: ['name', 'address', 'notes'],
+    result_columns: ['id', 'name', 'ip_address', 'address', 'status'],
+    default_limit: 10,
+    max_limit: 25,
+    sort_by: 'id',
+    static_filters: {
+      is_active: true,
+    },
+  },
+};
+
+const API_FETCH_TOOL_TEMPLATE = {
+  type: 'function',
+  function: {
+    name: 'fetch_api_data',
+    description:
+      'Получает read-only данные из внешнего HTTP API по заранее разрешённым path/query параметрам.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path_values: {
+          type: 'object',
+          description: 'Значения для path-плейсхолдеров endpoint, например {"client_id":"123"}',
+        },
+        query_params: {
+          type: 'object',
+          description: 'Разрешённые query-параметры, например {"ip":"172.10.100.20"}',
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  x_backend_config: {
+    handler: 'fetch_api_data',
+    base_url: 'https://api.example.com',
+    endpoint: '/records/{record_id}',
+    method: 'GET',
+    path_params: ['record_id'],
+    query_params: {
+      ip: 'ip',
+      client_id: 'client_id',
+    },
+    headers: {
+      Accept: 'application/json',
+    },
+    timeout_seconds: 15,
+    result_path: 'data',
+  },
+};
+
+const SSH_EXEC_TOOL_TEMPLATE = {
+  type: 'function',
+  function: {
+    name: 'ssh_exec',
+    description: 'Выполняет команду на удалённом сервере/устройстве по SSH из списка разрешённых команд.',
+    parameters: {
+      type: 'object',
+      properties: {
+        command_name: { type: 'string', description: 'Имя команды из списка разрешённых' },
+        params: { type: 'object', description: 'Параметры для подстановки в шаблон команды' },
+      },
+      required: ['command_name'],
+      additionalProperties: false,
+    },
+  },
+  x_backend_config: {
+    handler: 'ssh_exec',
+    timeout_seconds: 15,
+    strip_ansi: true,
+    commands: {
+      show_interfaces: {
+        command: 'ip -br addr show',
+        description: 'Список сетевых интерфейсов с IP',
+      },
+      ping_host: {
+        command: 'ping -c 4 -W 2 {target}',
+        description: 'Пинг указанного хоста',
+        params: ['target'],
+      },
+      show_routes: {
+        command: 'ip route show',
+        description: 'Таблица маршрутизации',
+      },
+    },
+  },
+};
+
+const TELNET_EXEC_TOOL_TEMPLATE = {
+  type: 'function',
+  function: {
+    name: 'telnet_exec',
+    description: 'Выполняет команду на сетевом оборудовании по Telnet из списка разрешённых команд.',
+    parameters: {
+      type: 'object',
+      properties: {
+        command_name: { type: 'string', description: 'Имя команды из списка разрешённых' },
+        params: { type: 'object', description: 'Параметры для подстановки в шаблон команды' },
+      },
+      required: ['command_name'],
+      additionalProperties: false,
+    },
+  },
+  x_backend_config: {
+    handler: 'telnet_exec',
+    vendor: 'dlink',
+    timeout_seconds: 15,
+    strip_ansi: true,
+    commands: {
+      show_ports: {
+        command: 'show ports',
+        description: 'Статусы всех портов коммутатора',
+      },
+      show_fdb_port: {
+        command: 'show fdb port {port}',
+        description: 'MAC-адреса на порту',
+        params: ['port'],
+      },
+      show_cable_diag: {
+        command: 'cable_diag ports {port}',
+        description: 'Диагностика кабеля на порту',
+        params: ['port'],
+      },
+    },
+  },
+};
+
+const SNMP_TOOL_TEMPLATE = {
+  type: 'function',
+  function: {
+    name: 'snmp_query',
+    description: 'Запрашивает данные с сетевого оборудования по SNMP из списка разрешённых OID.',
+    parameters: {
+      type: 'object',
+      properties: {
+        oid_name: { type: 'string', description: 'Имя OID из списка разрешённых' },
+        params: { type: 'object', description: 'Параметры для подстановки в OID' },
+      },
+      required: ['oid_name'],
+      additionalProperties: false,
+    },
+  },
+  x_backend_config: {
+    handler: 'snmp_get',
+    timeout_seconds: 10,
+    walk_max_rows: 256,
+    oids: {
+      port_status: {
+        oid: '1.3.6.1.2.1.2.2.1.8.{port_index}',
+        description: 'Статус порта (1=up, 2=down, 3=testing)',
+        params: ['port_index'],
+        value_map: { '1': 'up', '2': 'down', '3': 'testing' },
+      },
+      port_speed: {
+        oid: '1.3.6.1.2.1.2.2.1.5.{port_index}',
+        description: 'Скорость порта в bps',
+        params: ['port_index'],
+      },
+      sys_uptime: {
+        oid: '1.3.6.1.2.1.1.3.0',
+        description: 'Аптайм устройства',
+      },
+      sys_name: {
+        oid: '1.3.6.1.2.1.1.5.0',
+        description: 'Имя устройства',
+      },
+    },
+    walk_oids: {
+      all_port_statuses: {
+        oid: '1.3.6.1.2.1.2.2.1.8',
+        description: 'Статусы всех портов',
+      },
+      all_port_descriptions: {
+        oid: '1.3.6.1.2.1.2.2.1.2',
+        description: 'Описания всех портов',
+      },
+    },
+  },
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+type SearchFilterFieldRow = {
+  alias: string;
+  column: string;
+  mode: string;
+  description: string;
+};
+
+type SearchResultFieldRow = {
+  alias: string;
+  column: string;
+  description: string;
+};
+
+type SearchJoinRow = {
+  type: 'left' | 'inner';
+  table: string;
+  alias: string;
+  left_column: string;
+  right_column: string;
+};
+
+type SearchStaticFilterRow = {
+  key: string;
+  value: string;
+};
+
+function isSearchRecordsConfig(config: Record<string, unknown> | null | undefined): boolean {
+  if (!isRecord(config)) return false;
+  const runtime = isRecord(config.x_backend_config) ? config.x_backend_config : {};
+  return runtime.handler === 'search_records';
+}
+
+// ---- SSH/Telnet command builder types & helpers ----
+
+type CmdEditorRow = {
+  name: string;
+  command: string;
+  description: string;
+  params: string; // comma-separated param names
+};
+
+const _CMD_HANDLERS = new Set(['ssh_exec', 'telnet_exec']);
+
+const _HANDLER_DISPLAY: Record<string, { label: string; color: string; icon: typeof IconTool }> = {
+  ssh_exec: { label: 'SSH', color: 'teal', icon: IconTerminal2 },
+  telnet_exec: { label: 'Telnet', color: 'orange', icon: IconRouter },
+  snmp_get: { label: 'SNMP', color: 'grape', icon: IconNetwork },
+  search_records: { label: 'SQL', color: 'blue', icon: IconDatabase },
+  fetch_api_data: { label: 'API', color: 'cyan', icon: IconApi },
+  ping: { label: 'Ping', color: 'green', icon: IconWorldWww },
+  dns_lookup: { label: 'DNS', color: 'indigo', icon: IconWorldWww },
+  traceroute: { label: 'Traceroute', color: 'lime', icon: IconWorldWww },
+};
+
+function getToolHandlerInfo(config: Record<string, unknown> | null | undefined): { label: string; color: string; icon: typeof IconTool } {
+  if (!isRecord(config)) return { label: 'function', color: 'gray', icon: IconTool };
+  const runtime = isRecord(config.x_backend_config) ? config.x_backend_config : {};
+  const handler = typeof runtime.handler === 'string' ? runtime.handler : '';
+  return _HANDLER_DISPLAY[handler] || { label: handler || 'function', color: 'gray', icon: IconTool };
+}
+
+function isCmdEditorConfig(config: Record<string, unknown> | null | undefined): boolean {
+  if (!isRecord(config)) return false;
+  const runtime = isRecord(config.x_backend_config) ? config.x_backend_config : {};
+  return _CMD_HANDLERS.has(String(runtime.handler || ''));
+}
+
+function readCmdEditorRows(config: Record<string, unknown> | null | undefined): CmdEditorRow[] {
+  if (!isRecord(config)) return [];
+  const runtime = isRecord(config.x_backend_config) ? config.x_backend_config : {};
+  const commands = isRecord(runtime.commands) ? runtime.commands : {};
+  return Object.entries(commands).map(([name, raw]) => {
+    const cfg = isRecord(raw) ? raw : {};
+    const params = Array.isArray(cfg.params) ? (cfg.params as string[]).join(', ') : '';
+    return {
+      name,
+      command: typeof cfg.command === 'string' ? cfg.command : '',
+      description: typeof cfg.description === 'string' ? cfg.description : '',
+      params,
+    };
+  });
+}
+
+function readCmdTimeout(config: Record<string, unknown> | null | undefined): number {
+  if (!isRecord(config)) return 15;
+  const runtime = isRecord(config.x_backend_config) ? config.x_backend_config : {};
+  return typeof runtime.timeout_seconds === 'number' ? runtime.timeout_seconds : 15;
+}
+
+function readCmdVendor(config: Record<string, unknown> | null | undefined): string {
+  if (!isRecord(config)) return '';
+  const runtime = isRecord(config.x_backend_config) ? config.x_backend_config : {};
+  return typeof runtime.vendor === 'string' ? runtime.vendor : '';
+}
+
+function applyCmdEditor(
+  config: Record<string, unknown>,
+  rows: CmdEditorRow[],
+  timeout: number,
+  vendor: string,
+): Record<string, unknown> {
+  const nextConfig = JSON.parse(JSON.stringify(config)) as Record<string, unknown>;
+  const runtime = isRecord(nextConfig.x_backend_config) ? { ...nextConfig.x_backend_config } : {};
+
+  const commands: Record<string, unknown> = {};
+  for (const row of rows) {
+    const name = row.name.trim();
+    const command = row.command.trim();
+    if (!name || !command) continue;
+    const paramsList = row.params.split(',').map(s => s.trim()).filter(Boolean);
+    commands[name] = {
+      command,
+      description: row.description.trim() || undefined,
+      ...(paramsList.length > 0 ? { params: paramsList } : {}),
+    };
+  }
+  runtime.commands = commands;
+  runtime.timeout_seconds = timeout;
+  if (vendor.trim()) runtime.vendor = vendor.trim();
+  else delete runtime.vendor;
+
+  nextConfig.x_backend_config = runtime;
+  return nextConfig;
+}
+
+function readSearchFilterRows(config: Record<string, unknown> | null | undefined): SearchFilterFieldRow[] {
+  if (!isRecord(config)) return [];
+  const runtime = isRecord(config.x_backend_config) ? config.x_backend_config : {};
+  const functionCfg = isRecord(config.function) ? config.function : {};
+  const params = isRecord(functionCfg.parameters) ? functionCfg.parameters : {};
+  const props = isRecord(params.properties) ? params.properties : {};
+  const filters = isRecord(props.filters) ? props.filters : {};
+  const filterProps = isRecord(filters.properties) ? filters.properties : {};
+  const filterFields = isRecord(runtime.filter_fields) ? runtime.filter_fields : {};
+
+  return Object.entries(filterFields).map(([alias, rawField]) => {
+    const fieldCfg = isRecord(rawField) ? rawField : {};
+    const propCfg = isRecord(filterProps[alias]) ? filterProps[alias] : {};
+    return {
+      alias,
+      column: typeof fieldCfg.column === 'string' ? fieldCfg.column : '',
+      mode: typeof fieldCfg.mode === 'string' ? fieldCfg.mode : 'contains',
+      description: typeof propCfg.description === 'string' ? propCfg.description : '',
+    };
+  });
+}
+
+function readSearchResultRows(config: Record<string, unknown> | null | undefined): SearchResultFieldRow[] {
+  if (!isRecord(config)) return [];
+  const runtime = isRecord(config.x_backend_config) ? config.x_backend_config : {};
+  const resultColumns = Array.isArray(runtime.result_columns) ? runtime.result_columns : [];
+  return resultColumns.map((item) => {
+    if (typeof item === 'string') {
+      return { alias: item, column: item, description: '' };
+    }
+    if (isRecord(item)) {
+      return {
+        alias: typeof item.alias === 'string' ? item.alias : '',
+        column: typeof item.column === 'string' ? item.column : '',
+        description: typeof item.description === 'string' ? item.description : '',
+      };
+    }
+    return { alias: '', column: '', description: '' };
+  });
+}
+
+function readSearchTable(config: Record<string, unknown> | null | undefined): string {
+  if (!isRecord(config)) return '';
+  const runtime = isRecord(config.x_backend_config) ? config.x_backend_config : {};
+  return typeof runtime.table === 'string' ? runtime.table : (typeof runtime.view === 'string' ? runtime.view : '');
+}
+
+function readSearchTableAlias(config: Record<string, unknown> | null | undefined): string {
+  if (!isRecord(config)) return '';
+  const runtime = isRecord(config.x_backend_config) ? config.x_backend_config : {};
+  return typeof runtime.table_alias === 'string' ? runtime.table_alias : '';
+}
+
+function readSearchColumns(config: Record<string, unknown> | null | undefined): string[] {
+  if (!isRecord(config)) return [];
+  const runtime = isRecord(config.x_backend_config) ? config.x_backend_config : {};
+  return Array.isArray(runtime.search_columns) ? runtime.search_columns.filter((s): s is string => typeof s === 'string') : [];
+}
+
+function readSearchJoinRows(config: Record<string, unknown> | null | undefined): SearchJoinRow[] {
+  if (!isRecord(config)) return [];
+  const runtime = isRecord(config.x_backend_config) ? config.x_backend_config : {};
+  if (!Array.isArray(runtime.joins)) return [];
+  return runtime.joins.filter(isRecord).map((j) => ({
+    type: j.type === 'inner' ? 'inner' as const : 'left' as const,
+    table: typeof j.table === 'string' ? j.table : '',
+    alias: typeof j.alias === 'string' ? j.alias : '',
+    left_column: typeof j.left_column === 'string' ? j.left_column : '',
+    right_column: typeof j.right_column === 'string' ? j.right_column : '',
+  }));
+}
+
+function readSearchStaticFilters(config: Record<string, unknown> | null | undefined): SearchStaticFilterRow[] {
+  if (!isRecord(config)) return [];
+  const runtime = isRecord(config.x_backend_config) ? config.x_backend_config : {};
+  if (!isRecord(runtime.static_filters)) return [];
+  return Object.entries(runtime.static_filters).map(([key, value]) => ({
+    key,
+    value: typeof value === 'string' ? value : JSON.stringify(value),
+  }));
+}
+
+function readSearchDateWindow(config: Record<string, unknown> | null | undefined): { column: string; days: number } | null {
+  if (!isRecord(config)) return null;
+  const runtime = isRecord(config.x_backend_config) ? config.x_backend_config : {};
+  if (!isRecord(runtime.date_window)) return null;
+  const column = typeof runtime.date_window.column === 'string' ? runtime.date_window.column : '';
+  const days = typeof runtime.date_window.days === 'number' ? runtime.date_window.days : 0;
+  if (!column || !days) return null;
+  return { column, days };
+}
+
+function readSearchLimits(config: Record<string, unknown> | null | undefined): { defaultLimit: number; maxLimit: number; unlimitedResults: boolean } {
+  if (!isRecord(config)) return { defaultLimit: 10, maxLimit: 25, unlimitedResults: false };
+  const runtime = isRecord(config.x_backend_config) ? config.x_backend_config : {};
+  return {
+    defaultLimit: typeof runtime.default_limit === 'number' ? runtime.default_limit : 10,
+    maxLimit: typeof runtime.max_limit === 'number' ? runtime.max_limit : 25,
+    unlimitedResults: !!runtime.unlimited_results,
+  };
+}
+
+function readSearchSortBy(config: Record<string, unknown> | null | undefined): string {
+  if (!isRecord(config)) return '';
+  const runtime = isRecord(config.x_backend_config) ? config.x_backend_config : {};
+  return typeof runtime.sort_by === 'string' ? runtime.sort_by : '';
+}
+
+function applySearchRecordsEditor(
+  config: Record<string, unknown>,
+  filterRows: SearchFilterFieldRow[],
+  resultRows: SearchResultFieldRow[],
+  table: string,
+  tableAlias: string,
+  searchCols: string[],
+  joinRows: SearchJoinRow[],
+  staticFilters: SearchStaticFilterRow[],
+  dateWindow: { column: string; days: number } | null,
+  defaultLimit: number,
+  maxLimit: number,
+  unlimitedResults: boolean,
+  sortBy: string,
+): Record<string, unknown> {
+  const nextConfig = JSON.parse(JSON.stringify(config)) as Record<string, unknown>;
+  const functionCfg = isRecord(nextConfig.function) ? { ...nextConfig.function } : {};
+  const params = isRecord(functionCfg.parameters) ? { ...functionCfg.parameters } : {};
+  const props = isRecord(params.properties) ? { ...params.properties } : {};
+  const filters = isRecord(props.filters) ? { ...props.filters } : {};
+  const runtime = isRecord(nextConfig.x_backend_config) ? { ...nextConfig.x_backend_config } : {};
+
+  // Filter fields
+  const nextFilterFields: Record<string, unknown> = {};
+  const nextFilterProps: Record<string, unknown> = {};
+  for (const row of filterRows) {
+    const alias = row.alias.trim();
+    const column = row.column.trim();
+    if (!alias || !column) continue;
+    nextFilterFields[alias] = {
+      column,
+      mode: row.mode || 'contains',
+    };
+    nextFilterProps[alias] = {
+      type: 'string',
+      ...(row.description.trim() ? { description: row.description.trim() } : {}),
+    };
+  }
+  runtime.filter_fields = nextFilterFields;
+  runtime.result_columns = resultRows
+    .map((row) => {
+      const alias = row.alias.trim();
+      const column = row.column.trim();
+      const description = row.description.trim();
+      const obj: Record<string, string> = { alias, column };
+      if (description) obj.description = description;
+      return obj;
+    })
+    .filter((row) => row.alias && row.column);
+
+  // Table source
+  if (table.trim()) runtime.table = table.trim();
+  if (tableAlias.trim()) runtime.table_alias = tableAlias.trim();
+  else delete runtime.table_alias;
+
+  // Search columns
+  const validSearchCols = searchCols.map(s => s.trim()).filter(Boolean);
+  if (validSearchCols.length > 0) runtime.search_columns = validSearchCols;
+  else delete runtime.search_columns;
+
+  // Joins
+  const validJoins = joinRows
+    .filter(j => j.table.trim() && j.left_column.trim() && j.right_column.trim())
+    .map(j => ({
+      type: j.type,
+      table: j.table.trim(),
+      ...(j.alias.trim() ? { alias: j.alias.trim() } : {}),
+      left_column: j.left_column.trim(),
+      right_column: j.right_column.trim(),
+    }));
+  if (validJoins.length > 0) runtime.joins = validJoins;
+  else delete runtime.joins;
+
+  // Static filters
+  const sf: Record<string, unknown> = {};
+  for (const { key, value } of staticFilters) {
+    const k = key.trim();
+    if (!k) continue;
+    try { sf[k] = JSON.parse(value); } catch { sf[k] = value; }
+  }
+  if (Object.keys(sf).length > 0) runtime.static_filters = sf;
+  else delete runtime.static_filters;
+
+  // Date window
+  if (dateWindow && dateWindow.column.trim() && dateWindow.days > 0) {
+    runtime.date_window = { column: dateWindow.column.trim(), days: dateWindow.days };
+  } else {
+    delete runtime.date_window;
+  }
+
+  // Limits
+  runtime.default_limit = defaultLimit;
+  runtime.max_limit = maxLimit;
+  if (unlimitedResults) runtime.unlimited_results = true;
+  else delete runtime.unlimited_results;
+
+  // Sort
+  if (sortBy.trim()) runtime.sort_by = sortBy.trim();
+  else delete runtime.sort_by;
+
+  // Update limit.maximum in function parameters to match maxLimit
+  const limitProp = isRecord(props.limit) ? { ...props.limit } : {};
+  limitProp.maximum = maxLimit;
+  props.limit = limitProp;
+
+  filters.properties = nextFilterProps;
+  props.filters = filters;
+  params.properties = props;
+  functionCfg.parameters = params;
+  nextConfig.function = functionCfg;
+  nextConfig.x_backend_config = runtime;
+  return nextConfig;
+}
+
+// ---- API editor types & helpers (fetch_api_data) ----
+
+type ApiEnumValueRow = {
+  value: string;
+  description: string;
+  requires: string[];  // aliases of query_params this enum value requires
+};
+
+type ApiPathParamRow = {
+  name: string;
+  description: string;
+  useEnum: boolean;
+  enumValues: ApiEnumValueRow[];
+};
+
+type ApiQueryParamRow = {
+  alias: string;       // public name shown to LLM
+  target: string;      // actual query parameter sent to remote API
+  description: string;
+};
+
+type ApiHeaderRow = {
+  name: string;
+  value: string;
+};
+
+type ApiStaticQueryRow = {
+  key: string;
+  value: string;
+};
+
+type ApiBodyParamRow = {
+  alias: string;
+  target: string;
+  description: string;
+};
+
+type ApiStaticBodyRow = {
+  key: string;
+  value: string;
+};
+
+function isApiEditorConfig(config: Record<string, unknown> | null | undefined): boolean {
+  if (!isRecord(config)) return false;
+  const runtime = isRecord(config.x_backend_config) ? config.x_backend_config : {};
+  return runtime.handler === 'fetch_api_data';
+}
+
+function readApiRuntime(config: Record<string, unknown> | null | undefined): Record<string, unknown> {
+  if (!isRecord(config)) return {};
+  return isRecord(config.x_backend_config) ? config.x_backend_config : {};
+}
+
+function readApiFunctionProps(
+  config: Record<string, unknown> | null | undefined,
+  key: 'path_values' | 'query_params',
+): Record<string, unknown> {
+  if (!isRecord(config)) return {};
+  const fn = isRecord(config.function) ? config.function : {};
+  const params = isRecord(fn.parameters) ? fn.parameters : {};
+  const props = isRecord(params.properties) ? params.properties : {};
+  const target = isRecord(props[key]) ? props[key] : {};
+  const inner = isRecord(target.properties) ? target.properties : {};
+  return inner;
+}
+
+function readApiBaseUrl(config: Record<string, unknown> | null | undefined): string {
+  const runtime = readApiRuntime(config);
+  return typeof runtime.base_url === 'string' ? runtime.base_url : '';
+}
+
+function readApiEndpoint(config: Record<string, unknown> | null | undefined): string {
+  const runtime = readApiRuntime(config);
+  return typeof runtime.endpoint === 'string' ? runtime.endpoint : '';
+}
+
+function readApiMethod(config: Record<string, unknown> | null | undefined): string {
+  const runtime = readApiRuntime(config);
+  return typeof runtime.method === 'string' ? runtime.method : 'GET';
+}
+
+function readApiTimeout(config: Record<string, unknown> | null | undefined): number {
+  const runtime = readApiRuntime(config);
+  return typeof runtime.timeout_seconds === 'number' ? runtime.timeout_seconds : 15;
+}
+
+function readApiResultPath(config: Record<string, unknown> | null | undefined): string {
+  const runtime = readApiRuntime(config);
+  return typeof runtime.result_path === 'string' ? runtime.result_path : '';
+}
+
+function readApiMaxResponseChars(config: Record<string, unknown> | null | undefined): number {
+  const runtime = readApiRuntime(config);
+  return typeof runtime.max_response_chars === 'number' ? runtime.max_response_chars : 16000;
+}
+
+function readApiPathParamRows(config: Record<string, unknown> | null | undefined): ApiPathParamRow[] {
+  const runtime = readApiRuntime(config);
+  const list = Array.isArray(runtime.path_params) ? runtime.path_params : [];
+  const descs = readApiFunctionProps(config, 'path_values');
+  const enumStore = isRecord(runtime.enum_values) ? runtime.enum_values : {};
+  const baseDescStore = isRecord(runtime.enum_base_descriptions) ? runtime.enum_base_descriptions : {};
+  return list.filter((s): s is string => typeof s === 'string').map((name) => {
+    const propCfg = isRecord(descs[name]) ? descs[name] : {};
+    const fullDesc = typeof propCfg.description === 'string' ? propCfg.description : '';
+    const baseDesc = typeof baseDescStore[name] === 'string' ? (baseDescStore[name] as string) : fullDesc;
+    const enumRaw = Array.isArray(enumStore[name]) ? (enumStore[name] as unknown[]) : [];
+    let enumValues: ApiEnumValueRow[] = enumRaw.filter(isRecord).map((item) => ({
+      value: typeof item.value === 'string' ? item.value : '',
+      description: typeof item.description === 'string' ? item.description : '',
+      requires: Array.isArray(item.requires) ? (item.requires as unknown[]).filter((s): s is string => typeof s === 'string') : [],
+    }));
+    // Fallback: tool was saved with enum but no rich enum_values metadata —
+    // populate value-only rows so editor isn't empty.
+    if (enumValues.length === 0 && Array.isArray(propCfg.enum)) {
+      enumValues = (propCfg.enum as unknown[])
+        .filter((s): s is string => typeof s === 'string')
+        .map((value) => ({ value, description: '', requires: [] }));
+    }
+    const useEnum = Array.isArray(propCfg.enum) || enumValues.length > 0;
+    return {
+      name,
+      description: useEnum ? baseDesc : fullDesc,
+      useEnum,
+      enumValues,
+    };
+  });
+}
+
+function readApiQueryParamRows(config: Record<string, unknown> | null | undefined): ApiQueryParamRow[] {
+  const runtime = readApiRuntime(config);
+  const map = isRecord(runtime.query_params) ? runtime.query_params : {};
+  const descs = readApiFunctionProps(config, 'query_params');
+  return Object.entries(map).map(([alias, target]) => {
+    const propCfg = isRecord(descs[alias]) ? descs[alias] : {};
+    return {
+      alias,
+      target: typeof target === 'string' ? target : alias,
+      description: typeof propCfg.description === 'string' ? propCfg.description : '',
+    };
+  });
+}
+
+function readApiHeaderRows(config: Record<string, unknown> | null | undefined): ApiHeaderRow[] {
+  const runtime = readApiRuntime(config);
+  const headers = isRecord(runtime.headers) ? runtime.headers : {};
+  return Object.entries(headers).map(([name, value]) => ({
+    name,
+    value: typeof value === 'string' ? value : JSON.stringify(value),
+  }));
+}
+
+function readApiStaticQueryRows(config: Record<string, unknown> | null | undefined): ApiStaticQueryRow[] {
+  const runtime = readApiRuntime(config);
+  const sq = isRecord(runtime.static_query) ? runtime.static_query : {};
+  return Object.entries(sq).map(([key, value]) => ({
+    key,
+    value: typeof value === 'string' ? value : JSON.stringify(value),
+  }));
+}
+
+function readApiBodyFormat(config: Record<string, unknown> | null | undefined): 'json' | 'form' {
+  const runtime = readApiRuntime(config);
+  return runtime.body_format === 'form' ? 'form' : 'json';
+}
+
+function readApiBodyParamRows(config: Record<string, unknown> | null | undefined): ApiBodyParamRow[] {
+  const runtime = readApiRuntime(config);
+  const map = isRecord(runtime.body_params) ? runtime.body_params : {};
+  if (!isRecord(config)) return [];
+  const fn = isRecord(config.function) ? config.function : {};
+  const params = isRecord(fn.parameters) ? fn.parameters : {};
+  const props = isRecord(params.properties) ? params.properties : {};
+  const bodyProps = isRecord(props.body_params) ? props.body_params : {};
+  const descs = isRecord(bodyProps.properties) ? bodyProps.properties : {};
+  return Object.entries(map).map(([alias, target]) => {
+    const propCfg = isRecord(descs[alias]) ? descs[alias] : {};
+    return {
+      alias,
+      target: typeof target === 'string' ? target : alias,
+      description: typeof propCfg.description === 'string' ? propCfg.description : '',
+    };
+  });
+}
+
+function readApiStaticBodyRows(config: Record<string, unknown> | null | undefined): ApiStaticBodyRow[] {
+  const runtime = readApiRuntime(config);
+  const sb = isRecord(runtime.static_body) ? runtime.static_body : {};
+  return Object.entries(sb).map(([key, value]) => ({
+    key,
+    value: typeof value === 'string' ? value : JSON.stringify(value),
+  }));
+}
+
+function applyApiEditor(
+  config: Record<string, unknown>,
+  baseUrl: string,
+  endpoint: string,
+  method: string,
+  timeoutSeconds: number,
+  resultPath: string,
+  pathParams: ApiPathParamRow[],
+  queryParams: ApiQueryParamRow[],
+  headers: ApiHeaderRow[],
+  staticQuery: ApiStaticQueryRow[],
+  bodyParams: ApiBodyParamRow[],
+  staticBody: ApiStaticBodyRow[],
+  bodyFormat: 'json' | 'form',
+  maxResponseChars: number,
+): Record<string, unknown> {
+  const nextConfig = JSON.parse(JSON.stringify(config)) as Record<string, unknown>;
+  const runtime = isRecord(nextConfig.x_backend_config) ? { ...nextConfig.x_backend_config } : {};
+  const functionCfg = isRecord(nextConfig.function) ? { ...nextConfig.function } : {};
+  const params = isRecord(functionCfg.parameters) ? { ...functionCfg.parameters } : {};
+  const props = isRecord(params.properties) ? { ...params.properties } : {};
+
+  // Runtime values
+  if (baseUrl.trim()) runtime.base_url = baseUrl.trim();
+  else delete runtime.base_url;
+  if (endpoint.trim()) runtime.endpoint = endpoint.trim();
+  else delete runtime.endpoint;
+  runtime.method = (method || 'GET').toUpperCase();
+  runtime.timeout_seconds = timeoutSeconds;
+  if (resultPath.trim()) runtime.result_path = resultPath.trim();
+  else delete runtime.result_path;
+  if (maxResponseChars && maxResponseChars > 0) runtime.max_response_chars = maxResponseChars;
+  else delete runtime.max_response_chars;
+
+  // Path params -> runtime.path_params (array) + function.parameters.properties.path_values
+  const validPath = pathParams.filter((r) => r.name.trim());
+  runtime.path_params = validPath.map((r) => r.name.trim());
+  const enumStore: Record<string, unknown> = {};
+  const baseDescStore: Record<string, string> = {};
+  if (validPath.length > 0) {
+    const pathProps: Record<string, unknown> = {};
+    const requiredPath: string[] = [];
+    for (const row of validPath) {
+      const name = row.name.trim();
+      const baseDesc = row.description.trim();
+      const validEnums = row.useEnum
+        ? row.enumValues.filter((v) => v.value.trim()).map((v) => ({
+            value: v.value.trim(),
+            description: v.description.trim(),
+            requires: Array.from(new Set(v.requires.filter(Boolean))),
+          }))
+        : [];
+
+      // Reject duplicate enum values for this path-param
+      const dupSeen = new Set<string>();
+      const dupFound: string[] = [];
+      for (const ev of validEnums) {
+        if (dupSeen.has(ev.value)) dupFound.push(ev.value);
+        else dupSeen.add(ev.value);
+      }
+      if (dupFound.length > 0) {
+        throw new Error(
+          `Дубликаты enum-значений в path-параметре «${name}»: ${Array.from(new Set(dupFound)).join(', ')}. Каждое значение должно быть уникальным.`,
+        );
+      }
+
+      let compiledDesc = baseDesc;
+      if (validEnums.length > 0) {
+        const lines = validEnums.map((v) => {
+          const req = v.requires.length ? ` (требует: ${v.requires.join(', ')})` : '';
+          return `- ${v.value}: ${v.description || '—'}${req}`;
+        });
+        compiledDesc = (baseDesc ? `${baseDesc}\n\n` : '') + 'Допустимые значения:\n' + lines.join('\n');
+      }
+
+      const propCfg: Record<string, unknown> = { type: 'string' };
+      if (compiledDesc) propCfg.description = compiledDesc;
+      if (validEnums.length > 0) propCfg.enum = validEnums.map((v) => v.value);
+      pathProps[name] = propCfg;
+      requiredPath.push(name);
+
+      if (validEnums.length > 0) {
+        enumStore[name] = validEnums;
+        if (baseDesc) baseDescStore[name] = baseDesc;
+      }
+    }
+    props.path_values = {
+      type: 'object',
+      description: 'Значения для path-плейсхолдеров endpoint',
+      properties: pathProps,
+      required: requiredPath,
+      additionalProperties: false,
+    };
+  } else {
+    delete props.path_values;
+  }
+  if (Object.keys(enumStore).length > 0) {
+    runtime.enum_values = enumStore;
+    if (Object.keys(baseDescStore).length > 0) runtime.enum_base_descriptions = baseDescStore;
+    else delete runtime.enum_base_descriptions;
+  } else {
+    delete runtime.enum_values;
+    delete runtime.enum_base_descriptions;
+  }
+
+  // Query params -> runtime.query_params (alias->target) + function schema descriptions
+  const validQuery = queryParams.filter((r) => r.alias.trim());
+  if (validQuery.length > 0) {
+    const queryMap: Record<string, string> = {};
+    const queryProps: Record<string, unknown> = {};
+    for (const row of validQuery) {
+      const alias = row.alias.trim();
+      const target = row.target.trim() || alias;
+      queryMap[alias] = target;
+      queryProps[alias] = {
+        type: 'string',
+        ...(row.description.trim() ? { description: row.description.trim() } : {}),
+      };
+    }
+    runtime.query_params = queryMap;
+    props.query_params = {
+      type: 'object',
+      description: 'Разрешённые query-параметры',
+      properties: queryProps,
+      additionalProperties: false,
+    };
+  } else {
+    delete runtime.query_params;
+    delete props.query_params;
+  }
+
+  // Headers
+  const validHeaders = headers.filter((h) => h.name.trim());
+  if (validHeaders.length > 0) {
+    const headerMap: Record<string, string> = {};
+    for (const row of validHeaders) headerMap[row.name.trim()] = row.value;
+    runtime.headers = headerMap;
+  } else {
+    delete runtime.headers;
+  }
+
+  // Static query (always-applied, hidden from LLM)
+  const validStatic = staticQuery.filter((s) => s.key.trim());
+  if (validStatic.length > 0) {
+    const sq: Record<string, unknown> = {};
+    for (const row of validStatic) {
+      try { sq[row.key.trim()] = JSON.parse(row.value); }
+      catch { sq[row.key.trim()] = row.value; }
+    }
+    runtime.static_query = sq;
+  } else {
+    delete runtime.static_query;
+  }
+
+  // Body params + static body — only meaningful for POST
+  const upperMethod = (method || 'GET').toUpperCase();
+  const validBody = bodyParams.filter((r) => r.alias.trim());
+  if (upperMethod === 'POST' && validBody.length > 0) {
+    const bodyMap: Record<string, string> = {};
+    const bodyProps: Record<string, unknown> = {};
+    const requiredBody: string[] = [];
+    for (const row of validBody) {
+      const alias = row.alias.trim();
+      const target = row.target.trim() || alias;
+      bodyMap[alias] = target;
+      bodyProps[alias] = {
+        type: 'string',
+        ...(row.description.trim() ? { description: row.description.trim() } : {}),
+      };
+      requiredBody.push(alias);
+    }
+    runtime.body_params = bodyMap;
+    runtime.body_format = bodyFormat;
+    props.body_params = {
+      type: 'object',
+      description: 'Параметры тела запроса',
+      properties: bodyProps,
+      required: requiredBody,
+      additionalProperties: false,
+    };
+    if (!Array.isArray(params.required)) params.required = [];
+    const reqArr = params.required as string[];
+    if (!reqArr.includes('body_params')) reqArr.push('body_params');
+  } else {
+    delete runtime.body_params;
+    delete runtime.body_format;
+    delete props.body_params;
+    if (Array.isArray(params.required)) {
+      params.required = (params.required as unknown[]).filter((r) => r !== 'body_params');
+    }
+  }
+
+  const validStaticBody = staticBody.filter((s) => s.key.trim());
+  if (upperMethod === 'POST' && validStaticBody.length > 0) {
+    const sb: Record<string, unknown> = {};
+    for (const row of validStaticBody) {
+      try { sb[row.key.trim()] = JSON.parse(row.value); }
+      catch { sb[row.key.trim()] = row.value; }
+    }
+    runtime.static_body = sb;
+  } else {
+    delete runtime.static_body;
+  }
+
+  params.properties = props;
+  if (!Array.isArray(params.required)) params.required = [];
+  if (params.type !== 'object') params.type = 'object';
+  if (typeof params.additionalProperties === 'undefined') params.additionalProperties = false;
+  functionCfg.parameters = params;
+  nextConfig.function = functionCfg;
+  nextConfig.x_backend_config = runtime;
+  return nextConfig;
+}
 
 function ToolsTab({ tenantId }: { tenantId: string }) {
   const queryClient = useQueryClient();
@@ -1258,14 +1898,138 @@ function ToolsTab({ tenantId }: { tenantId: string }) {
   const [toolDesc, setToolDesc] = useState('');
   const [toolGroup, setToolGroup] = useState('');
   const [toolType, setToolType] = useState('function');
+  const [toolCapabilityTags, setToolCapabilityTags] = useState<string[]>([]);
   const [configJson, setConfigJson] = useState('{}');
   const [toolActive, setToolActive] = useState(true);
+  const [toolPinned, setToolPinned] = useState(false);
   const [groupFilter, setGroupFilter] = useState<string | null>(null);
+  const [dataSourceFilter, setDataSourceFilter] = useState<string | null>(null);
+  const [toolSearchInput, setToolSearchInput] = useState('');
+  const [toolSearch, setToolSearch] = useState('');
+  // Debounce search input to avoid hitting backend on every keystroke
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setToolSearch(toolSearchInput);
+      setPage(1);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [toolSearchInput]);
+  const [templateDataSourceId, setTemplateDataSourceId] = useState<string | null>(null);
+  const [existingGroupChoice, setExistingGroupChoice] = useState<string | null>(null);
+  const [isSearchToolEditor, setIsSearchToolEditor] = useState(false);
+  const [searchFilterRows, setSearchFilterRows] = useState<SearchFilterFieldRow[]>([]);
+  const [searchResultRows, setSearchResultRows] = useState<SearchResultFieldRow[]>([]);
+  const [searchTable, setSearchTable] = useState('');
+  const [searchTableAlias, setSearchTableAlias] = useState('');
+  const [searchColumns, setSearchColumns] = useState<string[]>([]);
+  const [searchJoinRows, setSearchJoinRows] = useState<SearchJoinRow[]>([]);
+  const [searchStaticFilters, setSearchStaticFilters] = useState<SearchStaticFilterRow[]>([]);
+  const [searchDateWindow, setSearchDateWindow] = useState<{ column: string; days: number } | null>(null);
+  const [searchDefaultLimit, setSearchDefaultLimit] = useState<number>(10);
+  const [searchMaxLimit, setSearchMaxLimit] = useState<number>(25);
+  const [searchUnlimitedResults, setSearchUnlimitedResults] = useState(false);
+  const [searchSortBy, setSearchSortBy] = useState('');
+  const [dragJoinIndex, setDragJoinIndex] = useState<number | null>(null);
+  const [isCmdEditor, setIsCmdEditor] = useState(false);
+  const [cmdRows, setCmdRows] = useState<CmdEditorRow[]>([]);
+  const [cmdTimeout, setCmdTimeout] = useState(15);
+  const [cmdVendor, setCmdVendor] = useState('');
+  const [dragCmdIndex, setDragCmdIndex] = useState<number | null>(null);
+  const [isApiEditor, setIsApiEditor] = useState(false);
+  const [apiBaseUrl, setApiBaseUrl] = useState('');
+  const [apiEndpoint, setApiEndpoint] = useState('');
+  const [apiMethod, setApiMethod] = useState('GET');
+  const [apiTimeout, setApiTimeout] = useState(15);
+  const [apiResultPath, setApiResultPath] = useState('');
+  const [apiMaxResponseChars, setApiMaxResponseChars] = useState(16000);
+  const [apiPathRows, setApiPathRows] = useState<ApiPathParamRow[]>([]);
+  const [apiQueryRows, setApiQueryRows] = useState<ApiQueryParamRow[]>([]);
+  const [apiHeaderRows, setApiHeaderRows] = useState<ApiHeaderRow[]>([]);
+  const [apiStaticQueryRows, setApiStaticQueryRows] = useState<ApiStaticQueryRow[]>([]);
+  const [apiBodyRows, setApiBodyRows] = useState<ApiBodyParamRow[]>([]);
+  const [apiStaticBodyRows, setApiStaticBodyRows] = useState<ApiStaticBodyRow[]>([]);
+  const [apiBodyFormat, setApiBodyFormat] = useState<'json' | 'form'>('json');
+  const [dragApiPathIndex, setDragApiPathIndex] = useState<number | null>(null);
+  const [dragApiQueryIndex, setDragApiQueryIndex] = useState<number | null>(null);
+  const [dragApiBodyIndex, setDragApiBodyIndex] = useState<number | null>(null);
+  const [renameGroupOpen, setRenameGroupOpen] = useState(false);
+  const [renameGroupFrom, setRenameGroupFrom] = useState('');
+  const [renameGroupTo, setRenameGroupTo] = useState('');
+  const [editorSectionOpen, setEditorSectionOpen] = useState(true);
+  const [previewSectionOpen, setPreviewSectionOpen] = useState(false);
+  const [jsonSectionOpen, setJsonSectionOpen] = useState(false);
+  const [testSectionOpen, setTestSectionOpen] = useState(false);
+  const [testArgsJson, setTestArgsJson] = useState('{\n  "filters": {}\n}');
+  const [testResult, setTestResult] = useState('');
+  const [testResultSuccess, setTestResultSuccess] = useState<boolean | null>(null);
+  const [dragFilterIndex, setDragFilterIndex] = useState<number | null>(null);
+  const [dragResultIndex, setDragResultIndex] = useState<number | null>(null);
 
   const { data, isLoading } = useQuery({
-    queryKey: ['tenants', tenantId, 'tools', page],
-    queryFn: () => toolsApi.list(tenantId, page),
+    queryKey: ['tenants', tenantId, 'tools', page, toolSearch, groupFilter, dataSourceFilter],
+    queryFn: () => toolsApi.list(tenantId, page, 100, {
+      search: toolSearch || undefined,
+      group: groupFilter || undefined,
+      data_source_id: dataSourceFilter || undefined,
+    }),
   });
+  const { data: toolGroupsData } = useQuery({
+    queryKey: ['tenants', tenantId, 'tools', 'groups'],
+    queryFn: () => toolsApi.listGroups(tenantId),
+  });
+  const { data: dataSourcesData } = useQuery({
+    queryKey: ['tenants', tenantId, 'data-sources', 'for-tools'],
+    queryFn: () => dataSourcesApi.list(tenantId, 1, 100),
+  });
+
+  // Resolve the active data source ID for schema introspection
+  const activeDataSourceId = (() => {
+    // From template dropdown
+    if (templateDataSourceId) return templateDataSourceId;
+    // From the tool's config
+    try {
+      const parsed = JSON.parse(configJson);
+      const runtime = typeof parsed?.x_backend_config === 'object' ? parsed.x_backend_config : {};
+      if (typeof runtime?.data_source_id === 'string') return runtime.data_source_id;
+    } catch { /* ignore */ }
+    return null;
+  })();
+
+  const { data: schemaData } = useQuery({
+    queryKey: ['tenants', tenantId, 'data-sources', activeDataSourceId, 'schema'],
+    queryFn: () => dataSourcesApi.getSchema(tenantId, activeDataSourceId!),
+    enabled: !!activeDataSourceId && isSearchToolEditor,
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const tableSuggestions = Array.from(new Set((schemaData?.tables || []).map((t) => t.full_name)));
+  const allColumnSuggestions = Array.from(new Set((schemaData?.columns || []).map((c) => c.column)));
+  const columnSuggestionsForTable = (tableName: string): string[] => {
+    if (!schemaData) return [];
+    // Collect columns from the main table and all join tables
+    const tables = new Set<string>();
+    tables.add(tableName);
+    for (const j of searchJoinRows) {
+      if (j.table.trim()) tables.add(j.table.trim());
+    }
+    const cols = schemaData.columns.filter((c) => tables.has(c.table));
+    // Build suggestions with table alias prefix if we have joins
+    const suggestions: string[] = [];
+    for (const col of cols) {
+      suggestions.push(col.column);
+      // Also add with table alias prefix
+      if (searchTableAlias && col.table === tableName) {
+        suggestions.push(`${searchTableAlias}.${col.column}`);
+      }
+      for (const j of searchJoinRows) {
+        if (j.table.trim() === col.table && j.alias.trim()) {
+          suggestions.push(`${j.alias.trim()}.${col.column}`);
+        }
+      }
+    }
+    return [...new Set(suggestions)];
+  };
+  const activeColumnSuggestions = columnSuggestionsForTable(searchTable);
 
   const openCreate = () => {
     setEditId(null);
@@ -1273,9 +2037,199 @@ function ToolsTab({ tenantId }: { tenantId: string }) {
     setToolDesc('');
     setToolGroup('');
     setToolType('function');
+    setToolCapabilityTags([]);
     setConfigJson('{}');
-    setToolActive(true);
+    setToolActive(true); setToolPinned(false);
+    setExistingGroupChoice(null);
+    setTemplateDataSourceId(null);
+    setIsSearchToolEditor(false);
+    setSearchFilterRows([]);
+    setSearchResultRows([]);
+    setSearchTable('');
+    setSearchTableAlias('');
+    setSearchColumns([]);
+    setSearchJoinRows([]);
+    setSearchStaticFilters([]);
+    setSearchDateWindow(null);
+    setSearchDefaultLimit(10);
+    setSearchMaxLimit(25);
+    setSearchUnlimitedResults(false);
+    setSearchSortBy('');
+    setIsCmdEditor(false);
+    setCmdRows([]);
+    setCmdTimeout(15);
+    setCmdVendor('');
+    setIsApiEditor(false);
+    setApiBaseUrl('');
+    setApiEndpoint('');
+    setApiMethod('GET');
+    setApiTimeout(15);
+    setApiResultPath(''); setApiMaxResponseChars(16000);
+    setApiPathRows([]);
+    setApiQueryRows([]);
+    setApiHeaderRows([]);
+    setApiStaticQueryRows([]);
+    setApiBodyRows([]);
+    setApiStaticBodyRows([]);
+    setApiBodyFormat('json');
+    setEditorSectionOpen(true);
+    setPreviewSectionOpen(false);
+    setJsonSectionOpen(false);
+    setTestSectionOpen(false);
+    setTestArgsJson('{\n  "filters": {}\n}');
+    setTestResult('');
+    setTestResultSuccess(null);
     setModalOpen(true);
+  };
+
+  const fillDbTemplate = () => {
+    const config = JSON.parse(JSON.stringify(DB_SEARCH_TOOL_TEMPLATE)) as Record<string, unknown>;
+    const runtime = isRecord(config.x_backend_config) ? config.x_backend_config : {};
+    if (templateDataSourceId) runtime.data_source_id = templateDataSourceId;
+    config.x_backend_config = applyToolCapabilityTags(runtime, ['data_search', 'db_search']);
+    setToolName('search_records');
+    setToolDesc('Безопасный read-only поиск записей в БД по whitelist-фильтрам и свободному query.');
+    setToolGroup('Data');
+    setExistingGroupChoice('Data');
+    setToolType('function');
+    setToolCapabilityTags(['data_search', 'db_search']);
+    setConfigJson(JSON.stringify(config, null, 2));
+    setToolActive(true); setToolPinned(false);
+    setIsSearchToolEditor(true);
+    setIsCmdEditor(false);
+    setIsApiEditor(false);
+    setSearchFilterRows(readSearchFilterRows(config));
+    setSearchResultRows(readSearchResultRows(config));
+    setSearchTable(readSearchTable(config));
+    setSearchTableAlias(readSearchTableAlias(config));
+    setSearchColumns(readSearchColumns(config));
+    setSearchJoinRows(readSearchJoinRows(config));
+    setSearchStaticFilters(readSearchStaticFilters(config));
+    setSearchDateWindow(readSearchDateWindow(config));
+    const limits = readSearchLimits(config);
+    setSearchDefaultLimit(limits.defaultLimit);
+    setSearchMaxLimit(limits.maxLimit);
+    setSearchUnlimitedResults(limits.unlimitedResults);
+    setSearchSortBy(readSearchSortBy(config));
+    setTestArgsJson('{\n  "filters": {}\n}');
+    setTestResult('');
+    setTestResultSuccess(null);
+  };
+
+  const fillApiTemplate = () => {
+    const config = JSON.parse(JSON.stringify(API_FETCH_TOOL_TEMPLATE)) as Record<string, unknown>;
+    const runtime = isRecord(config.x_backend_config) ? config.x_backend_config : {};
+    if (templateDataSourceId) runtime.data_source_id = templateDataSourceId;
+    config.x_backend_config = applyToolCapabilityTags(runtime, ['api_search', 'data_search']);
+    setToolName('fetch_api_data');
+    setToolDesc('Получение read-only данных из внешнего API по разрешённым path/query параметрам.');
+    setToolGroup('Data');
+    setExistingGroupChoice('Data');
+    setToolType('function');
+    setToolCapabilityTags(['api_search', 'data_search']);
+    setConfigJson(JSON.stringify(config, null, 2));
+    setToolActive(true); setToolPinned(false);
+    setIsSearchToolEditor(false);
+    setSearchFilterRows([]);
+    setSearchResultRows([]);
+    setIsCmdEditor(false);
+    setCmdRows([]);
+    setCmdTimeout(15);
+    setCmdVendor('');
+    setIsApiEditor(true);
+    setApiBaseUrl(readApiBaseUrl(config));
+    setApiEndpoint(readApiEndpoint(config));
+    setApiMethod(readApiMethod(config));
+    setApiTimeout(readApiTimeout(config));
+    setApiResultPath(readApiResultPath(config)); setApiMaxResponseChars(readApiMaxResponseChars(config));
+    setApiPathRows(readApiPathParamRows(config));
+    setApiQueryRows(readApiQueryParamRows(config));
+    setApiHeaderRows(readApiHeaderRows(config));
+    setApiStaticQueryRows(readApiStaticQueryRows(config));
+    setApiBodyRows(readApiBodyParamRows(config));
+    setApiStaticBodyRows(readApiStaticBodyRows(config));
+    setApiBodyFormat(readApiBodyFormat(config));
+    setTestArgsJson('{\n  "path_values": {},\n  "query_params": {}\n}');
+    setTestResult('');
+    setTestResultSuccess(null);
+  };
+
+  const fillSshTemplate = () => {
+    const config = JSON.parse(JSON.stringify(SSH_EXEC_TOOL_TEMPLATE)) as Record<string, unknown>;
+    const runtime = isRecord(config.x_backend_config) ? config.x_backend_config : {};
+    if (templateDataSourceId) runtime.data_source_id = templateDataSourceId;
+    config.x_backend_config = applyToolCapabilityTags(runtime, ['network', 'ssh']);
+    setToolName('ssh_exec');
+    setToolDesc('Выполняет разрешённые команды на удалённом сервере/устройстве по SSH.');
+    setToolGroup('Network');
+    setExistingGroupChoice('Network');
+    setToolType('function');
+    setToolCapabilityTags(['network', 'ssh']);
+    setConfigJson(JSON.stringify(config, null, 2));
+    setToolActive(true); setToolPinned(false);
+    setIsSearchToolEditor(false);
+    setSearchFilterRows([]);
+    setSearchResultRows([]);
+    setIsApiEditor(false);
+    setIsCmdEditor(true);
+    setCmdRows(readCmdEditorRows(config));
+    setCmdTimeout(readCmdTimeout(config));
+    setCmdVendor('');
+    setTestArgsJson('{\n  "command_name": "show_interfaces",\n  "params": {}\n}');
+    setTestResult('');
+    setTestResultSuccess(null);
+  };
+
+  const fillTelnetTemplate = () => {
+    const config = JSON.parse(JSON.stringify(TELNET_EXEC_TOOL_TEMPLATE)) as Record<string, unknown>;
+    const runtime = isRecord(config.x_backend_config) ? config.x_backend_config : {};
+    if (templateDataSourceId) runtime.data_source_id = templateDataSourceId;
+    config.x_backend_config = applyToolCapabilityTags(runtime, ['network', 'telnet']);
+    setToolName('telnet_exec');
+    setToolDesc('Выполняет разрешённые команды на сетевом оборудовании по Telnet.');
+    setToolGroup('Network');
+    setExistingGroupChoice('Network');
+    setToolType('function');
+    setToolCapabilityTags(['network', 'telnet']);
+    setConfigJson(JSON.stringify(config, null, 2));
+    setToolActive(true); setToolPinned(false);
+    setIsSearchToolEditor(false);
+    setSearchFilterRows([]);
+    setSearchResultRows([]);
+    setIsApiEditor(false);
+    setIsCmdEditor(true);
+    setCmdRows(readCmdEditorRows(config));
+    setCmdTimeout(readCmdTimeout(config));
+    setCmdVendor(readCmdVendor(config));
+    setTestArgsJson('{\n  "command_name": "show_ports",\n  "params": {}\n}');
+    setTestResult('');
+    setTestResultSuccess(null);
+  };
+
+  const fillSnmpTemplate = () => {
+    const config = JSON.parse(JSON.stringify(SNMP_TOOL_TEMPLATE)) as Record<string, unknown>;
+    const runtime = isRecord(config.x_backend_config) ? config.x_backend_config : {};
+    if (templateDataSourceId) runtime.data_source_id = templateDataSourceId;
+    config.x_backend_config = applyToolCapabilityTags(runtime, ['network', 'snmp']);
+    setToolName('snmp_query');
+    setToolDesc('Запрашивает данные с сетевого оборудования по SNMP из списка разрешённых OID.');
+    setToolGroup('Network');
+    setExistingGroupChoice('Network');
+    setToolType('function');
+    setToolCapabilityTags(['network', 'snmp']);
+    setConfigJson(JSON.stringify(config, null, 2));
+    setToolActive(true); setToolPinned(false);
+    setIsSearchToolEditor(false);
+    setSearchFilterRows([]);
+    setSearchResultRows([]);
+    setIsCmdEditor(false);
+    setCmdRows([]);
+    setCmdTimeout(10);
+    setCmdVendor('');
+    setIsApiEditor(false);
+    setTestArgsJson('{\n  "oid_name": "sys_name",\n  "params": {}\n}');
+    setTestResult('');
+    setTestResultSuccess(null);
   };
 
   const openEdit = (tool: Tool) => {
@@ -1283,10 +2237,146 @@ function ToolsTab({ tenantId }: { tenantId: string }) {
     setToolName(tool.name);
     setToolDesc(tool.description || '');
     setToolGroup(tool.group || '');
+    setExistingGroupChoice(tool.group || null);
     setToolType(tool.tool_type);
     setConfigJson(JSON.stringify(tool.config_json ?? {}, null, 2));
     setToolActive(tool.is_active);
+    setToolPinned(Boolean(tool.is_pinned));
+    setToolCapabilityTags(readToolCapabilityTags(tool.config_json));
+    // Restore data source ID from tool config
+    const toolRuntime = isRecord(tool.config_json) && isRecord((tool.config_json as Record<string, unknown>).x_backend_config)
+      ? (tool.config_json as Record<string, unknown>).x_backend_config as Record<string, unknown>
+      : {};
+    setTemplateDataSourceId(typeof toolRuntime.data_source_id === 'string' ? toolRuntime.data_source_id : null);
+    const searchEditor = isSearchRecordsConfig(tool.config_json);
+    setIsSearchToolEditor(searchEditor);
+    setSearchFilterRows(searchEditor ? readSearchFilterRows(tool.config_json) : []);
+    setSearchResultRows(searchEditor ? readSearchResultRows(tool.config_json) : []);
+    if (searchEditor) {
+      setSearchTable(readSearchTable(tool.config_json));
+      setSearchTableAlias(readSearchTableAlias(tool.config_json));
+      setSearchColumns(readSearchColumns(tool.config_json));
+      setSearchJoinRows(readSearchJoinRows(tool.config_json));
+      setSearchStaticFilters(readSearchStaticFilters(tool.config_json));
+      setSearchDateWindow(readSearchDateWindow(tool.config_json));
+      const limits = readSearchLimits(tool.config_json);
+      setSearchDefaultLimit(limits.defaultLimit);
+      setSearchMaxLimit(limits.maxLimit);
+      setSearchUnlimitedResults(limits.unlimitedResults);
+      setSearchSortBy(readSearchSortBy(tool.config_json));
+    } else {
+      setSearchTable('');
+      setSearchTableAlias('');
+      setSearchColumns([]);
+      setSearchJoinRows([]);
+      setSearchStaticFilters([]);
+      setSearchDateWindow(null);
+      setSearchDefaultLimit(10);
+      setSearchMaxLimit(25);
+      setSearchUnlimitedResults(false);
+      setSearchSortBy('');
+    }
+    const cmdEditor = isCmdEditorConfig(tool.config_json);
+    setIsCmdEditor(cmdEditor);
+    if (cmdEditor) {
+      setCmdRows(readCmdEditorRows(tool.config_json));
+      setCmdTimeout(readCmdTimeout(tool.config_json));
+      setCmdVendor(readCmdVendor(tool.config_json));
+    } else {
+      setCmdRows([]);
+      setCmdTimeout(15);
+      setCmdVendor('');
+    }
+    const apiEditor = isApiEditorConfig(tool.config_json);
+    setIsApiEditor(apiEditor);
+    if (apiEditor) {
+      setApiBaseUrl(readApiBaseUrl(tool.config_json));
+      setApiEndpoint(readApiEndpoint(tool.config_json));
+      setApiMethod(readApiMethod(tool.config_json));
+      setApiTimeout(readApiTimeout(tool.config_json));
+      setApiResultPath(readApiResultPath(tool.config_json)); setApiMaxResponseChars(readApiMaxResponseChars(tool.config_json));
+      setApiPathRows(readApiPathParamRows(tool.config_json));
+      setApiQueryRows(readApiQueryParamRows(tool.config_json));
+      setApiHeaderRows(readApiHeaderRows(tool.config_json));
+      setApiStaticQueryRows(readApiStaticQueryRows(tool.config_json));
+      setApiBodyRows(readApiBodyParamRows(tool.config_json));
+      setApiStaticBodyRows(readApiStaticBodyRows(tool.config_json));
+      setApiBodyFormat(readApiBodyFormat(tool.config_json));
+    } else {
+      setApiBaseUrl('');
+      setApiEndpoint('');
+      setApiMethod('GET');
+      setApiTimeout(15);
+      setApiResultPath(''); setApiMaxResponseChars(16000);
+      setApiPathRows([]);
+      setApiQueryRows([]);
+      setApiHeaderRows([]);
+      setApiStaticQueryRows([]);
+      setApiBodyRows([]);
+      setApiStaticBodyRows([]);
+      setApiBodyFormat('json');
+    }
+    setEditorSectionOpen(true);
+    setPreviewSectionOpen(false);
+    setJsonSectionOpen(false);
+    setTestSectionOpen(false);
+    setTestResult('');
+    setTestResultSuccess(null);
     setModalOpen(true);
+  };
+
+  const composeToolConfig = () => {
+    let parsedConfig: Record<string, unknown>;
+    try {
+      parsedConfig = JSON.parse(configJson);
+    } catch {
+      throw new Error('Некорректный JSON конфигурации');
+    }
+
+    const nextConfig = JSON.parse(JSON.stringify(parsedConfig)) as Record<string, unknown>;
+    const runtime = isRecord(nextConfig.x_backend_config) ? { ...nextConfig.x_backend_config } : {};
+    if (templateDataSourceId) {
+      runtime.data_source_id = templateDataSourceId;
+    } else {
+      delete runtime.data_source_id;
+    }
+    const normalizedTags = Array.from(
+      new Set(toolCapabilityTags.map((tag) => tag.trim().toLowerCase()).filter(Boolean)),
+    );
+
+    nextConfig.x_backend_config = applyToolCapabilityTags(runtime, normalizedTags);
+
+    // Sync name and description into function schema
+    const functionCfg = isRecord(nextConfig.function) ? { ...nextConfig.function } : {};
+    if (toolName.trim()) functionCfg.name = toolName.trim();
+    if (toolDesc.trim()) functionCfg.description = toolDesc.trim();
+    if (Object.keys(functionCfg).length > 0) nextConfig.function = functionCfg;
+
+    if (isSearchToolEditor) {
+      return applySearchRecordsEditor(
+        nextConfig, searchFilterRows, searchResultRows,
+        searchTable, searchTableAlias, searchColumns,
+        searchJoinRows, searchStaticFilters, searchDateWindow,
+        searchDefaultLimit, searchMaxLimit, searchUnlimitedResults,
+        searchSortBy,
+      );
+    }
+
+    if (isCmdEditor) {
+      return applyCmdEditor(nextConfig, cmdRows, cmdTimeout, cmdVendor);
+    }
+
+    if (isApiEditor) {
+      return applyApiEditor(
+        nextConfig,
+        apiBaseUrl, apiEndpoint, apiMethod, apiTimeout, apiResultPath,
+        apiPathRows, apiQueryRows, apiHeaderRows, apiStaticQueryRows,
+        apiBodyRows, apiStaticBodyRows, apiBodyFormat,
+        apiMaxResponseChars,
+      );
+    }
+
+    return nextConfig;
   };
 
   const createMutation = useMutation({
@@ -1322,51 +2412,136 @@ function ToolsTab({ tenantId }: { tenantId: string }) {
     },
   });
 
-  const handleSave = () => {
-    let parsedConfig: Record<string, unknown>;
-    try {
-      parsedConfig = JSON.parse(configJson);
-    } catch {
-      notifications.show({ title: 'Ошибка', message: 'Некорректный JSON в конфигурации', color: 'red' });
-      return;
-    }
+  const renameGroupMutation = useMutation({
+    mutationFn: async ({ from, to }: { from: string; to: string }) => {
+      const toolsToRename = (data?.items || []).filter((tool) => (tool.group || 'Без группы') === from);
+      for (const tool of toolsToRename) {
+        await toolsApi.update(tenantId, tool.id, { group: to || undefined });
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['tenants', tenantId, 'tools'] });
+      setRenameGroupOpen(false);
+      notifications.show({ title: 'Обновлено', message: 'Название группы изменено', color: 'green' });
+    },
+    onError: () => {
+      notifications.show({ title: 'Ошибка', message: 'Не удалось переименовать группу', color: 'red' });
+    },
+  });
 
-    const toolData = {
-      name: toolName,
-      description: toolDesc,
-      group: toolGroup || undefined,
-      tool_type: toolType,
-      config_json: parsedConfig,
-      is_active: toolActive,
-    };
-    if (editId) {
-      updateMutation.mutate({ toolId: editId, data: toolData });
-    } else {
-      createMutation.mutate(toolData);
+  const testMutation = useMutation({
+    mutationFn: async () => {
+      let parsedArgs: Record<string, unknown>;
+      const parsedConfig = composeToolConfig();
+      try {
+        parsedArgs = JSON.parse(testArgsJson);
+      } catch {
+        throw new Error('Некорректный JSON аргументов теста');
+      }
+      return toolsApi.test(tenantId, {
+        config_json: parsedConfig,
+        arguments: parsedArgs,
+      });
+    },
+    onSuccess: (res) => {
+      setTestResultSuccess(res.success);
+      setTestResult(res.success ? res.output : (res.error || res.output || 'Ошибка'));
+    },
+    onError: (err: Error) => {
+      setTestResultSuccess(false);
+      setTestResult(err.message || 'Не удалось выполнить тест');
+    },
+  });
+
+  const handleSave = () => {
+    try {
+      const parsedConfig = composeToolConfig();
+      const trimmedToolName = toolName.trim();
+      if (!trimmedToolName) {
+        notifications.show({ title: 'Ошибка', message: 'Укажите название инструмента', color: 'red' });
+        return;
+      }
+      setConfigJson(JSON.stringify(parsedConfig, null, 2));
+
+      const toolData = {
+        name: trimmedToolName,
+        description: toolDesc,
+        group: toolGroup || undefined,
+        tool_type: toolType,
+        config_json: parsedConfig,
+        is_active: toolActive,
+        is_pinned: toolPinned,
+      };
+      if (editId) {
+        updateMutation.mutate({ toolId: editId, data: toolData });
+      } else {
+        createMutation.mutate(toolData);
+      }
+    } catch (error) {
+      notifications.show({
+        title: 'Ошибка',
+        message: error instanceof Error ? error.message : 'Некорректная конфигурация инструмента',
+        color: 'red',
+      });
+      return;
     }
   };
 
   const totalPages = data ? Math.ceil(data.total_count / 20) : 0;
+  const existingGroups = Array.from(new Set((data?.items || []).map((t) => t.group).filter(Boolean) as string[]))
+    .sort()
+    .map((g) => ({ value: g, label: g }));
+  const previewConfig = (() => {
+    try {
+      const parsed = composeToolConfig();
+      return JSON.stringify(parsed, null, 2);
+    } catch {
+      return 'Некорректный JSON конфигурации';
+    }
+  })();
+
+  const moveItem = <T,>(items: T[], from: number, to: number): T[] => {
+    const next = [...items];
+    const [item] = next.splice(from, 1);
+    next.splice(to, 0, item);
+    return next;
+  };
 
   return (
     <Stack gap="md">
       <Group justify="space-between">
         <Group>
           <Text fw={500}>Инструменты</Text>
-          {data?.items && data.items.length > 0 && (
-            <Select
-              placeholder="Все группы"
-              clearable
-              size="xs"
-              w={180}
-              value={groupFilter}
-              onChange={setGroupFilter}
-              data={
-                Array.from(new Set(data.items.map((t) => t.group).filter(Boolean) as string[]))
-                  .sort()
-                  .map((g) => ({ value: g, label: g }))
-              }
-            />
+          <TextInput
+            placeholder="Поиск по name/description"
+            size="xs"
+            w={240}
+            value={toolSearchInput}
+            onChange={(e) => setToolSearchInput(e.currentTarget.value)}
+          />
+          <Select
+            placeholder="Все группы"
+            clearable
+            size="xs"
+            w={180}
+            value={groupFilter}
+            onChange={(v) => { setGroupFilter(v); setPage(1); }}
+            data={(toolGroupsData || []).map((g) => ({ value: g, label: g }))}
+          />
+          <Select
+            placeholder="Все источники"
+            clearable
+            size="xs"
+            w={200}
+            value={dataSourceFilter}
+            onChange={(v) => { setDataSourceFilter(v); setPage(1); }}
+            data={(dataSourcesData?.items || []).map((ds) => ({
+              value: ds.id,
+              label: `${ds.name} (${ds.kind})`,
+            }))}
+          />
+          {data && (
+            <Text size="xs" c="dimmed">Найдено: {data.total_count}</Text>
           )}
         </Group>
         <Button leftSection={<IconPlus size={16} />} size="sm" onClick={openCreate}>
@@ -1377,11 +2552,12 @@ function ToolsTab({ tenantId }: { tenantId: string }) {
       {isLoading ? (
         <Center py="md"><Loader /></Center>
       ) : !data?.items.length ? (
-        <Text c="dimmed" ta="center" py="md">Инструменты не настроены.</Text>
+        <Text c="dimmed" ta="center" py="md">
+          {(toolSearch || groupFilter || dataSourceFilter) ? 'По фильтрам ничего не найдено.' : 'Инструменты не настроены.'}
+        </Text>
       ) : (() => {
-        const filtered = groupFilter
-          ? data.items.filter((t) => t.group === groupFilter)
-          : data.items;
+        // Filtering is done server-side; here we just group by category for display.
+        const filtered = data.items;
         const groups = new Map<string, typeof filtered>();
         for (const tool of filtered) {
           const g = tool.group || 'Без группы';
@@ -1397,32 +2573,77 @@ function ToolsTab({ tenantId }: { tenantId: string }) {
           <Stack gap="sm">
             {sortedGroups.map(([groupName, groupTools]) => (
               <Card key={groupName} withBorder padding="xs">
-                <Text size="sm" fw={600} c="dimmed" mb="xs">{groupName} ({groupTools.length})</Text>
+                <Group justify="space-between" mb="xs">
+                  <Text size="sm" fw={600} c="dimmed">{groupName} ({groupTools.length})</Text>
+                  {groupName !== 'Без группы' && (
+                    <ActionIcon
+                      variant="subtle"
+                      size="sm"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setRenameGroupFrom(groupName);
+                        setRenameGroupTo(groupName);
+                        setRenameGroupOpen(true);
+                      }}
+                    >
+                      <IconEdit size={14} />
+                    </ActionIcon>
+                  )}
+                </Group>
                 <Table striped>
                   <Table.Thead>
                     <Table.Tr>
                       <Table.Th>Название</Table.Th>
                       <Table.Th>Описание</Table.Th>
-                      <Table.Th>Тип</Table.Th>
+                      <Table.Th>Протокол</Table.Th>
+                      <Table.Th>Метки</Table.Th>
                       <Table.Th>Статус</Table.Th>
                       <Table.Th>Действия</Table.Th>
                     </Table.Tr>
                   </Table.Thead>
                   <Table.Tbody>
                     {groupTools.map((tool) => (
-                      <Table.Tr
-                        key={tool.id}
-                        style={{ cursor: 'pointer' }}
-                        onClick={() => openEdit(tool)}
-                      >
-                        <Table.Td><Text size="sm" fw={500}>{tool.name}</Text></Table.Td>
-                        <Table.Td><Text size="sm" c="dimmed" lineClamp={1}>{tool.description || '-'}</Text></Table.Td>
-                        <Table.Td><Badge variant="light" size="sm">{tool.tool_type}</Badge></Table.Td>
-                        <Table.Td>
-                          <Badge color={tool.is_active ? 'green' : 'gray'} size="sm">
-                            {tool.is_active ? 'Активный' : 'Неактивный'}
-                          </Badge>
-                        </Table.Td>
+                        <Table.Tr
+                          key={tool.id}
+                          style={{ cursor: 'pointer' }}
+                          onClick={() => openEdit(tool)}
+                        >
+                          <Table.Td><Text size="sm" fw={500}>{tool.name}</Text></Table.Td>
+                          <Table.Td><Text size="sm" c="dimmed" lineClamp={1}>{tool.description || '-'}</Text></Table.Td>
+                          <Table.Td>
+                            {(() => {
+                              const info = getToolHandlerInfo(tool.config_json);
+                              const Icon = info.icon;
+                              return (
+                                <Badge variant="light" color={info.color} size="sm" leftSection={<Icon size={12} />}>
+                                  {info.label}
+                                </Badge>
+                              );
+                            })()}
+                          </Table.Td>
+                          <Table.Td>
+                            {readToolCapabilityTags(tool.config_json).length ? (
+                              <Group gap={4}>
+                                {readToolCapabilityTags(tool.config_json).map((tag) => (
+                                  <Badge key={tag} variant="light" size="sm">{tag}</Badge>
+                                ))}
+                              </Group>
+                            ) : (
+                              <Text size="sm" c="dimmed">—</Text>
+                            )}
+                          </Table.Td>
+                          <Table.Td>
+                            <Group gap={4} wrap="nowrap">
+                              <Badge color={tool.is_active ? 'green' : 'gray'} size="sm">
+                                {tool.is_active ? 'Активный' : 'Неактивный'}
+                              </Badge>
+                              {tool.is_pinned && (
+                                <Tooltip label="Закреплён в LLM-контексте">
+                                  <Badge color="blue" size="sm" variant="light">📌</Badge>
+                                </Tooltip>
+                              )}
+                            </Group>
+                          </Table.Td>
                         <Table.Td>
                           <ActionIcon
                             variant="subtle"
@@ -1454,1027 +2675,1303 @@ function ToolsTab({ tenantId }: { tenantId: string }) {
         opened={modalOpen}
         onClose={() => setModalOpen(false)}
         title={editId ? 'Редактировать инструмент' : 'Создать инструмент'}
-        size="lg"
+        size="90%"
+        styles={{ body: { maxHeight: 'calc(100vh - 120px)', overflowY: 'auto' } }}
       >
-        <Text size="sm" c="dimmed" mb="md">
-          Инструменты — это функции, которые LLM может вызывать для выполнения действий.
-          Опишите инструмент и укажите его JSON-схему в формате OpenAI function calling.
-        </Text>
-        <Stack gap="md">
-          <TextInput
-            label="Название"
-            description="Уникальное имя инструмента, например: get_weather, search_docs"
-            placeholder="get_weather"
-            value={toolName}
-            onChange={(e) => setToolName(e.currentTarget.value)}
-            required
-          />
-          <Textarea
-            label="Описание"
-            description="Что делает инструмент — LLM использует это для решения, когда его вызвать"
-            placeholder="Получает текущую погоду для указанного города"
-            value={toolDesc}
-            onChange={(e) => setToolDesc(e.currentTarget.value)}
-          />
-          <TextInput
-            label="Группа"
-            description="Группа для организации инструментов, например: Сеть, Диагностика, Биллинг"
-            placeholder="Сеть"
-            value={toolGroup}
-            onChange={(e) => setToolGroup(e.currentTarget.value)}
-          />
-          <TextInput
-            label="Тип инструмента"
-            description="Обычно 'function'. Другие типы: retrieval, code_interpreter"
-            placeholder="function"
-            value={toolType}
-            onChange={(e) => setToolType(e.currentTarget.value)}
-            required
-          />
-          <Textarea
-            label="Конфигурация JSON"
-            description='JSON-схема параметров в формате OpenAI. Пример: {"type":"function","function":{"name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}}'
-            placeholder='{"type":"function","function":{"name":"...","parameters":{...}}}'
-            value={configJson}
-            onChange={(e) => setConfigJson(e.currentTarget.value)}
-            autosize
-            minRows={6}
-            maxRows={15}
-            ff="monospace"
-            styles={{ input: { fontFamily: 'monospace' } }}
-          />
-          <Switch label="Активный" checked={toolActive} onChange={(e) => setToolActive(e.currentTarget.checked)} />
-          <Group justify="flex-end">
-            <Button variant="default" onClick={() => setModalOpen(false)}>Отмена</Button>
-            <Button onClick={handleSave} loading={createMutation.isPending || updateMutation.isPending}>
-              {editId ? 'Обновить' : 'Создать'}
-            </Button>
-          </Group>
-        </Stack>
-      </Modal>
-    </Stack>
-  );
-}
-
-// ===== KB TAB =====
-
-const SOURCE_TYPE_OPTIONS = [
-  { value: 'manual', label: 'Ручной ввод' },
-  { value: 'faq', label: 'FAQ' },
-  { value: 'solution', label: 'Решение' },
-  { value: 'procedure', label: 'Процедура' },
-  { value: 'reference', label: 'Справка' },
-];
-
-const DOC_TYPE_OPTIONS = [
-  { value: 'text', label: 'Текст' },
-  { value: 'url', label: 'Ссылка (URL)' },
-  { value: 'file', label: 'Файл' },
-];
-
-const EMBEDDING_STATUS_MAP: Record<string, { color: string; label: string }> = {
-  pending: { color: 'yellow', label: 'Ожидание' },
-  processing: { color: 'blue', label: 'Обработка' },
-  done: { color: 'green', label: 'Готово' },
-  error: { color: 'red', label: 'Ошибка' },
-};
-
-function KBTab({ tenantId }: { tenantId: string }) {
-  const queryClient = useQueryClient();
-  const [page, setPage] = useState(1);
-  const [modalOpen, setModalOpen] = useState(false);
-  const [editId, setEditId] = useState<string | null>(null);
-  const [title, setTitle] = useState('');
-  const [content, setContent] = useState('');
-  const [docType, setDocType] = useState<string>('text');
-  const [sourceType, setSourceType] = useState<string>('manual');
-  const [sourceUrl, setSourceUrl] = useState('');
-  const [uploadFile, setUploadFile] = useState<File | null>(null);
-  const [docActive, setDocActive] = useState(true);
-  const [filterDocType, setFilterDocType] = useState<string | null>(null);
-  const [filterSourceType, setFilterSourceType] = useState<string | null>(null);
-
-  const { data, isLoading } = useQuery({
-    queryKey: ['tenants', tenantId, 'kb', page, filterDocType, filterSourceType],
-    queryFn: () => kbApi.list(tenantId, page, 20, filterDocType || undefined, filterSourceType || undefined),
-  });
-
-  const openCreate = () => {
-    setEditId(null);
-    setTitle('');
-    setContent('');
-    setDocType('text');
-    setSourceType('manual');
-    setSourceUrl('');
-    setUploadFile(null);
-    setDocActive(true);
-    setModalOpen(true);
-  };
-
-  const openEdit = (doc: KBDocument) => {
-    setEditId(doc.id);
-    setTitle(doc.title);
-    setContent(doc.content);
-    setDocType(doc.doc_type);
-    setSourceType(doc.source_type);
-    setSourceUrl(doc.source_url || '');
-    setUploadFile(null);
-    setDocActive(doc.is_active);
-    setModalOpen(true);
-  };
-
-  const invalidateKB = () => queryClient.invalidateQueries({ queryKey: ['tenants', tenantId, 'kb'] });
-
-  const createMutation = useMutation({
-    mutationFn: (data: KBDocumentCreate) => kbApi.create(tenantId, data),
-    onSuccess: () => {
-      invalidateKB();
-      setModalOpen(false);
-      notifications.show({ title: 'Создано', message: 'Документ создан и отправлен на индексацию', color: 'green' });
-    },
-    onError: (err: Error) => {
-      notifications.show({ title: 'Ошибка', message: err.message || 'Не удалось создать документ', color: 'red' });
-    },
-  });
-
-  const uploadMutation = useMutation({
-    mutationFn: ({ file, title, sourceType }: { file: File; title: string; sourceType: string }) =>
-      kbApi.upload(tenantId, file, title, sourceType),
-    onSuccess: () => {
-      invalidateKB();
-      setModalOpen(false);
-      notifications.show({ title: 'Загружено', message: 'Файл загружен и отправлен на индексацию', color: 'green' });
-    },
-    onError: (err: Error) => {
-      notifications.show({ title: 'Ошибка', message: err.message || 'Не удалось загрузить файл', color: 'red' });
-    },
-  });
-
-  const updateMutation = useMutation({
-    mutationFn: ({ docId, data }: { docId: string; data: KBDocumentUpdate }) =>
-      kbApi.update(tenantId, docId, data),
-    onSuccess: () => {
-      invalidateKB();
-      setModalOpen(false);
-      notifications.show({ title: 'Обновлено', message: 'Документ обновлён', color: 'green' });
-    },
-    onError: () => {
-      notifications.show({ title: 'Ошибка', message: 'Не удалось обновить документ', color: 'red' });
-    },
-  });
-
-  const reembedMutation = useMutation({
-    mutationFn: (docId: string) => kbApi.reembed(tenantId, docId),
-    onSuccess: () => {
-      invalidateKB();
-      notifications.show({ title: 'Переиндексация', message: 'Документ переиндексирован', color: 'green' });
-    },
-  });
-
-  const reembedAllMutation = useMutation({
-    mutationFn: () => kbApi.reembedAll(tenantId),
-    onSuccess: (res) => {
-      invalidateKB();
-      notifications.show({
-        title: 'Переиндексация всех',
-        message: `Готово: ${res.success} успешно, ${res.error} ошибок из ${res.total}`,
-        color: res.error > 0 ? 'yellow' : 'green',
-      });
-    },
-  });
-
-  const deleteMutation = useMutation({
-    mutationFn: (docId: string) => kbApi.delete(tenantId, docId),
-    onSuccess: () => {
-      invalidateKB();
-      notifications.show({ title: 'Удалено', message: 'Документ удалён', color: 'green' });
-    },
-  });
-
-  const handleSave = () => {
-    if (editId) {
-      updateMutation.mutate({
-        docId: editId,
-        data: { title, content, source_type: sourceType, is_active: docActive },
-      });
-    } else if (docType === 'file' && uploadFile) {
-      uploadMutation.mutate({ file: uploadFile, title, sourceType });
-    } else {
-      createMutation.mutate({
-        title,
-        doc_type: docType,
-        source_type: sourceType,
-        source_url: docType === 'url' ? sourceUrl : undefined,
-        content: docType === 'url' ? '' : content,
-        is_active: docActive,
-      });
-    }
-  };
-
-  const totalPages = data ? Math.ceil(data.total_count / 20) : 0;
-  const isSaving = createMutation.isPending || updateMutation.isPending || uploadMutation.isPending;
-
-  return (
-    <Stack gap="md">
-      <Group justify="space-between">
-        <Text fw={500}>База знаний (RAG)</Text>
-        <Group gap="xs">
-          <Button
-            variant="light"
-            size="sm"
-            leftSection={<IconRefresh size={16} />}
-            onClick={() => reembedAllMutation.mutate()}
-            loading={reembedAllMutation.isPending}
-          >
-            Переиндексировать всё
-          </Button>
-          <Button leftSection={<IconPlus size={16} />} size="sm" onClick={openCreate}>
-            Добавить
-          </Button>
-        </Group>
-      </Group>
-
-      <Text size="sm" c="dimmed">
-        Релевантные фрагменты документов автоматически подбираются по смыслу запроса пользователя (семантический поиск).
-      </Text>
-
-      <Group gap="xs">
-        <Select
-          placeholder="Тип источника"
-          data={[{ value: '', label: 'Все типы' }, ...DOC_TYPE_OPTIONS]}
-          value={filterDocType || ''}
-          onChange={(v) => { setFilterDocType(v || null); setPage(1); }}
-          size="xs"
-          w={160}
-          clearable
-        />
-        <Select
-          placeholder="Категория"
-          data={[{ value: '', label: 'Все категории' }, ...SOURCE_TYPE_OPTIONS]}
-          value={filterSourceType || ''}
-          onChange={(v) => { setFilterSourceType(v || null); setPage(1); }}
-          size="xs"
-          w={160}
-          clearable
-        />
-      </Group>
-
-      {isLoading ? (
-        <Center py="md"><Loader /></Center>
-      ) : !data?.items.length ? (
-        <Text c="dimmed" ta="center" py="md">Документов базы знаний нет.</Text>
-      ) : (
-        <>
-          <Table striped>
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th>Заголовок</Table.Th>
-                <Table.Th>Тип</Table.Th>
-                <Table.Th>Категория</Table.Th>
-                <Table.Th>Индексация</Table.Th>
-                <Table.Th>Чанков</Table.Th>
-                <Table.Th>Статус</Table.Th>
-                <Table.Th>Действия</Table.Th>
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {data.items.map((doc) => {
-                const embStatus = EMBEDDING_STATUS_MAP[doc.embedding_status] || { color: 'gray', label: doc.embedding_status };
-                return (
-                  <Table.Tr key={doc.id} style={{ cursor: 'pointer' }} onClick={() => openEdit(doc)}>
-                    <Table.Td>
-                      <Text size="sm" fw={500}>{doc.title}</Text>
-                      {doc.source_url && (
-                        <Text size="xs" c="dimmed" truncate="end" maw={250}>{doc.source_url}</Text>
-                      )}
-                      {doc.source_filename && (
-                        <Text size="xs" c="dimmed">{doc.source_filename}</Text>
-                      )}
-                    </Table.Td>
-                    <Table.Td>
-                      <Badge variant="light" size="sm">
-                        {DOC_TYPE_OPTIONS.find((o) => o.value === doc.doc_type)?.label || doc.doc_type}
-                      </Badge>
-                    </Table.Td>
-                    <Table.Td>
-                      <Badge variant="dot" size="sm">
-                        {SOURCE_TYPE_OPTIONS.find((o) => o.value === doc.source_type)?.label || doc.source_type}
-                      </Badge>
-                    </Table.Td>
-                    <Table.Td>
-                      <Tooltip label={doc.embedding_error || ''} disabled={!doc.embedding_error}>
-                        <Badge color={embStatus.color} size="sm">{embStatus.label}</Badge>
-                      </Tooltip>
-                    </Table.Td>
-                    <Table.Td>{doc.chunks_count}</Table.Td>
-                    <Table.Td>
-                      <Badge color={doc.is_active ? 'green' : 'gray'} size="sm">
-                        {doc.is_active ? 'Активный' : 'Выкл'}
-                      </Badge>
-                    </Table.Td>
-                    <Table.Td>
-                      <Group gap={4}>
-                        <Tooltip label="Переиндексировать">
-                          <ActionIcon
-                            variant="subtle"
-                            color="blue"
-                            size="sm"
-                            onClick={(e) => { e.stopPropagation(); reembedMutation.mutate(doc.id); }}
-                          >
-                            <IconRefresh size={14} />
-                          </ActionIcon>
-                        </Tooltip>
-                        <ActionIcon
-                          variant="subtle"
-                          color="red"
-                          size="sm"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            if (window.confirm(`Удалить "${doc.title}"?`)) deleteMutation.mutate(doc.id);
-                          }}
-                        >
-                          <IconTrash size={14} />
-                        </ActionIcon>
-                      </Group>
-                    </Table.Td>
-                  </Table.Tr>
-                );
-              })}
-            </Table.Tbody>
-          </Table>
-          {totalPages > 1 && (
-            <Center><Pagination total={totalPages} value={page} onChange={setPage} /></Center>
-          )}
-        </>
-      )}
-
-      <Modal
-        opened={modalOpen}
-        onClose={() => setModalOpen(false)}
-        title={editId ? 'Редактировать документ' : 'Добавить в базу знаний'}
-        size="lg"
-      >
-        <Stack gap="md">
-          {!editId && (
+        <Stack gap="sm">
+          <Group justify="space-between" align="center">
             <Select
-              label="Тип источника"
-              data={DOC_TYPE_OPTIONS}
-              value={docType}
-              onChange={(v) => setDocType(v || 'text')}
+              placeholder="Источник данных"
+              size="xs"
+              clearable
+              w={220}
+              value={templateDataSourceId}
+              onChange={setTemplateDataSourceId}
+              data={(dataSourcesData?.items || []).map((ds) => ({
+                value: ds.id,
+                label: `${ds.name} (${ds.kind})`,
+              }))}
             />
-          )}
-
-          <TextInput
-            label="Заголовок"
-            placeholder="Инструкция по настройке роутера"
-            value={title}
-            onChange={(e) => setTitle(e.currentTarget.value)}
-            required
-          />
-
-          <Select
-            label="Категория"
-            description="Помогает LLM понять тип информации"
-            data={SOURCE_TYPE_OPTIONS}
-            value={sourceType}
-            onChange={(v) => setSourceType(v || 'manual')}
-          />
-
-          {docType === 'url' && !editId && (
+            <Group gap={4}>
+              <Button variant="light" size="xs" onClick={fillDbTemplate}>SELECT из БД</Button>
+              <Button variant="light" size="xs" onClick={fillApiTemplate}>API</Button>
+              <Button variant="light" size="xs" color="teal" onClick={fillSshTemplate}>SSH</Button>
+              <Button variant="light" size="xs" color="orange" onClick={fillTelnetTemplate}>Telnet</Button>
+              <Button variant="light" size="xs" color="grape" onClick={fillSnmpTemplate}>SNMP</Button>
+            </Group>
+          </Group>
+          <SimpleGrid cols={3}>
             <TextInput
-              label="URL страницы"
-              description="Содержимое страницы будет автоматически извлечено"
-              placeholder="https://docs.example.com/article"
-              value={sourceUrl}
-              onChange={(e) => setSourceUrl(e.currentTarget.value)}
+              label="Название"
+              placeholder="search_clients"
+              value={toolName}
+              onChange={(e) => setToolName(e.currentTarget.value)}
               required
             />
-          )}
-
-          {docType === 'file' && !editId && (
-            <div>
-              <Text size="sm" fw={500} mb={4}>Файл</Text>
-              <Text size="xs" c="dimmed" mb={8}>PDF, TXT, MD, CSV, HTML — до 10 МБ</Text>
-              <input
-                type="file"
-                accept=".pdf,.txt,.md,.csv,.log,.json,.xml,.html"
-                onChange={(e) => setUploadFile(e.target.files?.[0] || null)}
-              />
-            </div>
-          )}
-
-          {(docType === 'text' || editId) && (
-            <Textarea
-              label="Содержание"
-              description="Текст будет автоматически разбит на чанки и проиндексирован"
-              placeholder="Для настройки роутера TP-Link выполните следующие шаги..."
-              value={content}
-              onChange={(e) => setContent(e.currentTarget.value)}
-              autosize
-              minRows={8}
-              maxRows={20}
-            />
-          )}
-
-          <Switch
-            label="Активный"
-            checked={docActive}
-            onChange={(e) => setDocActive(e.currentTarget.checked)}
-          />
-
-          <Group justify="flex-end">
-            <Button variant="default" onClick={() => setModalOpen(false)}>Отмена</Button>
-            <Button onClick={handleSave} loading={isSaving}>
-              {editId ? 'Обновить' : docType === 'file' ? 'Загрузить' : 'Создать'}
-            </Button>
-          </Group>
-        </Stack>
-      </Modal>
-    </Stack>
-  );
-}
-
-// ===== MEMORY TAB =====
-
-function MemoryTab({ tenantId }: { tenantId: string }) {
-  const queryClient = useQueryClient();
-  const [page, setPage] = useState(1);
-  const [typeFilter, setTypeFilter] = useState<string | null>(null);
-  const [modalOpen, setModalOpen] = useState(false);
-  const [editId, setEditId] = useState<string | null>(null);
-  const [memType, setMemType] = useState('');
-  const [memContent, setMemContent] = useState('');
-  const [memChatId, setMemChatId] = useState<string | null>(null);
-  const [memPriority, setMemPriority] = useState(0);
-  const [memPinned, setMemPinned] = useState(false);
-
-  const { data, isLoading } = useQuery({
-    queryKey: ['tenants', tenantId, 'memory', page, typeFilter],
-    queryFn: () => memoryApi.list(tenantId, page, 20, typeFilter || undefined),
-  });
-
-  // Load chats for chat name display and selection
-  const { data: chatsData } = useQuery({
-    queryKey: ['tenants', tenantId, 'chats', 'admin', 1, 100],
-    queryFn: () => chatsApi.listAdmin(tenantId, 1, 100),
-  });
-
-  const chatMap = new Map(
-    (chatsData?.items || []).map((c) => [c.id, c.title || c.description || `Чат ${c.id.slice(0, 8)}`])
-  );
-
-  const chatSelectData = [
-    { value: '', label: 'Глобальная (все чаты)' },
-    ...(chatsData?.items || []).map((c) => ({
-      value: c.id,
-      label: c.title || c.description || `Чат ${c.id.slice(0, 8)}`,
-    })),
-  ];
-
-  const openCreate = () => {
-    setEditId(null);
-    setMemType('');
-    setMemContent('');
-    setMemChatId(null);
-    setMemPriority(0);
-    setMemPinned(false);
-    setModalOpen(true);
-  };
-
-  const openEdit = (entry: MemoryEntry) => {
-    setEditId(entry.id);
-    setMemType(entry.memory_type);
-    setMemContent(entry.content);
-    setMemChatId(entry.chat_id);
-    setMemPriority(entry.priority);
-    setMemPinned(entry.is_pinned);
-    setModalOpen(true);
-  };
-
-  const createMutation = useMutation({
-    mutationFn: (data: MemoryEntryCreate) => memoryApi.create(tenantId, data),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['tenants', tenantId, 'memory'] });
-      setModalOpen(false);
-      notifications.show({ title: 'Создано', message: 'Запись памяти создана', color: 'green' });
-    },
-    onError: () => {
-      notifications.show({ title: 'Ошибка', message: 'Не удалось создать запись', color: 'red' });
-    },
-  });
-
-  const updateMutation = useMutation({
-    mutationFn: ({ entryId, data }: { entryId: string; data: MemoryEntryUpdate }) =>
-      memoryApi.update(tenantId, entryId, data),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['tenants', tenantId, 'memory'] });
-      setModalOpen(false);
-      notifications.show({ title: 'Обновлено', message: 'Запись памяти обновлена', color: 'green' });
-    },
-    onError: () => {
-      notifications.show({ title: 'Ошибка', message: 'Не удалось обновить запись', color: 'red' });
-    },
-  });
-
-  const deleteMutation = useMutation({
-    mutationFn: (entryId: string) => memoryApi.delete(tenantId, entryId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['tenants', tenantId, 'memory'] });
-      notifications.show({ title: 'Удалено', message: 'Запись удалена', color: 'green' });
-    },
-  });
-
-  const handleSave = () => {
-    if (editId) {
-      updateMutation.mutate({
-        entryId: editId,
-        data: { memory_type: memType, content: memContent, priority: memPriority, is_pinned: memPinned },
-      });
-    } else {
-      createMutation.mutate({
-        memory_type: memType,
-        content: memContent,
-        chat_id: memChatId || undefined,
-        priority: memPriority,
-        is_pinned: memPinned,
-      });
-    }
-  };
-
-  const totalPages = data ? Math.ceil(data.total_count / 20) : 0;
-
-  return (
-    <Stack gap="md">
-      <Group justify="space-between">
-        <Group>
-          <Text fw={500}>Память</Text>
-          <Select
-            placeholder="Фильтр по типу"
-            clearable
-            data={['short_term', 'long_term', 'episodic']}
-            value={typeFilter}
-            onChange={(val) => {
-              setTypeFilter(val);
-              setPage(1);
-            }}
-            size="sm"
-            w={180}
-          />
-        </Group>
-        <Button leftSection={<IconPlus size={16} />} size="sm" onClick={openCreate}>
-          Добавить запись
-        </Button>
-      </Group>
-
-      {isLoading ? (
-        <Center py="md"><Loader /></Center>
-      ) : !data?.items.length ? (
-        <Text c="dimmed" ta="center" py="md">Записей памяти нет.</Text>
-      ) : (
-        <>
-          <Table striped>
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th>Тип</Table.Th>
-                <Table.Th>Область</Table.Th>
-                <Table.Th>Содержание</Table.Th>
-                <Table.Th>Приоритет</Table.Th>
-                <Table.Th>Действия</Table.Th>
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {data.items.map((entry) => (
-                <Table.Tr key={entry.id} style={{ cursor: 'pointer' }} onClick={() => openEdit(entry)}>
-                  <Table.Td><Badge variant="light">{entry.memory_type}</Badge></Table.Td>
-                  <Table.Td>
-                    {entry.chat_id ? (
-                      <Badge variant="dot" size="sm" color="blue">
-                        {chatMap.get(entry.chat_id) || entry.chat_id.slice(0, 8)}
-                      </Badge>
-                    ) : (
-                      <Badge variant="dot" size="sm" color="orange">Глобальная</Badge>
-                    )}
-                  </Table.Td>
-                  <Table.Td>
-                    <Text size="sm" lineClamp={2}>{entry.content}</Text>
-                  </Table.Td>
-                  <Table.Td>
-                    <Badge color={entry.is_pinned ? 'blue' : 'gray'}>
-                      {entry.is_pinned ? 'Закреплено' : `П:${entry.priority}`}
-                    </Badge>
-                  </Table.Td>
-                  <Table.Td>
-                    <ActionIcon
-                      variant="subtle"
-                      color="red"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (window.confirm('Удалить эту запись?')) deleteMutation.mutate(entry.id);
-                      }}
-                    >
-                      <IconTrash size={16} />
-                    </ActionIcon>
-                  </Table.Td>
-                </Table.Tr>
-              ))}
-            </Table.Tbody>
-          </Table>
-          {totalPages > 1 && (
-            <Center><Pagination total={totalPages} value={page} onChange={setPage} /></Center>
-          )}
-        </>
-      )}
-
-      <Modal opened={modalOpen} onClose={() => setModalOpen(false)} title={editId ? 'Редактировать запись памяти' : 'Создать запись памяти'}>
-        <Text size="sm" c="dimmed" mb="md">
-          Память позволяет LLM помнить факты о тенанте или чате.
-          Глобальная память попадает во все чаты, привязанная к чату — только в конкретный.
-        </Text>
-        <Stack gap="md">
-          <Select
-            label="Тип памяти"
-            description="short_term — текущий контекст, long_term — постоянные факты, episodic — выжимки из прошлых сессий"
-            data={['short_term', 'long_term', 'episodic']}
-            value={memType}
-            onChange={(val) => setMemType(val || '')}
-            required
-            allowDeselect={false}
-          />
-          {!editId && (
-            <Select
-              label="Область действия"
-              description="Глобальная — попадает во все чаты тенанта. Конкретный чат — только в выбранный."
-              data={chatSelectData}
-              value={memChatId || ''}
-              onChange={(val) => setMemChatId(val || null)}
-              searchable
-              clearable
-            />
-          )}
-          {editId && (
             <TextInput
-              label="Область действия"
-              value={memChatId ? (chatMap.get(memChatId) || memChatId.slice(0, 8)) : 'Глобальная (все чаты)'}
-              disabled
+              label="Группа"
+              placeholder="Data"
+              value={toolGroup}
+              onChange={(e) => setToolGroup(e.currentTarget.value)}
+              rightSection={existingGroups.length > 0 ? undefined : undefined}
+            />
+            {existingGroups.length > 0 ? (
+              <Select
+                label="Или выбрать группу"
+                clearable
+                data={existingGroups}
+                value={existingGroupChoice}
+                onChange={(value) => {
+                  setExistingGroupChoice(value);
+                  if (value) setToolGroup(value);
+                }}
+              />
+            ) : (
+              <TextInput
+                label="Тип"
+                placeholder="function"
+                value={toolType}
+                onChange={(e) => setToolType(e.currentTarget.value)}
+              />
+            )}
+          </SimpleGrid>
+          <SimpleGrid cols={existingGroups.length > 0 ? 2 : 1}>
+            <Textarea
+              label="Описание для LLM"
+              placeholder="Что делает инструмент — LLM использует это для решения, когда его вызвать"
+              value={toolDesc}
+              onChange={(e) => setToolDesc(e.currentTarget.value)}
+              autosize
+              minRows={1}
+              maxRows={3}
+            />
+            {existingGroups.length > 0 && (
+              <SimpleGrid cols={2}>
+                <TextInput
+                  label="Тип"
+                  placeholder="function"
+                  value={toolType}
+                  onChange={(e) => setToolType(e.currentTarget.value)}
+                />
+                <TagsInput
+                  label="Метки"
+                  placeholder="data_search, billing"
+                  value={toolCapabilityTags}
+                  onChange={setToolCapabilityTags}
+                  splitChars={[' ', ',', ';']}
+                />
+              </SimpleGrid>
+            )}
+          </SimpleGrid>
+          {!existingGroups.length && (
+            <TagsInput
+              label="Метки возможностей"
+              placeholder="network, data_search, billing"
+              value={toolCapabilityTags}
+              onChange={setToolCapabilityTags}
+              splitChars={[' ', ',', ';']}
             />
           )}
-          <Textarea
-            label="Содержание"
-            description="Текст записи, например: 'Клиент предпочитает общение на русском языке'"
-            placeholder="Клиент использует тариф «Бизнес 100»"
-            value={memContent}
-            onChange={(e) => setMemContent(e.currentTarget.value)}
-            autosize
-            minRows={3}
+          {isSearchToolEditor && (
+            <Card withBorder padding="xs">
+              <Stack gap="xs">
+                <Group justify="space-between">
+                  <Text size="sm" fw={600}>Query Builder — search_records</Text>
+                  <Button variant="subtle" size="xs" onClick={() => setEditorSectionOpen((v) => !v)}>
+                    {editorSectionOpen ? 'Свернуть' : 'Развернуть'}
+                  </Button>
+                </Group>
+                {editorSectionOpen && (
+                  <Stack gap="xs">
+                    {/* === Source + Limits row === */}
+                    <SimpleGrid cols={6}>
+                      <Autocomplete
+                        label="Таблица / view"
+                        placeholder="public.contracts_view"
+                        value={searchTable}
+                        onChange={setSearchTable}
+                        data={tableSuggestions}
+                        limit={20}
+                        required
+                      />
+                      <TextInput
+                        label="Алиас"
+                        placeholder="c"
+                        value={searchTableAlias}
+                        onChange={(e) => setSearchTableAlias(e.currentTarget.value)}
+                      />
+                      <NumberInput
+                        label="Лимит"
+                        min={1} max={1000}
+                        value={searchDefaultLimit}
+                        onChange={(val) => setSearchDefaultLimit(typeof val === 'number' ? val : 10)}
+                      />
+                      <NumberInput
+                        label="Макс. лимит"
+                        min={1} max={10000}
+                        value={searchMaxLimit}
+                        onChange={(val) => setSearchMaxLimit(typeof val === 'number' ? val : 25)}
+                      />
+                      <Autocomplete
+                        label="Сортировка"
+                        placeholder="id"
+                        value={searchSortBy}
+                        onChange={setSearchSortBy}
+                        data={activeColumnSuggestions}
+                        limit={20}
+                      />
+                      <Stack gap={0} justify="flex-end" pb={1}>
+                        <Switch
+                          label="Без лимита"
+                          checked={searchUnlimitedResults}
+                          onChange={(e) => setSearchUnlimitedResults(e.currentTarget.checked)}
+                        />
+                      </Stack>
+                    </SimpleGrid>
+
+                    {/* === Joins === */}
+                    <Group justify="space-between">
+                      <Text size="xs" fw={600} c="dimmed" tt="uppercase">Joins</Text>
+                      <Button
+                        variant="light"
+                        size="xs"
+                        leftSection={<IconPlus size={14} />}
+                        onClick={() => setSearchJoinRows([...searchJoinRows, { type: 'left', table: '', alias: '', left_column: '', right_column: '' }])}
+                      >
+                        Добавить
+                      </Button>
+                    </Group>
+                    {searchJoinRows.length > 0 && (
+                      <Table striped withTableBorder>
+                        <Table.Thead>
+                          <Table.Tr>
+                            <Table.Th w={36}></Table.Th>
+                            <Table.Th w={100}>Тип</Table.Th>
+                            <Table.Th>Таблица</Table.Th>
+                            <Table.Th w={80}>Алиас</Table.Th>
+                            <Table.Th>Левая колонка</Table.Th>
+                            <Table.Th>Правая колонка</Table.Th>
+                            <Table.Th w={44}></Table.Th>
+                          </Table.Tr>
+                        </Table.Thead>
+                        <Table.Tbody>
+                          {searchJoinRows.map((row, index) => (
+                            <Table.Tr
+                              key={`join-${index}`}
+                              onDragOver={(e) => e.preventDefault()}
+                              onDrop={() => {
+                                if (dragJoinIndex === null || dragJoinIndex === index) return;
+                                setSearchJoinRows(moveItem(searchJoinRows, dragJoinIndex, index));
+                                setDragJoinIndex(null);
+                              }}
+                            >
+                              <Table.Td>
+                                <ActionIcon variant="subtle" draggable onDragStart={() => setDragJoinIndex(index)} onDragEnd={() => setDragJoinIndex(null)}>
+                                  <IconGripVertical size={14} />
+                                </ActionIcon>
+                              </Table.Td>
+                              <Table.Td>
+                                <Select
+                                  data={[{ value: 'left', label: 'LEFT' }, { value: 'inner', label: 'INNER' }]}
+                                  value={row.type}
+                                  onChange={(value) => {
+                                    const next = [...searchJoinRows];
+                                    next[index] = { ...row, type: (value as 'left' | 'inner') || 'left' };
+                                    setSearchJoinRows(next);
+                                  }}
+                                />
+                              </Table.Td>
+                              <Table.Td>
+                                <Autocomplete placeholder="public.streets" value={row.table} data={tableSuggestions} limit={20} onChange={(val) => {
+                                  const next = [...searchJoinRows]; next[index] = { ...row, table: val }; setSearchJoinRows(next);
+                                }} />
+                              </Table.Td>
+                              <Table.Td>
+                                <TextInput placeholder="s" value={row.alias} onChange={(e) => {
+                                  const next = [...searchJoinRows]; next[index] = { ...row, alias: e.currentTarget.value }; setSearchJoinRows(next);
+                                }} />
+                              </Table.Td>
+                              <Table.Td>
+                                <Autocomplete placeholder="c.street_id" value={row.left_column} data={activeColumnSuggestions} limit={20} onChange={(val) => {
+                                  const next = [...searchJoinRows]; next[index] = { ...row, left_column: val }; setSearchJoinRows(next);
+                                }} />
+                              </Table.Td>
+                              <Table.Td>
+                                <Autocomplete placeholder="s.id" value={row.right_column} data={activeColumnSuggestions} limit={20} onChange={(val) => {
+                                  const next = [...searchJoinRows]; next[index] = { ...row, right_column: val }; setSearchJoinRows(next);
+                                }} />
+                              </Table.Td>
+                              <Table.Td>
+                                <ActionIcon variant="subtle" color="red" onClick={() => setSearchJoinRows(searchJoinRows.filter((_, i) => i !== index))}>
+                                  <IconTrash size={14} />
+                                </ActionIcon>
+                              </Table.Td>
+                            </Table.Tr>
+                          ))}
+                        </Table.Tbody>
+                      </Table>
+                    )}
+
+                    {/* === Filter Fields === */}
+                    <Group justify="space-between">
+                      <Text size="xs" fw={600} c="dimmed" tt="uppercase">Фильтры (whitelist для LLM)</Text>
+                      <Button
+                        variant="light"
+                        size="xs"
+                        leftSection={<IconPlus size={14} />}
+                        onClick={() => setSearchFilterRows([...searchFilterRows, { alias: '', column: '', mode: 'contains', description: '' }])}
+                      >
+                        Добавить фильтр
+                      </Button>
+                    </Group>
+                    <Table striped withTableBorder>
+                      <Table.Thead>
+                        <Table.Tr>
+                          <Table.Th w={36}></Table.Th>
+                          <Table.Th>Алиас</Table.Th>
+                          <Table.Th>Колонка</Table.Th>
+                          <Table.Th w={130}>Режим</Table.Th>
+                          <Table.Th>Описание для LLM</Table.Th>
+                          <Table.Th w={44}></Table.Th>
+                        </Table.Tr>
+                      </Table.Thead>
+                      <Table.Tbody>
+                        {searchFilterRows.map((row, index) => (
+                          <Table.Tr
+                            key={`filter-${index}`}
+                            onDragOver={(e) => e.preventDefault()}
+                            onDrop={() => {
+                              if (dragFilterIndex === null || dragFilterIndex === index) return;
+                              setSearchFilterRows(moveItem(searchFilterRows, dragFilterIndex, index));
+                              setDragFilterIndex(null);
+                            }}
+                          >
+                            <Table.Td>
+                              <ActionIcon variant="subtle" draggable onDragStart={() => setDragFilterIndex(index)} onDragEnd={() => setDragFilterIndex(null)}>
+                                <IconGripVertical size={14} />
+                              </ActionIcon>
+                            </Table.Td>
+                            <Table.Td>
+                              <TextInput value={row.alias} placeholder="contract_number" onChange={(e) => {
+                                const next = [...searchFilterRows]; next[index] = { ...row, alias: e.currentTarget.value }; setSearchFilterRows(next);
+                              }} />
+                            </Table.Td>
+                            <Table.Td>
+                              <Autocomplete value={row.column} placeholder="c.dogovor_num" data={activeColumnSuggestions} limit={20} onChange={(val) => {
+                                const next = [...searchFilterRows]; next[index] = { ...row, column: val }; setSearchFilterRows(next);
+                              }} />
+                            </Table.Td>
+                            <Table.Td>
+                              <Select
+                                data={[
+                                  { value: 'exact', label: 'Точное' },
+                                  { value: 'contains', label: 'Содержит' },
+                                  { value: 'starts_with', label: 'Начинается' },
+                                  { value: 'eq', label: '= число' },
+                                  { value: 'gte', label: '>= число' },
+                                  { value: 'lte', label: '<= число' },
+                                ]}
+                                value={row.mode}
+                                onChange={(value) => {
+                                  const next = [...searchFilterRows]; next[index] = { ...row, mode: value || 'contains' }; setSearchFilterRows(next);
+                                }}
+                              />
+                            </Table.Td>
+                            <Table.Td>
+                              <TextInput value={row.description} placeholder="Номер договора или его часть" onChange={(e) => {
+                                const next = [...searchFilterRows]; next[index] = { ...row, description: e.currentTarget.value }; setSearchFilterRows(next);
+                              }} />
+                            </Table.Td>
+                            <Table.Td>
+                              <ActionIcon variant="subtle" color="red" onClick={() => setSearchFilterRows(searchFilterRows.filter((_, i) => i !== index))}>
+                                <IconTrash size={14} />
+                              </ActionIcon>
+                            </Table.Td>
+                          </Table.Tr>
+                        ))}
+                      </Table.Tbody>
+                    </Table>
+
+                    {/* === Search Columns === */}
+                    <TagsInput
+                      label="Колонки свободного поиска (query → ILIKE)"
+                      placeholder="name, address, notes"
+                      value={searchColumns}
+                      onChange={setSearchColumns}
+                      splitChars={[',', ';']}
+                    />
+
+                    {/* === Result Columns === */}
+                    <Group justify="space-between">
+                      <Text size="xs" fw={600} c="dimmed" tt="uppercase">Колонки результата (SELECT)</Text>
+                      <Button
+                        variant="light"
+                        size="xs"
+                        leftSection={<IconPlus size={14} />}
+                        onClick={() => setSearchResultRows([...searchResultRows, { alias: '', column: '', description: '' }])}
+                      >
+                        Добавить колонку
+                      </Button>
+                    </Group>
+                    <Table striped withTableBorder>
+                      <Table.Thead>
+                        <Table.Tr>
+                          <Table.Th w={36}></Table.Th>
+                          <Table.Th w="22%">Алиас (имя в выдаче)</Table.Th>
+                          <Table.Th w="28%">Колонка в БД</Table.Th>
+                          <Table.Th>Описание для LLM (интерпретация значений)</Table.Th>
+                          <Table.Th w={44}></Table.Th>
+                        </Table.Tr>
+                      </Table.Thead>
+                      <Table.Tbody>
+                        {searchResultRows.map((row, index) => (
+                          <Table.Tr
+                            key={`result-${index}`}
+                            onDragOver={(e) => e.preventDefault()}
+                            onDrop={() => {
+                              if (dragResultIndex === null || dragResultIndex === index) return;
+                              setSearchResultRows(moveItem(searchResultRows, dragResultIndex, index));
+                              setDragResultIndex(null);
+                            }}
+                          >
+                            <Table.Td>
+                              <ActionIcon variant="subtle" draggable onDragStart={() => setDragResultIndex(index)} onDragEnd={() => setDragResultIndex(null)}>
+                                <IconGripVertical size={14} />
+                              </ActionIcon>
+                            </Table.Td>
+                            <Table.Td>
+                              <TextInput value={row.alias} placeholder="street" onChange={(e) => {
+                                const next = [...searchResultRows]; next[index] = { ...row, alias: e.currentTarget.value }; setSearchResultRows(next);
+                              }} />
+                            </Table.Td>
+                            <Table.Td>
+                              <Autocomplete value={row.column} placeholder="s.name" data={activeColumnSuggestions} limit={20} onChange={(val) => {
+                                const next = [...searchResultRows]; next[index] = { ...row, column: val }; setSearchResultRows(next);
+                              }} />
+                            </Table.Td>
+                            <Table.Td>
+                              <TextInput
+                                value={row.description}
+                                placeholder="например: 1=активен, 0=отключен"
+                                onChange={(e) => {
+                                  const next = [...searchResultRows]; next[index] = { ...row, description: e.currentTarget.value }; setSearchResultRows(next);
+                                }}
+                              />
+                            </Table.Td>
+                            <Table.Td>
+                              <ActionIcon variant="subtle" color="red" onClick={() => setSearchResultRows(searchResultRows.filter((_, i) => i !== index))}>
+                                <IconTrash size={14} />
+                              </ActionIcon>
+                            </Table.Td>
+                          </Table.Tr>
+                        ))}
+                      </Table.Tbody>
+                    </Table>
+
+                    {/* === Static Filters + Date Window === */}
+                    <SimpleGrid cols={2}>
+                      <div>
+                        <Group justify="space-between" mb={4}>
+                          <Text size="xs" fw={600} c="dimmed" tt="uppercase">Статические фильтры</Text>
+                          <Button variant="light" size="xs" leftSection={<IconPlus size={14} />}
+                            onClick={() => setSearchStaticFilters([...searchStaticFilters, { key: '', value: '' }])}
+                          >
+                            Добавить
+                          </Button>
+                        </Group>
+                        {searchStaticFilters.length > 0 && (
+                          <Table striped withTableBorder>
+                            <Table.Thead>
+                              <Table.Tr>
+                                <Table.Th>Колонка</Table.Th>
+                                <Table.Th>Значение</Table.Th>
+                                <Table.Th w={36}></Table.Th>
+                              </Table.Tr>
+                            </Table.Thead>
+                            <Table.Tbody>
+                              {searchStaticFilters.map((row, index) => (
+                                <Table.Tr key={`sf-${index}`}>
+                                  <Table.Td>
+                                    <Autocomplete size="xs" placeholder="is_active" value={row.key} data={allColumnSuggestions} limit={20} onChange={(val) => {
+                                      const next = [...searchStaticFilters]; next[index] = { ...row, key: val }; setSearchStaticFilters(next);
+                                    }} />
+                                  </Table.Td>
+                                  <Table.Td>
+                                    <TextInput size="xs" placeholder="true" value={row.value} onChange={(e) => {
+                                      const next = [...searchStaticFilters]; next[index] = { ...row, value: e.currentTarget.value }; setSearchStaticFilters(next);
+                                    }} />
+                                  </Table.Td>
+                                  <Table.Td>
+                                    <ActionIcon variant="subtle" color="red" size="sm" onClick={() => setSearchStaticFilters(searchStaticFilters.filter((_, i) => i !== index))}>
+                                      <IconTrash size={14} />
+                                    </ActionIcon>
+                                  </Table.Td>
+                                </Table.Tr>
+                              ))}
+                            </Table.Tbody>
+                          </Table>
+                        )}
+                        {searchStaticFilters.length === 0 && (
+                          <Text size="xs" c="dimmed">Нет статических фильтров</Text>
+                        )}
+                      </div>
+                      <div>
+                        <Group justify="space-between" mb={4}>
+                          <Text size="xs" fw={600} c="dimmed" tt="uppercase">Окно по дате</Text>
+                          <Switch
+                            size="xs"
+                            checked={searchDateWindow !== null}
+                            onChange={(e) => setSearchDateWindow(e.currentTarget.checked ? { column: '', days: 30 } : null)}
+                          />
+                        </Group>
+                        {searchDateWindow && (
+                          <SimpleGrid cols={2}>
+                            <Autocomplete
+                              label="Колонка"
+                              size="xs"
+                              placeholder="created_at"
+                              value={searchDateWindow.column}
+                              onChange={(val) => setSearchDateWindow({ ...searchDateWindow, column: val })}
+                              data={activeColumnSuggestions}
+                              limit={20}
+                            />
+                            <NumberInput
+                              label="Дней"
+                              size="xs"
+                              min={1}
+                              value={searchDateWindow.days}
+                              onChange={(val) => setSearchDateWindow({ ...searchDateWindow, days: typeof val === 'number' ? val : 30 })}
+                            />
+                          </SimpleGrid>
+                        )}
+                        {!searchDateWindow && (
+                          <Text size="xs" c="dimmed">Выключено</Text>
+                        )}
+                      </div>
+                    </SimpleGrid>
+                  </Stack>
+                )}
+              </Stack>
+            </Card>
+          )}
+          {isCmdEditor && (
+            <Card withBorder padding="xs">
+              <Stack gap="xs">
+                <Group justify="space-between">
+                  <Text size="sm" fw={600}>Command Builder — {cmdVendor ? `${cmdVendor} / ` : ''}SSH/Telnet</Text>
+                  <Button variant="subtle" size="xs" onClick={() => setEditorSectionOpen((v) => !v)}>
+                    {editorSectionOpen ? 'Свернуть' : 'Развернуть'}
+                  </Button>
+                </Group>
+                {editorSectionOpen && (
+                  <Stack gap="xs">
+                    <SimpleGrid cols={3}>
+                      <NumberInput label="Таймаут (сек)" min={1} max={30} value={cmdTimeout} onChange={(val) => setCmdTimeout(typeof val === 'number' ? val : 15)} />
+                      <TextInput label="Vendor" placeholder="dlink, bdcom, juniper" value={cmdVendor} onChange={(e) => setCmdVendor(e.currentTarget.value)} />
+                      <Stack gap={0} justify="flex-end">
+                        <Button variant="light" size="xs" leftSection={<IconPlus size={14} />} onClick={() => setCmdRows([...cmdRows, { name: '', command: '', description: '', params: '' }])}>
+                          Добавить команду
+                        </Button>
+                      </Stack>
+                    </SimpleGrid>
+                    <Table striped withTableBorder>
+                      <Table.Thead>
+                        <Table.Tr>
+                          <Table.Th w={36}></Table.Th>
+                          <Table.Th w={160}>Имя</Table.Th>
+                          <Table.Th>Шаблон команды</Table.Th>
+                          <Table.Th w={140}>Параметры</Table.Th>
+                          <Table.Th>Описание для LLM</Table.Th>
+                          <Table.Th w={36}></Table.Th>
+                        </Table.Tr>
+                      </Table.Thead>
+                      <Table.Tbody>
+                        {cmdRows.map((row, index) => (
+                          <Table.Tr
+                            key={`cmd-${index}`}
+                            onDragOver={(e) => e.preventDefault()}
+                            onDrop={() => {
+                              if (dragCmdIndex === null || dragCmdIndex === index) return;
+                              setCmdRows(moveItem(cmdRows, dragCmdIndex, index));
+                              setDragCmdIndex(null);
+                            }}
+                          >
+                            <Table.Td>
+                              <ActionIcon variant="subtle" draggable onDragStart={() => setDragCmdIndex(index)} onDragEnd={() => setDragCmdIndex(null)}>
+                                <IconGripVertical size={14} />
+                              </ActionIcon>
+                            </Table.Td>
+                            <Table.Td>
+                              <TextInput size="xs" placeholder="tail_messages" value={row.name} ff="monospace" onChange={(e) => {
+                                const next = [...cmdRows]; next[index] = { ...row, name: e.currentTarget.value }; setCmdRows(next);
+                              }} />
+                            </Table.Td>
+                            <Table.Td>
+                              <TextInput size="xs" placeholder="tail -n {lines} /var/log/messages" value={row.command} ff="monospace" onChange={(e) => {
+                                const next = [...cmdRows]; next[index] = { ...row, command: e.currentTarget.value }; setCmdRows(next);
+                              }} />
+                            </Table.Td>
+                            <Table.Td>
+                              <TextInput size="xs" placeholder="lines, keyword" value={row.params} onChange={(e) => {
+                                const next = [...cmdRows]; next[index] = { ...row, params: e.currentTarget.value }; setCmdRows(next);
+                              }} />
+                            </Table.Td>
+                            <Table.Td>
+                              <TextInput size="xs" placeholder="Последние N строк лога" value={row.description} onChange={(e) => {
+                                const next = [...cmdRows]; next[index] = { ...row, description: e.currentTarget.value }; setCmdRows(next);
+                              }} />
+                            </Table.Td>
+                            <Table.Td>
+                              <ActionIcon variant="subtle" color="red" size="sm" onClick={() => setCmdRows(cmdRows.filter((_, i) => i !== index))}>
+                                <IconTrash size={14} />
+                              </ActionIcon>
+                            </Table.Td>
+                          </Table.Tr>
+                        ))}
+                      </Table.Tbody>
+                    </Table>
+                    {cmdRows.length === 0 && (
+                      <Text size="xs" c="dimmed" ta="center">Нет команд. Нажмите «Добавить команду».</Text>
+                    )}
+                  </Stack>
+                )}
+              </Stack>
+            </Card>
+          )}
+          {isApiEditor && (
+            <Card withBorder padding="xs">
+              <Stack gap="xs">
+                <Group justify="space-between">
+                  <Text size="sm" fw={600}>API Builder — fetch_api_data</Text>
+                  <Button variant="subtle" size="xs" onClick={() => setEditorSectionOpen((v) => !v)}>
+                    {editorSectionOpen ? 'Свернуть' : 'Развернуть'}
+                  </Button>
+                </Group>
+                {editorSectionOpen && (
+                  <Stack gap="xs">
+                    {/* === Endpoint rows === */}
+                    <SimpleGrid cols={12}>
+                      <TextInput
+                        label="Base URL"
+                        placeholder="https://api.example.com"
+                        value={apiBaseUrl}
+                        onChange={(e) => setApiBaseUrl(e.currentTarget.value)}
+                        description={templateDataSourceId ? 'Можно оставить пустым — берётся из источника данных' : ' '}
+                        style={{ gridColumn: 'span 7' }}
+                      />
+                      <TextInput
+                        label="Endpoint"
+                        placeholder="/clients/{client_id}/contracts"
+                        value={apiEndpoint}
+                        onChange={(e) => setApiEndpoint(e.currentTarget.value)}
+                        ff="monospace"
+                        required
+                        description=" "
+                        style={{ gridColumn: 'span 5' }}
+                      />
+                    </SimpleGrid>
+                    <SimpleGrid cols={12}>
+                      <Select
+                        label="Метод"
+                        data={[{ value: 'GET', label: 'GET' }, { value: 'POST', label: 'POST' }]}
+                        value={apiMethod}
+                        onChange={(val) => setApiMethod(val || 'GET')}
+                        description=" "
+                        style={{ gridColumn: apiMethod === 'POST' ? 'span 3' : 'span 4' }}
+                      />
+                      {apiMethod === 'POST' && (
+                        <Select
+                          label="Формат body"
+                          data={[{ value: 'json', label: 'JSON' }, { value: 'form', label: 'form-urlencoded' }]}
+                          value={apiBodyFormat}
+                          onChange={(v) => setApiBodyFormat(v === 'form' ? 'form' : 'json')}
+                          description=" "
+                          style={{ gridColumn: 'span 3' }}
+                        />
+                      )}
+                      <NumberInput
+                        label="Таймаут (сек)"
+                        min={1} max={120}
+                        value={apiTimeout}
+                        onChange={(val) => setApiTimeout(typeof val === 'number' ? val : 15)}
+                        description=" "
+                        style={{ gridColumn: apiMethod === 'POST' ? 'span 2' : 'span 3' }}
+                      />
+                      <TextInput
+                        label="Result path"
+                        placeholder="data"
+                        value={apiResultPath}
+                        onChange={(e) => setApiResultPath(e.currentTarget.value)}
+                        description="Ключ в JSON, из которого брать массив/объект"
+                        style={{ gridColumn: apiMethod === 'POST' ? 'span 2' : 'span 3' }}
+                      />
+                      <NumberInput
+                        label="Лимит ответа (симв.)"
+                        min={1000} max={200000} step={1000}
+                        value={apiMaxResponseChars}
+                        onChange={(val) => setApiMaxResponseChars(typeof val === 'number' ? val : 16000)}
+                        description="Сколько символов API-ответа уйдёт в LLM"
+                        style={{ gridColumn: apiMethod === 'POST' ? 'span 2' : 'span 2' }}
+                      />
+                    </SimpleGrid>
+
+                    {/* === Path params === */}
+                    <Group justify="space-between">
+                      <Text size="xs" fw={600} c="dimmed" tt="uppercase">Path-параметры (плейсхолдеры в endpoint)</Text>
+                      <Button
+                        variant="light"
+                        size="xs"
+                        leftSection={<IconPlus size={14} />}
+                        onClick={() => setApiPathRows([...apiPathRows, { name: '', description: '', useEnum: false, enumValues: [] }])}
+                      >
+                        Добавить
+                      </Button>
+                    </Group>
+                    {apiPathRows.length > 0 && (
+                      <Table striped withTableBorder>
+                        <Table.Thead>
+                          <Table.Tr>
+                            <Table.Th w={36}></Table.Th>
+                            <Table.Th w="22%">Имя плейсхолдера</Table.Th>
+                            <Table.Th>Описание для LLM</Table.Th>
+                            <Table.Th w={120}>Enum значения</Table.Th>
+                            <Table.Th w={44}></Table.Th>
+                          </Table.Tr>
+                        </Table.Thead>
+                        <Table.Tbody>
+                          {apiPathRows.map((row, index) => {
+                            const queryAliases = apiQueryRows
+                              .map((q) => q.alias.trim())
+                              .filter((a, i, arr) => a && arr.indexOf(a) === i);
+                            const enumDupCounts = new Map<string, number>();
+                            for (const ev of row.enumValues) {
+                              const v = ev.value.trim();
+                              if (!v) continue;
+                              enumDupCounts.set(v, (enumDupCounts.get(v) || 0) + 1);
+                            }
+                            const duplicateEnumValues = Array.from(enumDupCounts.entries())
+                              .filter(([, c]) => c > 1)
+                              .map(([v]) => v);
+                            return (
+                              <Fragment key={`apipath-frag-${index}`}>
+                                <Table.Tr
+                                  onDragOver={(e) => e.preventDefault()}
+                                  onDrop={() => {
+                                    if (dragApiPathIndex === null || dragApiPathIndex === index) return;
+                                    setApiPathRows(moveItem(apiPathRows, dragApiPathIndex, index));
+                                    setDragApiPathIndex(null);
+                                  }}
+                                >
+                                  <Table.Td>
+                                    <ActionIcon variant="subtle" draggable onDragStart={() => setDragApiPathIndex(index)} onDragEnd={() => setDragApiPathIndex(null)}>
+                                      <IconGripVertical size={14} />
+                                    </ActionIcon>
+                                  </Table.Td>
+                                  <Table.Td>
+                                    <TextInput placeholder="client_id" value={row.name} ff="monospace" onChange={(e) => {
+                                      const next = [...apiPathRows]; next[index] = { ...row, name: e.currentTarget.value }; setApiPathRows(next);
+                                    }} />
+                                  </Table.Td>
+                                  <Table.Td>
+                                    <Textarea
+                                      placeholder="Описание поля. Если включён enum — это базовое описание перед списком значений."
+                                      value={row.description}
+                                      autosize
+                                      minRows={1}
+                                      maxRows={10}
+                                      onChange={(e) => {
+                                        const next = [...apiPathRows]; next[index] = { ...row, description: e.currentTarget.value }; setApiPathRows(next);
+                                      }}
+                                    />
+                                  </Table.Td>
+                                  <Table.Td>
+                                    <Switch
+                                      size="xs"
+                                      label={row.useEnum ? `${row.enumValues.length}` : 'Включить'}
+                                      checked={row.useEnum}
+                                      onChange={(e) => {
+                                        const next = [...apiPathRows];
+                                        next[index] = { ...row, useEnum: e.currentTarget.checked };
+                                        setApiPathRows(next);
+                                      }}
+                                    />
+                                  </Table.Td>
+                                  <Table.Td>
+                                    <ActionIcon variant="subtle" color="red" onClick={() => setApiPathRows(apiPathRows.filter((_, i) => i !== index))}>
+                                      <IconTrash size={14} />
+                                    </ActionIcon>
+                                  </Table.Td>
+                                </Table.Tr>
+                                {row.useEnum && (
+                                  <Table.Tr>
+                                    <Table.Td></Table.Td>
+                                    <Table.Td colSpan={4} style={{ background: 'light-dark(var(--mantine-color-gray-0), var(--mantine-color-dark-6))' }}>
+                                      <Stack gap="xs" p="xs">
+                                        <Group justify="space-between">
+                                          <Text size="xs" fw={600} c="dimmed">
+                                            Допустимые значения для <Code>{row.name || '?'}</Code>
+                                            {queryAliases.length > 0 && (
+                                              <Text component="span" size="xs" c="dimmed" fw={400}>
+                                                {' '}— отметьте, какие query-параметры обязательны для каждого значения
+                                              </Text>
+                                            )}
+                                          </Text>
+                                          <Button
+                                            variant="light"
+                                            size="xs"
+                                            leftSection={<IconPlus size={12} />}
+                                            onClick={() => {
+                                              const next = [...apiPathRows];
+                                              next[index] = {
+                                                ...row,
+                                                enumValues: [...row.enumValues, { value: '', description: '', requires: [] }],
+                                              };
+                                              setApiPathRows(next);
+                                            }}
+                                          >
+                                            Добавить значение
+                                          </Button>
+                                        </Group>
+                                        {duplicateEnumValues.length > 0 && (
+                                          <Alert color="red" p="xs" title="Дубликаты значений" icon={<IconAlertCircle size={16} />}>
+                                            <Text size="xs">
+                                              Повторяются: {duplicateEnumValues.map((v) => <Code key={v}>{v}</Code>).reduce((acc, el, i) => i === 0 ? [el] : [...acc, ', ', el], [] as React.ReactNode[])}.
+                                              {' '}Каждое значение enum должно быть уникальным — иначе схема инструмента будет невалидной.
+                                            </Text>
+                                          </Alert>
+                                        )}
+                                        {row.enumValues.length === 0 ? (
+                                          <Text size="xs" c="dimmed">Нет значений. Включите enum и добавьте варианты — LLM получит их в схеме инструмента.</Text>
+                                        ) : (
+                                          <Table withTableBorder striped>
+                                            <Table.Thead>
+                                              <Table.Tr>
+                                                <Table.Th w="20%">Значение</Table.Th>
+                                                <Table.Th>Описание</Table.Th>
+                                                {queryAliases.map((alias) => (
+                                                  <Table.Th key={`enum-col-${alias}`} w={90} ta="center" style={{ fontFamily: 'monospace' }}>
+                                                    {alias}
+                                                  </Table.Th>
+                                                ))}
+                                                <Table.Th w={36}></Table.Th>
+                                              </Table.Tr>
+                                            </Table.Thead>
+                                            <Table.Tbody>
+                                              {row.enumValues.map((ev, evIndex) => {
+                                                const trimmedValue = ev.value.trim();
+                                                const isDuplicate = !!trimmedValue && (enumDupCounts.get(trimmedValue) || 0) > 1;
+                                                return (
+                                                <Table.Tr key={`enumval-${index}-${evIndex}`}>
+                                                  <Table.Td>
+                                                    <TextInput
+                                                      size="xs"
+                                                      placeholder="log"
+                                                      ff="monospace"
+                                                      value={ev.value}
+                                                      error={isDuplicate ? 'дубликат' : undefined}
+                                                      onChange={(e) => {
+                                                        const next = [...apiPathRows];
+                                                        const evs = [...row.enumValues];
+                                                        evs[evIndex] = { ...ev, value: e.currentTarget.value };
+                                                        next[index] = { ...row, enumValues: evs };
+                                                        setApiPathRows(next);
+                                                      }}
+                                                    />
+                                                  </Table.Td>
+                                                  <Table.Td>
+                                                    <Textarea
+                                                      size="xs"
+                                                      placeholder="Системный лог свича (~200 строк)"
+                                                      value={ev.description}
+                                                      autosize
+                                                      minRows={1}
+                                                      maxRows={6}
+                                                      onChange={(e) => {
+                                                        const next = [...apiPathRows];
+                                                        const evs = [...row.enumValues];
+                                                        evs[evIndex] = { ...ev, description: e.currentTarget.value };
+                                                        next[index] = { ...row, enumValues: evs };
+                                                        setApiPathRows(next);
+                                                      }}
+                                                    />
+                                                  </Table.Td>
+                                                  {queryAliases.map((alias) => (
+                                                    <Table.Td key={`enumval-${index}-${evIndex}-${alias}`} ta="center">
+                                                      <Checkbox
+                                                        size="xs"
+                                                        checked={ev.requires.includes(alias)}
+                                                        onChange={(e) => {
+                                                          const next = [...apiPathRows];
+                                                          const evs = [...row.enumValues];
+                                                          const cur = new Set(ev.requires);
+                                                          if (e.currentTarget.checked) cur.add(alias);
+                                                          else cur.delete(alias);
+                                                          evs[evIndex] = { ...ev, requires: Array.from(cur) };
+                                                          next[index] = { ...row, enumValues: evs };
+                                                          setApiPathRows(next);
+                                                        }}
+                                                      />
+                                                    </Table.Td>
+                                                  ))}
+                                                  <Table.Td>
+                                                    <ActionIcon
+                                                      variant="subtle"
+                                                      color="red"
+                                                      size="sm"
+                                                      onClick={() => {
+                                                        const next = [...apiPathRows];
+                                                        next[index] = {
+                                                          ...row,
+                                                          enumValues: row.enumValues.filter((_, i) => i !== evIndex),
+                                                        };
+                                                        setApiPathRows(next);
+                                                      }}
+                                                    >
+                                                      <IconTrash size={12} />
+                                                    </ActionIcon>
+                                                  </Table.Td>
+                                                </Table.Tr>
+                                                );
+                                              })}
+                                            </Table.Tbody>
+                                          </Table>
+                                        )}
+                                      </Stack>
+                                    </Table.Td>
+                                  </Table.Tr>
+                                )}
+                              </Fragment>
+                            );
+                          })}
+                        </Table.Tbody>
+                      </Table>
+                    )}
+
+                    {/* === Query params (whitelist for LLM) === */}
+                    <Group justify="space-between">
+                      <Text size="xs" fw={600} c="dimmed" tt="uppercase">Query-параметры (whitelist для LLM)</Text>
+                      <Button
+                        variant="light"
+                        size="xs"
+                        leftSection={<IconPlus size={14} />}
+                        onClick={() => setApiQueryRows([...apiQueryRows, { alias: '', target: '', description: '' }])}
+                      >
+                        Добавить
+                      </Button>
+                    </Group>
+                    {apiQueryRows.length > 0 && (
+                      <Table striped withTableBorder>
+                        <Table.Thead>
+                          <Table.Tr>
+                            <Table.Th w={36}></Table.Th>
+                            <Table.Th w="22%">Алиас (имя для LLM)</Table.Th>
+                            <Table.Th w="22%">Целевой параметр API</Table.Th>
+                            <Table.Th>Описание для LLM</Table.Th>
+                            <Table.Th w={44}></Table.Th>
+                          </Table.Tr>
+                        </Table.Thead>
+                        <Table.Tbody>
+                          {apiQueryRows.map((row, index) => (
+                            <Table.Tr
+                              key={`apiq-${index}`}
+                              onDragOver={(e) => e.preventDefault()}
+                              onDrop={() => {
+                                if (dragApiQueryIndex === null || dragApiQueryIndex === index) return;
+                                setApiQueryRows(moveItem(apiQueryRows, dragApiQueryIndex, index));
+                                setDragApiQueryIndex(null);
+                              }}
+                            >
+                              <Table.Td>
+                                <ActionIcon variant="subtle" draggable onDragStart={() => setDragApiQueryIndex(index)} onDragEnd={() => setDragApiQueryIndex(null)}>
+                                  <IconGripVertical size={14} />
+                                </ActionIcon>
+                              </Table.Td>
+                              <Table.Td>
+                                <TextInput placeholder="ip" value={row.alias} ff="monospace" onChange={(e) => {
+                                  const next = [...apiQueryRows]; next[index] = { ...row, alias: e.currentTarget.value }; setApiQueryRows(next);
+                                }} />
+                              </Table.Td>
+                              <Table.Td>
+                                <TextInput placeholder="ip_address" value={row.target} ff="monospace" onChange={(e) => {
+                                  const next = [...apiQueryRows]; next[index] = { ...row, target: e.currentTarget.value }; setApiQueryRows(next);
+                                }} />
+                              </Table.Td>
+                              <Table.Td>
+                                <Textarea
+                                  placeholder="IPv4 клиента. Поддерживается перенос строк."
+                                  value={row.description}
+                                  autosize
+                                  minRows={1}
+                                  maxRows={10}
+                                  onChange={(e) => {
+                                    const next = [...apiQueryRows]; next[index] = { ...row, description: e.currentTarget.value }; setApiQueryRows(next);
+                                  }}
+                                />
+                              </Table.Td>
+                              <Table.Td>
+                                <ActionIcon variant="subtle" color="red" onClick={() => setApiQueryRows(apiQueryRows.filter((_, i) => i !== index))}>
+                                  <IconTrash size={14} />
+                                </ActionIcon>
+                              </Table.Td>
+                            </Table.Tr>
+                          ))}
+                        </Table.Tbody>
+                      </Table>
+                    )}
+
+                    {/* === Headers + static query === */}
+                    <SimpleGrid cols={2}>
+                      <div>
+                        <Group justify="space-between" mb={4}>
+                          <Text size="xs" fw={600} c="dimmed" tt="uppercase">HTTP заголовки</Text>
+                          <Button variant="light" size="xs" leftSection={<IconPlus size={14} />}
+                            onClick={() => setApiHeaderRows([...apiHeaderRows, { name: '', value: '' }])}
+                          >
+                            Добавить
+                          </Button>
+                        </Group>
+                        {apiHeaderRows.length > 0 ? (
+                          <Table striped withTableBorder>
+                            <Table.Thead>
+                              <Table.Tr>
+                                <Table.Th>Имя</Table.Th>
+                                <Table.Th>Значение</Table.Th>
+                                <Table.Th w={36}></Table.Th>
+                              </Table.Tr>
+                            </Table.Thead>
+                            <Table.Tbody>
+                              {apiHeaderRows.map((row, index) => (
+                                <Table.Tr key={`hdr-${index}`}>
+                                  <Table.Td>
+                                    <TextInput size="xs" placeholder="Accept" value={row.name} ff="monospace" onChange={(e) => {
+                                      const next = [...apiHeaderRows]; next[index] = { ...row, name: e.currentTarget.value }; setApiHeaderRows(next);
+                                    }} />
+                                  </Table.Td>
+                                  <Table.Td>
+                                    <TextInput size="xs" placeholder="application/json" value={row.value} ff="monospace" onChange={(e) => {
+                                      const next = [...apiHeaderRows]; next[index] = { ...row, value: e.currentTarget.value }; setApiHeaderRows(next);
+                                    }} />
+                                  </Table.Td>
+                                  <Table.Td>
+                                    <ActionIcon variant="subtle" color="red" size="sm" onClick={() => setApiHeaderRows(apiHeaderRows.filter((_, i) => i !== index))}>
+                                      <IconTrash size={14} />
+                                    </ActionIcon>
+                                  </Table.Td>
+                                </Table.Tr>
+                              ))}
+                            </Table.Tbody>
+                          </Table>
+                        ) : (
+                          <Text size="xs" c="dimmed">Нет заголовков (auth подмешивается из источника данных)</Text>
+                        )}
+                      </div>
+                      <div>
+                        <Group justify="space-between" mb={4}>
+                          <Text size="xs" fw={600} c="dimmed" tt="uppercase">Статические query-параметры</Text>
+                          <Button variant="light" size="xs" leftSection={<IconPlus size={14} />}
+                            onClick={() => setApiStaticQueryRows([...apiStaticQueryRows, { key: '', value: '' }])}
+                          >
+                            Добавить
+                          </Button>
+                        </Group>
+                        {apiStaticQueryRows.length > 0 ? (
+                          <Table striped withTableBorder>
+                            <Table.Thead>
+                              <Table.Tr>
+                                <Table.Th>Параметр</Table.Th>
+                                <Table.Th>Значение</Table.Th>
+                                <Table.Th w={36}></Table.Th>
+                              </Table.Tr>
+                            </Table.Thead>
+                            <Table.Tbody>
+                              {apiStaticQueryRows.map((row, index) => (
+                                <Table.Tr key={`sq-${index}`}>
+                                  <Table.Td>
+                                    <TextInput size="xs" placeholder="format" value={row.key} ff="monospace" onChange={(e) => {
+                                      const next = [...apiStaticQueryRows]; next[index] = { ...row, key: e.currentTarget.value }; setApiStaticQueryRows(next);
+                                    }} />
+                                  </Table.Td>
+                                  <Table.Td>
+                                    <TextInput size="xs" placeholder="json" value={row.value} ff="monospace" onChange={(e) => {
+                                      const next = [...apiStaticQueryRows]; next[index] = { ...row, value: e.currentTarget.value }; setApiStaticQueryRows(next);
+                                    }} />
+                                  </Table.Td>
+                                  <Table.Td>
+                                    <ActionIcon variant="subtle" color="red" size="sm" onClick={() => setApiStaticQueryRows(apiStaticQueryRows.filter((_, i) => i !== index))}>
+                                      <IconTrash size={14} />
+                                    </ActionIcon>
+                                  </Table.Td>
+                                </Table.Tr>
+                              ))}
+                            </Table.Tbody>
+                          </Table>
+                        ) : (
+                          <Text size="xs" c="dimmed">Нет статических параметров</Text>
+                        )}
+                      </div>
+                    </SimpleGrid>
+
+                    {/* === Body params + static body (POST) === */}
+                    {apiMethod === 'POST' && (
+                      <SimpleGrid cols={2}>
+                        <div>
+                          <Group justify="space-between" mb={4}>
+                            <Text size="xs" fw={600} c="dimmed" tt="uppercase">Body-параметры</Text>
+                            <Button
+                              variant="light"
+                              size="xs"
+                              leftSection={<IconPlus size={14} />}
+                              onClick={() => setApiBodyRows([...apiBodyRows, { alias: '', target: '', description: '' }])}
+                            >
+                              Добавить
+                            </Button>
+                          </Group>
+                          {apiBodyRows.length > 0 ? (
+                            <Table striped withTableBorder>
+                              <Table.Thead>
+                                <Table.Tr>
+                                  <Table.Th w={36}></Table.Th>
+                                  <Table.Th>Alias</Table.Th>
+                                  <Table.Th>Target</Table.Th>
+                                  <Table.Th>Описание</Table.Th>
+                                  <Table.Th w={36}></Table.Th>
+                                </Table.Tr>
+                              </Table.Thead>
+                              <Table.Tbody>
+                                {apiBodyRows.map((row, index) => (
+                                  <Table.Tr
+                                    key={`apibody-${index}`}
+                                    onDragOver={(e) => e.preventDefault()}
+                                    onDrop={() => {
+                                      if (dragApiBodyIndex === null || dragApiBodyIndex === index) return;
+                                      setApiBodyRows(moveItem(apiBodyRows, dragApiBodyIndex, index));
+                                      setDragApiBodyIndex(null);
+                                    }}
+                                  >
+                                    <Table.Td>
+                                      <ActionIcon
+                                        variant="subtle"
+                                        size="sm"
+                                        draggable
+                                        onDragStart={() => setDragApiBodyIndex(index)}
+                                        onDragEnd={() => setDragApiBodyIndex(null)}
+                                      >
+                                        <IconGripVertical size={14} />
+                                      </ActionIcon>
+                                    </Table.Td>
+                                    <Table.Td>
+                                      <TextInput size="xs" placeholder="text" value={row.alias} ff="monospace" onChange={(e) => {
+                                        const next = [...apiBodyRows]; next[index] = { ...row, alias: e.currentTarget.value }; setApiBodyRows(next);
+                                      }} />
+                                    </Table.Td>
+                                    <Table.Td>
+                                      <TextInput size="xs" placeholder="text" value={row.target} ff="monospace" onChange={(e) => {
+                                        const next = [...apiBodyRows]; next[index] = { ...row, target: e.currentTarget.value }; setApiBodyRows(next);
+                                      }} />
+                                    </Table.Td>
+                                    <Table.Td>
+                                      <TextInput size="xs" placeholder="Описание для LLM" value={row.description} onChange={(e) => {
+                                        const next = [...apiBodyRows]; next[index] = { ...row, description: e.currentTarget.value }; setApiBodyRows(next);
+                                      }} />
+                                    </Table.Td>
+                                    <Table.Td>
+                                      <ActionIcon variant="subtle" color="red" size="sm" onClick={() => setApiBodyRows(apiBodyRows.filter((_, i) => i !== index))}>
+                                        <IconTrash size={14} />
+                                      </ActionIcon>
+                                    </Table.Td>
+                                  </Table.Tr>
+                                ))}
+                              </Table.Tbody>
+                            </Table>
+                          ) : (
+                            <Text size="xs" c="dimmed">Нет body-параметров</Text>
+                          )}
+                        </div>
+                        <div>
+                          <Group justify="space-between" mb={4}>
+                            <Text size="xs" fw={600} c="dimmed" tt="uppercase">Статические body-параметры</Text>
+                            <Button
+                              variant="light"
+                              size="xs"
+                              leftSection={<IconPlus size={14} />}
+                              onClick={() => setApiStaticBodyRows([...apiStaticBodyRows, { key: '', value: '' }])}
+                            >
+                              Добавить
+                            </Button>
+                          </Group>
+                          {apiStaticBodyRows.length > 0 ? (
+                            <Table striped withTableBorder>
+                              <Table.Thead>
+                                <Table.Tr>
+                                  <Table.Th>Параметр</Table.Th>
+                                  <Table.Th>Значение</Table.Th>
+                                  <Table.Th w={36}></Table.Th>
+                                </Table.Tr>
+                              </Table.Thead>
+                              <Table.Tbody>
+                                {apiStaticBodyRows.map((row, index) => (
+                                  <Table.Tr key={`sb-${index}`}>
+                                    <Table.Td>
+                                      <TextInput size="xs" placeholder="parse_mode" value={row.key} ff="monospace" onChange={(e) => {
+                                        const next = [...apiStaticBodyRows]; next[index] = { ...row, key: e.currentTarget.value }; setApiStaticBodyRows(next);
+                                      }} />
+                                    </Table.Td>
+                                    <Table.Td>
+                                      <TextInput size="xs" placeholder="HTML / true / 42" value={row.value} ff="monospace" onChange={(e) => {
+                                        const next = [...apiStaticBodyRows]; next[index] = { ...row, value: e.currentTarget.value }; setApiStaticBodyRows(next);
+                                      }} />
+                                    </Table.Td>
+                                    <Table.Td>
+                                      <ActionIcon variant="subtle" color="red" size="sm" onClick={() => setApiStaticBodyRows(apiStaticBodyRows.filter((_, i) => i !== index))}>
+                                        <IconTrash size={14} />
+                                      </ActionIcon>
+                                    </Table.Td>
+                                  </Table.Tr>
+                                ))}
+                              </Table.Tbody>
+                            </Table>
+                          ) : (
+                            <Text size="xs" c="dimmed">Нет статических полей body</Text>
+                          )}
+                        </div>
+                      </SimpleGrid>
+                    )}
+                  </Stack>
+                )}
+              </Stack>
+            </Card>
+          )}
+          <SimpleGrid cols={2}>
+            <Card withBorder padding="xs">
+              <Group justify="space-between" mb={4}>
+                <Text size="sm" fw={600}>Preview</Text>
+                <Button variant="subtle" size="xs" onClick={() => setPreviewSectionOpen((v) => !v)}>
+                  {previewSectionOpen ? 'Свернуть' : 'Показать'}
+                </Button>
+              </Group>
+              {previewSectionOpen && (
+                <Textarea
+                  value={previewConfig}
+                  readOnly
+                  autosize
+                  minRows={6}
+                  maxRows={16}
+                  ff="monospace"
+                  styles={{ input: { fontFamily: 'monospace', fontSize: '12px' } }}
+                />
+              )}
+            </Card>
+            <Card withBorder padding="xs">
+              <Group justify="space-between" mb={4}>
+                <Text size="sm" fw={600}>Raw JSON</Text>
+                <Button variant="subtle" size="xs" onClick={() => setJsonSectionOpen((v) => !v)}>
+                  {jsonSectionOpen ? 'Свернуть' : 'Показать'}
+                </Button>
+              </Group>
+              {jsonSectionOpen && (
+                <Textarea
+                  placeholder='{"type":"function","function":{...}}'
+                  value={configJson}
+                  onChange={(e) => setConfigJson(e.currentTarget.value)}
+                  autosize
+                  minRows={6}
+                  maxRows={16}
+                  ff="monospace"
+                  styles={{ input: { fontFamily: 'monospace', fontSize: '12px' } }}
+                />
+              )}
+            </Card>
+          </SimpleGrid>
+          <Card withBorder padding="xs">
+            <Group justify="space-between" mb={4}>
+              <Text size="sm" fw={600}>Тест</Text>
+              <Button variant="subtle" size="xs" onClick={() => setTestSectionOpen((v) => !v)}>
+                {testSectionOpen ? 'Свернуть' : 'Показать'}
+              </Button>
+            </Group>
+            {testSectionOpen && (
+              <SimpleGrid cols={2}>
+                <Textarea
+                  placeholder='{"filters": {"ip": "10.0.0.1"}}'
+                  value={testArgsJson}
+                  onChange={(e) => setTestArgsJson(e.currentTarget.value)}
+                  autosize
+                  minRows={3}
+                  maxRows={10}
+                  ff="monospace"
+                  styles={{ input: { fontFamily: 'monospace', fontSize: '12px' } }}
+                />
+                <Stack gap="xs">
+                  <Button variant="light" onClick={() => testMutation.mutate()} loading={testMutation.isPending} fullWidth>
+                    Запустить тест
+                  </Button>
+                  {testResult && (
+                    <Alert color={testResultSuccess ? 'green' : 'red'} title={testResultSuccess ? 'OK' : 'Ошибка'} p="xs">
+                      <Code block style={{ fontSize: '12px', maxHeight: 200, overflow: 'auto' }}>{testResult}</Code>
+                    </Alert>
+                  )}
+                </Stack>
+              </SimpleGrid>
+            )}
+          </Card>
+          <Group justify="space-between">
+            <Group gap="lg">
+              <Switch label="Активный" checked={toolActive} onChange={(e) => setToolActive(e.currentTarget.checked)} />
+              <Tooltip
+                label="Закреплённые tools всегда добавляются в LLM-контекст, минуя фильтр релевантности. Используй для общих/часто-нужных tools (например, search_clients)."
+                multiline
+                w={320}
+              >
+                <Switch
+                  label="Закреплён в контексте"
+                  checked={toolPinned}
+                  onChange={(e) => setToolPinned(e.currentTarget.checked)}
+                />
+              </Tooltip>
+            </Group>
+            <Group gap="xs">
+              <Button variant="default" onClick={() => setModalOpen(false)}>Отмена</Button>
+              <Button onClick={handleSave} loading={createMutation.isPending || updateMutation.isPending}>
+                {editId ? 'Обновить' : 'Создать'}
+              </Button>
+            </Group>
+          </Group>
+        </Stack>
+      </Modal>
+      <Modal
+        opened={renameGroupOpen}
+        onClose={() => setRenameGroupOpen(false)}
+        title="Переименовать группу"
+        size="sm"
+      >
+        <Stack gap="md">
+          <Text size="sm" c="dimmed">
+            Новое название будет применено ко всем инструментам в группе `{renameGroupFrom}`.
+          </Text>
+          <TextInput
+            label="Название группы"
+            value={renameGroupTo}
+            onChange={(e) => setRenameGroupTo(e.currentTarget.value)}
             required
           />
-          <NumberInput
-            label="Приоритет"
-            description="Чем выше число, тем раньше запись попадёт в контекст (0 — обычный)"
-            value={memPriority}
-            onChange={(val) => setMemPriority(Number(val))}
-          />
-          <Switch
-            label="Закреплено"
-            description="Закреплённые записи всегда включаются в контекст"
-            checked={memPinned}
-            onChange={(e) => setMemPinned(e.currentTarget.checked)}
-          />
           <Group justify="flex-end">
-            <Button variant="default" onClick={() => setModalOpen(false)}>Отмена</Button>
-            <Button onClick={handleSave} loading={createMutation.isPending || updateMutation.isPending}>
-              {editId ? 'Обновить' : 'Создать'}
+            <Button variant="default" onClick={() => setRenameGroupOpen(false)}>Отмена</Button>
+            <Button
+              loading={renameGroupMutation.isPending}
+              onClick={() => {
+                const nextName = renameGroupTo.trim();
+                if (!nextName) {
+                  notifications.show({ title: 'Ошибка', message: 'Укажите новое название группы', color: 'red' });
+                  return;
+                }
+                renameGroupMutation.mutate({ from: renameGroupFrom, to: nextName });
+              }}
+            >
+              Сохранить
             </Button>
           </Group>
         </Stack>
       </Modal>
     </Stack>
-  );
-}
-
-// ===== CHATS TAB =====
-
-function ChatsTab({ tenantId }: { tenantId: string }) {
-  const navigate = useNavigate();
-  const [page, setPage] = useState(1);
-
-  const { data, isLoading } = useQuery({
-    queryKey: ['tenants', tenantId, 'chats', 'admin', page],
-    queryFn: () => chatsApi.listAdmin(tenantId, page),
-  });
-
-  const totalPages = data ? Math.ceil(data.total_count / 20) : 0;
-
-  return (
-    <Stack gap="md">
-      <Group justify="space-between">
-        <Text fw={500}>Чаты</Text>
-        <Button
-          leftSection={<IconPlus size={16} />}
-          size="sm"
-          onClick={() => navigate(`/tenants/${tenantId}/chat`)}
-        >
-          Открыть интерфейс чата
-        </Button>
-      </Group>
-
-      {isLoading ? (
-        <Center py="md"><Loader /></Center>
-      ) : !data?.items.length ? (
-        <Text c="dimmed" ta="center" py="md">Чатов пока нет.</Text>
-      ) : (
-        <>
-          <Table striped highlightOnHover>
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th>Заголовок</Table.Th>
-                <Table.Th>Описание</Table.Th>
-                <Table.Th>Статус</Table.Th>
-                <Table.Th>Создан</Table.Th>
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {data.items.map((chat) => (
-                <Table.Tr
-                  key={chat.id}
-                  style={{ cursor: 'pointer' }}
-                  onClick={() => navigate(`/tenants/${tenantId}/chat/${chat.id}`)}
-                >
-                  <Table.Td fw={500}>{chat.title}</Table.Td>
-                  <Table.Td>
-                    <Text size="sm" c="dimmed" lineClamp={1}>
-                      {chat.description || '-'}
-                    </Text>
-                  </Table.Td>
-                  <Table.Td>
-                    <Badge
-                      color={
-                        chat.status === 'active'
-                          ? 'green'
-                          : chat.status === 'closed'
-                            ? 'gray'
-                            : 'blue'
-                      }
-                    >
-                      {chat.status}
-                    </Badge>
-                  </Table.Td>
-                  <Table.Td>{new Date(chat.created_at).toLocaleString()}</Table.Td>
-                </Table.Tr>
-              ))}
-            </Table.Tbody>
-          </Table>
-          {totalPages > 1 && (
-            <Center><Pagination total={totalPages} value={page} onChange={setPage} /></Center>
-          )}
-        </>
-      )}
-    </Stack>
-  );
-}
-
-// ===== LOGS TAB =====
-
-function LogsTab({ tenantId }: { tenantId: string }) {
-  const [page, setPage] = useState(1);
-  const [detailOpen, setDetailOpen] = useState(false);
-  const [selectedLogId, setSelectedLogId] = useState<string | null>(null);
-  const [chatFilter, setChatFilter] = useState<string | null>(null);
-  const [dateFrom, setDateFrom] = useState('');
-  const [dateTo, setDateTo] = useState('');
-
-  const filters = {
-    chat_id: chatFilter || undefined,
-    date_from: dateFrom || undefined,
-    date_to: dateTo || undefined,
-  };
-
-  const { data, isLoading } = useQuery({
-    queryKey: ['tenants', tenantId, 'logs', page, chatFilter, dateFrom, dateTo],
-    queryFn: () => logsApi.list(tenantId, page, 20, filters),
-  });
-
-  const { data: logDetail, isLoading: detailLoading } = useQuery({
-    queryKey: ['tenants', tenantId, 'logs', selectedLogId, 'detail'],
-    queryFn: () => logsApi.getDetail(tenantId, selectedLogId!),
-    enabled: !!selectedLogId,
-  });
-
-  // Load chats for filter dropdown
-  const { data: chatsData } = useQuery({
-    queryKey: ['tenants', tenantId, 'chats', 'admin', 1],
-    queryFn: () => chatsApi.listAdmin(tenantId, 1, 100),
-  });
-
-  const totalPages = data ? Math.ceil(data.total_count / 20) : 0;
-
-  // Map chat_id to title for display
-  const chatMap = new Map(
-    (chatsData?.items || []).map((c) => [c.id, c.title || c.description || c.id.slice(0, 8)])
-  );
-
-  return (
-    <Stack gap="md">
-      <Group justify="space-between">
-        <Text fw={500}>LLM Логи</Text>
-        <Group gap="xs">
-          <Select
-            placeholder="Все чаты"
-            clearable
-            size="xs"
-            w={200}
-            value={chatFilter}
-            onChange={(val) => { setChatFilter(val); setPage(1); }}
-            data={(chatsData?.items || []).map((c) => ({
-              value: c.id,
-              label: c.title || c.description || c.id.slice(0, 8),
-            }))}
-          />
-          <TextInput
-            type="date"
-            size="xs"
-            w={140}
-            placeholder="Дата от"
-            value={dateFrom}
-            onChange={(e) => { setDateFrom(e.currentTarget.value); setPage(1); }}
-          />
-          <TextInput
-            type="date"
-            size="xs"
-            w={140}
-            placeholder="Дата до"
-            value={dateTo}
-            onChange={(e) => { setDateTo(e.currentTarget.value); setPage(1); }}
-          />
-          {(chatFilter || dateFrom || dateTo) && (
-            <Button variant="subtle" size="xs" onClick={() => { setChatFilter(null); setDateFrom(''); setDateTo(''); setPage(1); }}>
-              Сбросить
-            </Button>
-          )}
-        </Group>
-      </Group>
-
-      {isLoading ? (
-        <Center py="md"><Loader /></Center>
-      ) : !data?.items.length ? (
-        <Text c="dimmed" ta="center" py="md">Логов пока нет.</Text>
-      ) : (
-        <>
-          <Table striped highlightOnHover>
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th>Время</Table.Th>
-                <Table.Th>Чат</Table.Th>
-                <Table.Th>Модель</Table.Th>
-                <Table.Th>Статус</Table.Th>
-                <Table.Th>Токены</Table.Th>
-                <Table.Th>Задержка</Table.Th>
-                <Table.Th>Tools</Table.Th>
-                <Table.Th>Стоимость</Table.Th>
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {data.items.map((log) => (
-                <Table.Tr
-                  key={log.id}
-                  style={{ cursor: 'pointer' }}
-                  onClick={() => {
-                    setSelectedLogId(log.id);
-                    setDetailOpen(true);
-                  }}
-                >
-                  <Table.Td>
-                    <Text size="sm">{new Date(log.created_at).toLocaleString()}</Text>
-                  </Table.Td>
-                  <Table.Td>
-                    <Text size="sm" lineClamp={1}>
-                      {log.chat_id ? (chatMap.get(log.chat_id) || log.chat_id.slice(0, 8)) : '-'}
-                    </Text>
-                  </Table.Td>
-                  <Table.Td><Text size="sm" ff="monospace">{log.model_name}</Text></Table.Td>
-                  <Table.Td>
-                    <Badge color={log.status === 'success' ? 'green' : 'red'}>
-                      {log.status}
-                    </Badge>
-                  </Table.Td>
-                  <Table.Td>
-                    <Text size="sm">
-                      {log.prompt_tokens ?? '-'} / {log.completion_tokens ?? '-'} / {log.total_tokens ?? '-'}
-                    </Text>
-                  </Table.Td>
-                  <Table.Td>
-                    <Text size="sm">
-                      {log.latency_ms != null ? `${log.latency_ms.toFixed(2)}ms` : '-'}
-                    </Text>
-                  </Table.Td>
-                  <Table.Td>
-                    <Text size="sm">{log.tool_calls_count || '-'}</Text>
-                  </Table.Td>
-                  <Table.Td>
-                    <Text size="sm">
-                      {log.estimated_cost != null ? `$${log.estimated_cost.toFixed(6)}` : '-'}
-                    </Text>
-                  </Table.Td>
-                </Table.Tr>
-              ))}
-            </Table.Tbody>
-          </Table>
-          {totalPages > 1 && (
-            <Center><Pagination total={totalPages} value={page} onChange={setPage} /></Center>
-          )}
-        </>
-      )}
-
-      <Drawer
-        opened={detailOpen}
-        onClose={() => {
-          setDetailOpen(false);
-          setSelectedLogId(null);
-        }}
-        title="Детали лога"
-        position="right"
-        size="xl"
-      >
-        {detailLoading ? (
-          <Center py="md"><Loader /></Center>
-        ) : logDetail ? (
-          <LogDetailView logDetail={logDetail} />
-        ) : (
-          <Text c="dimmed">Нет данных.</Text>
-        )}
-      </Drawer>
-    </Stack>
-  );
-}
-
-function LogDetailView({ logDetail }: { logDetail: LLMLogDetail }) {
-  return (
-    <ScrollArea h="calc(100vh - 100px)">
-      <Stack gap="md">
-        <Card withBorder>
-          <Stack gap="xs">
-            <Group>
-              <Text size="sm" fw={500}>Модель:</Text>
-              <Text size="sm" ff="monospace">{logDetail.model_name}</Text>
-            </Group>
-            <Group>
-              <Text size="sm" fw={500}>Статус:</Text>
-              <Badge color={logDetail.status === 'success' ? 'green' : 'red'}>
-                {logDetail.status}
-              </Badge>
-            </Group>
-            <Group>
-              <Text size="sm" fw={500}>Токены:</Text>
-              <Text size="sm">
-                Промпт: {logDetail.prompt_tokens} | Ответ: {logDetail.completion_tokens} | Всего: {logDetail.total_tokens}
-              </Text>
-            </Group>
-            <Group>
-              <Text size="sm" fw={500}>Задержка:</Text>
-              <Text size="sm">{logDetail.latency_ms}ms</Text>
-            </Group>
-            {logDetail.estimated_cost != null && (
-              <Group>
-                <Text size="sm" fw={500}>Стоимость:</Text>
-                <Text size="sm">${logDetail.estimated_cost.toFixed(6)}</Text>
-              </Group>
-            )}
-            {logDetail.error_text && (
-              <Alert color="red" variant="light">
-                {logDetail.error_text}
-              </Alert>
-            )}
-          </Stack>
-        </Card>
-
-        {logDetail.raw_request && (
-          <div>
-            <Text size="sm" fw={500} mb="xs">Исходный запрос</Text>
-            <Code block>{JSON.stringify(logDetail.raw_request, null, 2)}</Code>
-          </div>
-        )}
-
-        {logDetail.raw_response && (
-          <div>
-            <Text size="sm" fw={500} mb="xs">Исходный ответ</Text>
-            <Code block>{JSON.stringify(logDetail.raw_response, null, 2)}</Code>
-          </div>
-        )}
-
-        {logDetail.normalized_request && (
-          <div>
-            <Text size="sm" fw={500} mb="xs">Нормализованный запрос</Text>
-            <Code block>{JSON.stringify(logDetail.normalized_request, null, 2)}</Code>
-          </div>
-        )}
-
-        {logDetail.normalized_response && (
-          <div>
-            <Text size="sm" fw={500} mb="xs">Нормализованный ответ</Text>
-            <Code block>{JSON.stringify(logDetail.normalized_response, null, 2)}</Code>
-          </div>
-        )}
-      </Stack>
-    </ScrollArea>
   );
 }

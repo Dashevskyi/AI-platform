@@ -3,8 +3,12 @@ import { Outlet, useNavigate, useLocation } from 'react-router-dom';
 import {
   AppShell as MantineAppShell,
   Burger,
+  Button,
   Group,
+  Modal,
   NavLink,
+  PasswordInput,
+  Stack,
   Title,
   ActionIcon,
   Menu,
@@ -14,9 +18,11 @@ import {
   useMantineColorScheme,
   Avatar,
 } from '@mantine/core';
+import { notifications } from '@mantine/notifications';
 import {
   IconDashboard,
   IconBuilding,
+  IconKey,
   IconSun,
   IconMoon,
   IconLogout,
@@ -25,25 +31,77 @@ import {
   IconMessage,
   IconPlus,
   IconRobot,
+  IconCpu,
   IconArrowLeft,
   IconChevronRight,
 } from '@tabler/icons-react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../hooks/useAuth';
-import { chatsApi, tenantsApi } from '../api/endpoints';
+import { usePermissions } from '../hooks/usePermissions';
+import { authApi, chatsApi, tenantsApi } from '../api/endpoints';
 
 export function AppShellLayout() {
   const [opened, setOpened] = useState(false);
   const { colorScheme, toggleColorScheme } = useMantineColorScheme();
   const { user, logout } = useAuth();
+  const { isSuperadmin, isTenantAdmin, tenantId: myTenantId, has: hasPerm } = usePermissions();
   const navigate = useNavigate();
   const location = useLocation();
+  const [pwdOpen, setPwdOpen] = useState(false);
+  const [curPwd, setCurPwd] = useState('');
+  const [newPwd, setNewPwd] = useState('');
+  const [newPwd2, setNewPwd2] = useState('');
 
-  const navItems = [
-    { label: 'Панель управления', icon: IconDashboard, path: '/dashboard' },
-    { label: 'Каталог моделей', icon: IconRobot, path: '/models' },
-    { label: 'Тенанты', icon: IconBuilding, path: '/tenants' },
-  ];
+  const changePwdMut = useMutation({
+    mutationFn: () => authApi.changePassword({ current_password: curPwd, new_password: newPwd }),
+    onSuccess: () => {
+      notifications.show({ title: 'Готово', message: 'Пароль изменён', color: 'green' });
+      setPwdOpen(false);
+      setCurPwd('');
+      setNewPwd('');
+      setNewPwd2('');
+    },
+    onError: (e: Error & { response?: { data?: { detail?: string } } }) => {
+      notifications.show({
+        title: 'Ошибка',
+        message: e.response?.data?.detail || e.message || 'Не удалось изменить пароль',
+        color: 'red',
+      });
+    },
+  });
+
+  const handleChangePassword = () => {
+    if (!curPwd || !newPwd) {
+      notifications.show({ title: 'Ошибка', message: 'Заполните все поля', color: 'red' });
+      return;
+    }
+    if (newPwd.length < 4) {
+      notifications.show({ title: 'Ошибка', message: 'Новый пароль слишком короткий (минимум 4 символа)', color: 'red' });
+      return;
+    }
+    if (newPwd !== newPwd2) {
+      notifications.show({ title: 'Ошибка', message: 'Пароли не совпадают', color: 'red' });
+      return;
+    }
+    if (curPwd === newPwd) {
+      notifications.show({ title: 'Ошибка', message: 'Новый пароль совпадает с текущим', color: 'red' });
+      return;
+    }
+    changePwdMut.mutate();
+  };
+
+  const navItems = isSuperadmin
+    ? [
+        { label: 'Панель управления', icon: IconDashboard, path: '/dashboard' },
+        { label: 'Каталог моделей', icon: IconRobot, path: '/models' },
+        { label: 'Тенанты', icon: IconBuilding, path: '/tenants' },
+        { label: 'Инфраструктура', icon: IconCpu, path: '/infrastructure' },
+      ]
+    : isTenantAdmin && myTenantId
+      ? [
+          { label: 'Мой тенант', icon: IconBuilding, path: `/tenants/${myTenantId}` },
+        ]
+      : [];
 
   // Extract tenant ID from URL if on a tenant page
   const tenantId = useMemo(() => {
@@ -66,10 +124,11 @@ export function AppShellLayout() {
     enabled: !!tenantId,
   });
 
+  const canSeeChats = hasPerm('chats');
   const { data: chatsData, isLoading: chatsLoading } = useQuery({
     queryKey: ['tenants', tenantId, 'chats', 'list'],
     queryFn: () => chatsApi.list(tenantId!, 1, 10),
-    enabled: !!tenantId,
+    enabled: !!tenantId && canSeeChats,
   });
 
   const handleCreateChat = async () => {
@@ -170,6 +229,12 @@ export function AppShellLayout() {
                   Профиль
                 </Menu.Item>
                 <Menu.Item
+                  leftSection={<IconKey size={14} />}
+                  onClick={() => setPwdOpen(true)}
+                >
+                  Сменить пароль
+                </Menu.Item>
+                <Menu.Item
                   leftSection={<IconLogout size={14} />}
                   color="red"
                   onClick={logout}
@@ -198,7 +263,7 @@ export function AppShellLayout() {
           />
         ))}
 
-        {tenantId && (
+        {tenantId && canSeeChats && (
           <>
             <Divider my="md" />
             <Group justify="space-between" mb={8} px={4}>
@@ -237,6 +302,45 @@ export function AppShellLayout() {
       <MantineAppShell.Main>
         <Outlet />
       </MantineAppShell.Main>
+
+      <Modal
+        opened={pwdOpen}
+        onClose={() => setPwdOpen(false)}
+        title="Смена пароля"
+        size="sm"
+      >
+        <Stack gap="sm">
+          <PasswordInput
+            label="Текущий пароль"
+            value={curPwd}
+            onChange={(e) => setCurPwd(e.currentTarget.value)}
+            autoComplete="current-password"
+            required
+          />
+          <PasswordInput
+            label="Новый пароль"
+            value={newPwd}
+            onChange={(e) => setNewPwd(e.currentTarget.value)}
+            autoComplete="new-password"
+            description="Минимум 4 символа"
+            required
+          />
+          <PasswordInput
+            label="Повтор нового пароля"
+            value={newPwd2}
+            onChange={(e) => setNewPwd2(e.currentTarget.value)}
+            autoComplete="new-password"
+            error={newPwd2 && newPwd !== newPwd2 ? 'Пароли не совпадают' : undefined}
+            required
+          />
+          <Group justify="flex-end" gap="xs" mt="xs">
+            <Button variant="default" onClick={() => setPwdOpen(false)}>Отмена</Button>
+            <Button onClick={handleChangePassword} loading={changePwdMut.isPending}>
+              Сменить
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
     </MantineAppShell>
   );
 }

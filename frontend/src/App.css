@@ -9,3 +9,141 @@ body,
 #root {
   height: 100%;
 }
+
+pre code.hljs {
+  display: block;
+  overflow-x: auto;
+  padding: 1em;
+}
+
+code.hljs {
+  padding: 3px 5px;
+}
+
+:where([data-mantine-color-scheme='light']) .hljs {
+  color: #24292e;
+}
+
+:where([data-mantine-color-scheme='light']) .hljs-doctag,
+:where([data-mantine-color-scheme='light']) .hljs-keyword,
+:where([data-mantine-color-scheme='light']) .hljs-meta .hljs-keyword,
+:where([data-mantine-color-scheme='light']) .hljs-template-tag,
+:where([data-mantine-color-scheme='light']) .hljs-template-variable,
+:where([data-mantine-color-scheme='light']) .hljs-type,
+:where([data-mantine-color-scheme='light']) .hljs-variable.language_ {
+  color: #d73a49;
+}
+
+:where([data-mantine-color-scheme='light']) .hljs-title,
+:where([data-mantine-color-scheme='light']) .hljs-title.class_,
+:where([data-mantine-color-scheme='light']) .hljs-title.class_.inherited__,
+:where([data-mantine-color-scheme='light']) .hljs-title.function_ {
+  color: #6f42c1;
+}
+
+:where([data-mantine-color-scheme='light']) .hljs-attr,
+:where([data-mantine-color-scheme='light']) .hljs-attribute,
+:where([data-mantine-color-scheme='light']) .hljs-literal,
+:where([data-mantine-color-scheme='light']) .hljs-meta,
+:where([data-mantine-color-scheme='light']) .hljs-number,
+:where([data-mantine-color-scheme='light']) .hljs-operator,
+:where([data-mantine-color-scheme='light']) .hljs-variable,
+:where([data-mantine-color-scheme='light']) .hljs-selector-attr,
+:where([data-mantine-color-scheme='light']) .hljs-selector-class,
+:where([data-mantine-color-scheme='light']) .hljs-selector-id {
+  color: #005cc5;
+}
+
+:where([data-mantine-color-scheme='light']) .hljs-regexp,
+:where([data-mantine-color-scheme='light']) .hljs-string,
+:where([data-mantine-color-scheme='light']) .hljs-meta .hljs-string {
+  color: #032f62;
+}
+
+:where([data-mantine-color-scheme='light']) .hljs-built_in,
+:where([data-mantine-color-scheme='light']) .hljs-symbol {
+  color: #e36209;
+}
+
+:where([data-mantine-color-scheme='light']) .hljs-comment,
+:where([data-mantine-color-scheme='light']) .hljs-code,
+:where([data-mantine-color-scheme='light']) .hljs-formula {
+  color: #6a737d;
+}
+
+:where([data-mantine-color-scheme='light']) .hljs-name,
+:where([data-mantine-color-scheme='light']) .hljs-quote,
+:where([data-mantine-color-scheme='light']) .hljs-selector-tag,
+:where([data-mantine-color-scheme='light']) .hljs-selector-pseudo {
+  color: #22863a;
+}
+
+:where([data-mantine-color-scheme='light']) .hljs-subst,
+:where([data-mantine-color-scheme='light']) .hljs-emphasis,
+:where([data-mantine-color-scheme='light']) .hljs-strong {
+  color: #24292e;
+}
+
+:where([data-mantine-color-scheme='dark']) .hljs {
+  color: #c9d1d9;
+}
+
+:where([data-mantine-color-scheme='dark']) .hljs-doctag,
+:where([data-mantine-color-scheme='dark']) .hljs-keyword,
+:where([data-mantine-color-scheme='dark']) .hljs-meta .hljs-keyword,
+:where([data-mantine-color-scheme='dark']) .hljs-template-tag,
+:where([data-mantine-color-scheme='dark']) .hljs-template-variable,
+:where([data-mantine-color-scheme='dark']) .hljs-type,
+:where([data-mantine-color-scheme='dark']) .hljs-variable.language_ {
+  color: #ff7b72;
+}
+
+:where([data-mantine-color-scheme='dark']) .hljs-title,
+:where([data-mantine-color-scheme='dark']) .hljs-title.class_,
+:where([data-mantine-color-scheme='dark']) .hljs-title.class_.inherited__,
+:where([data-mantine-color-scheme='dark']) .hljs-title.function_ {
+  color: #d2a8ff;
+}
+
+:where([data-mantine-color-scheme='dark']) .hljs-attr,
+:where([data-mantine-color-scheme='dark']) .hljs-attribute,
+:where([data-mantine-color-scheme='dark']) .hljs-literal,
+:where([data-mantine-color-scheme='dark']) .hljs-meta,
+:where([data-mantine-color-scheme='dark']) .hljs-number,
+:where([data-mantine-color-scheme='dark']) .hljs-operator,
+:where([data-mantine-color-scheme='dark']) .hljs-variable,
+:where([data-mantine-color-scheme='dark']) .hljs-selector-attr,
+:where([data-mantine-color-scheme='dark']) .hljs-selector-class,
+:where([data-mantine-color-scheme='dark']) .hljs-selector-id {
+  color: #79c0ff;
+}
+
+:where([data-mantine-color-scheme='dark']) .hljs-regexp,
+:where([data-mantine-color-scheme='dark']) .hljs-string,
+:where([data-mantine-color-scheme='dark']) .hljs-meta .hljs-string {
+  color: #a5d6ff;
+}
+
+:where([data-mantine-color-scheme='dark']) .hljs-built_in,
+:where([data-mantine-color-scheme='dark']) .hljs-symbol {
+  color: #ffa657;
+}
+
+:where([data-mantine-color-scheme='dark']) .hljs-comment,
+:where([data-mantine-color-scheme='dark']) .hljs-code,
+:where([data-mantine-color-scheme='dark']) .hljs-formula {
+  color: #8b949e;
+}
+
+:where([data-mantine-color-scheme='dark']) .hljs-name,
+:where([data-mantine-color-scheme='dark']) .hljs-quote,
+:where([data-mantine-color-scheme='dark']) .hljs-selector-tag,
+:where([data-mantine-color-scheme='dark']) .hljs-selector-pseudo {
+  color: #7ee787;
+}
+
+:where([data-mantine-color-scheme='dark']) .hljs-subst,
+:where([data-mantine-color-scheme='dark']) .hljs-emphasis,
+:where([data-mantine-color-scheme='dark']) .hljs-strong {
+  color: #c9d1d9;
+}

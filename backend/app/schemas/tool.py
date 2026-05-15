@@ -9,6 +9,7 @@ class ToolCreate(BaseModel):
     config_json: dict | None = None
     tool_type: str = "function"
     is_active: bool = True
+    is_pinned: bool = False
 
 
 class ToolUpdate(BaseModel):
@@ -18,6 +19,7 @@ class ToolUpdate(BaseModel):
     config_json: dict | None = None
     tool_type: str | None = None
     is_active: bool | None = None
+    is_pinned: bool | None = None
 
 
 class ToolResponse(BaseModel):
@@ -29,7 +31,19 @@ class ToolResponse(BaseModel):
     config_json: dict | None
     tool_type: str
     is_active: bool
+    is_pinned: bool = False
     created_at: datetime
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class ToolTestRequest(BaseModel):
+    config_json: dict
+    arguments: dict | None = None
+
+
+class ToolTestResponse(BaseModel):
+    success: bool
+    output: str
+    error: str | None = None

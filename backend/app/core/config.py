@@ -14,6 +14,23 @@ class Settings(BaseSettings):
     ADMIN_LOGIN: str = "admin"
     ADMIN_PASSWORD: str = "admin"
     LOG_RETENTION_DAYS: int = 90
+    ATTACHMENT_MAX_FILE_MB: int = 50  # per-file hard limit for chat attachments
+    ATTACHMENT_DRAFT_TTL_HOURS: int = 24  # unsent drafts are GC'd after this
+    # PaddleOCR-server on the GPU host. Empty → fall back to local Tesseract (CPU).
+    # /v1/ocr/auto = dual-pass (cyrillic + en, per-bbox keep best confidence) —
+    # fixes 6→б, 0→о substitutions on mixed RU/EN technical content.
+    OCR_URL: str = "http://172.10.100.9:8003/v1/ocr/auto"
+    OCR_TIMEOUT_SECONDS: float = 30.0
+    # PDF processing — if a page has fewer than this many characters in its
+    # native text layer, treat it as a scan and render → OCR via OCR_URL.
+    PDF_PAGE_TEXT_LAYER_MIN_CHARS: int = 50
+    # Hard cap: don't OCR endless PDFs. 30 pages × ~1s/page on GPU ≈ 30s.
+    PDF_OCR_MAX_PAGES: int = 30
+    # Rasterization DPI for PDF→PNG conversion before OCR.
+    PDF_OCR_RENDER_DPI: int = 200
+    # CPU-vision (Ollama llava/minicpm) is OFF by default — it takes minutes per
+    # image on CPU. Enable only on hosts with GPU vision.
+    ENABLE_CPU_VISION_DESCRIPTION: bool = False
 
     @property
     def cors_origins_list(self) -> List[str]:

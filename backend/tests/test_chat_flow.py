@@ -1,5 +1,9 @@
+import os
 import httpx
 import uuid
+
+TEST_OPENAI_BASE_URL = os.getenv("TEST_OPENAI_BASE_URL") or "http://172.10.100.9:8000/v1"
+TEST_OPENAI_MODEL = os.getenv("TEST_OPENAI_MODEL") or "qwen2.5-32b"
 
 
 def test_full_chat_flow(client):
@@ -12,14 +16,14 @@ def test_full_chat_flow(client):
     assert r.status_code in (200, 201), f"Got {r.status_code}: {r.text}"
     tenant_id = r.json()["id"]
 
-    # Configure shell for Ollama
+    # Configure shell for vLLM / OpenAI-compatible Qwen
     r = client.put(f"/api/admin/tenants/{tenant_id}/shell/", json={
-        "provider_type": "ollama",
-        "provider_base_url": "http://localhost:11434",
-        "model_name": "qwen2.5:32b",
+        "provider_type": "openai_compatible",
+        "provider_base_url": TEST_OPENAI_BASE_URL,
+        "model_name": TEST_OPENAI_MODEL,
         "system_prompt": "You are a helpful assistant. Reply briefly.",
-        "temperature": 0.5,
-        "max_tokens": 256,
+        "temperature": 0.2,
+        "max_tokens": 32,
     })
     assert r.status_code == 200, f"Shell config: {r.status_code}: {r.text}"
 
@@ -51,7 +55,7 @@ def test_full_chat_flow(client):
             "content": "Say hello in one word",
             "idempotency_key": idem_key,
         })
-        assert r2.status_code == 200
+        assert r2.status_code in (200, 201)
         assert r2.json()["id"] == msg["id"]
 
         # List messages

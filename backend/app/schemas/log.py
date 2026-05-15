@@ -6,6 +6,7 @@ class LLMLogResponse(BaseModel):
     id: str
     tenant_id: str
     chat_id: str | None
+    api_key_id: str | None
     message_id: str | None
     correlation_id: str | None
     provider_type: str
@@ -36,3 +37,9 @@ class LLMLogDetailResponse(LLMLogResponse):
     context_memory_count: int | None
     context_kb_count: int | None
     context_tools_count: int | None
+    tokens_system: int | None = None
+    tokens_tools: int | None = None
+    tokens_memory: int | None = None
+    tokens_kb: int | None = None
+    tokens_history: int | None = None
+    tokens_user: int | None = None

@@ -198,7 +198,7 @@ async def _resolve_auto(
         user_content,
     )
 
-    logger.info(f"Auto model selection: complexity={complexity:.2f}, threshold={model_config.complexity_threshold}")
+    logger.debug(f"Auto model selection: complexity={complexity:.2f}, threshold={model_config.complexity_threshold}")
 
     if complexity < model_config.complexity_threshold:
         return light_resolved

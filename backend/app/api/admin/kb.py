@@ -16,7 +16,7 @@ from app.models.kb_document import KnowledgeBaseDocument
 from app.models.kb_chunk import KBChunk
 from app.schemas.kb import KBDocumentCreate, KBDocumentUpdate, KBDocumentResponse
 from app.schemas.common import PaginatedResponse
-from app.api.deps import require_role
+from app.api.deps import require_role, require_tenant_access, require_permission
 from app.services.kb.embedder import (
     fetch_url_content,
     extract_file_content,
@@ -26,7 +26,7 @@ from app.services.kb.embedder import (
 router = APIRouter(
     prefix="/api/admin/tenants/{tenant_id}/kb",
     tags=["admin-kb"],
-    dependencies=[Depends(require_role("superadmin", "tenant_admin"))],
+    dependencies=[Depends(require_role("superadmin", "tenant_admin")), Depends(require_tenant_access), Depends(require_permission("kb"))],
 )
 
 SOURCE_TYPES = ("manual", "faq", "solution", "procedure", "reference")

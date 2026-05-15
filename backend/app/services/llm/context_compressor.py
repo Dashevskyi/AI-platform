@@ -21,7 +21,7 @@ RECENT_MESSAGES_FULL = 6
 SUMMARY_MAX_CHARS = 800
 
 # Max chars per tool description (in JSON schema)
-TOOL_DESC_MAX_CHARS = 150
+TOOL_DESC_MAX_CHARS = 100
 
 HISTORY_SUMMARY_PROMPT = """Сожми историю диалога в краткое резюме (максимум 3-4 предложения).
 Сохрани: ключевые вопросы пользователя, важные факты, результаты действий.

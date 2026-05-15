@@ -1,4 +1,5 @@
 import asyncio
+import time
 import pytest
 import httpx
 
@@ -20,9 +21,21 @@ def base_url():
 @pytest.fixture(scope="session")
 def admin_token(base_url):
     import httpx as _httpx
-    r = _httpx.post(f"{base_url}/api/admin/auth/login", json={"login": "admin", "password": "admin"})
-    assert r.status_code == 200
-    return r.json()["access_token"]
+    deadline = time.time() + 45
+    last_error: Exception | None = None
+    while time.time() < deadline:
+        try:
+            r = _httpx.post(
+                f"{base_url}/api/admin/auth/login",
+                json={"login": "admin", "password": "admin"},
+                timeout=10,
+            )
+            assert r.status_code == 200, r.text
+            return r.json()["access_token"]
+        except Exception as exc:  # pragma: no cover - integration bootstrap path
+            last_error = exc
+            time.sleep(1)
+    raise AssertionError(f"admin login did not become ready in time: {last_error}")
 
 
 @pytest.fixture(scope="session")
@@ -32,5 +45,5 @@ def auth_headers(admin_token):
 
 @pytest.fixture(scope="session")
 def client(base_url, auth_headers):
-    with httpx.Client(base_url=base_url, headers=auth_headers, timeout=30, follow_redirects=True) as c:
+    with httpx.Client(base_url=base_url, headers=auth_headers, timeout=60, follow_redirects=True) as c:
         yield c

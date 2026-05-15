@@ -2,6 +2,7 @@
 Auth dependencies for API routers.
 """
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable
 
@@ -14,6 +15,12 @@ from app.core.security import decode_access_token, hash_api_key
 from app.models.admin_user import AdminUser
 from app.models.tenant import Tenant
 from app.models.tenant_api_key import TenantApiKey
+
+
+@dataclass
+class TenantAuthContext:
+    tenant: Tenant
+    api_key: TenantApiKey
 
 
 async def get_current_admin(
@@ -62,6 +69,14 @@ async def get_current_tenant_from_key(
     authorization: str | None = Header(None, alias="Authorization"),
     db: AsyncSession = Depends(get_db),
 ) -> Tenant:
+    return (await get_current_tenant_auth_context(x_api_key, authorization, db)).tenant
+
+
+async def get_current_tenant_auth_context(
+    x_api_key: str | None = Header(None, alias="X-API-Key"),
+    authorization: str | None = Header(None, alias="Authorization"),
+    db: AsyncSession = Depends(get_db),
+) -> TenantAuthContext:
     """
     Authenticate a tenant via API key.
     Key can be in X-API-Key header or Authorization Bearer header.
@@ -118,7 +133,7 @@ async def get_current_tenant_from_key(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Tenant not found or inactive.",
         )
-    return tenant
+    return TenantAuthContext(tenant=tenant, api_key=api_key)
 
 
 def require_role(*roles: str) -> Callable:
@@ -135,3 +150,48 @@ def require_role(*roles: str) -> Callable:
         return current_user
 
     return _check_role
+
+
+async def require_tenant_access(
+    tenant_id: uuid.UUID,
+    current_user: AdminUser = Depends(get_current_admin),
+) -> AdminUser:
+    """
+    Ensure the user can act on this tenant.
+    Superadmin: any tenant. Tenant_admin: only their own tenant_id.
+    """
+    if current_user.role == "superadmin":
+        return current_user
+    if current_user.role == "tenant_admin":
+        if current_user.tenant_id is None or current_user.tenant_id != tenant_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Forbidden: this account is not bound to the requested tenant.",
+            )
+        return current_user
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=f"Role '{current_user.role}' has no tenant access.",
+    )
+
+
+def require_permission(permission: str) -> Callable:
+    """
+    Return a dependency that requires `permission` in the user's permissions list.
+    Superadmin always passes. Use together with require_tenant_access on the route.
+    """
+
+    async def _check_perm(
+        current_user: AdminUser = Depends(get_current_admin),
+    ) -> AdminUser:
+        if current_user.role == "superadmin":
+            return current_user
+        perms = list(current_user.permissions or [])
+        if permission not in perms:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Permission '{permission}' is required.",
+            )
+        return current_user
+
+    return _check_perm

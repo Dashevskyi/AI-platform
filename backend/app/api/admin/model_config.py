@@ -16,12 +16,12 @@ from app.schemas.llm_model import (
     TenantModelConfigUpdate,
     TenantModelConfigResponse,
 )
-from app.api.deps import require_role
+from app.api.deps import require_role, require_tenant_access, require_permission
 
 router = APIRouter(
     prefix="/api/admin/tenants/{tenant_id}/model-config",
     tags=["admin-model-config"],
-    dependencies=[Depends(require_role("superadmin", "tenant_admin"))],
+    dependencies=[Depends(require_role("superadmin", "tenant_admin")), Depends(require_tenant_access), Depends(require_permission("model_config"))],
 )
 
 

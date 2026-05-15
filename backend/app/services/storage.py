@@ -41,6 +41,18 @@ async def read_file(storage_path: str) -> bytes:
         return f.read()
 
 
+async def delete_file(storage_path: str) -> None:
+    """Remove a file from storage. Idempotent — silently ignores missing files."""
+    if not storage_path:
+        return
+    full_path = os.path.join(UPLOAD_DIR, storage_path)
+    try:
+        os.remove(full_path)
+        logger.info(f"Deleted file: {storage_path}")
+    except FileNotFoundError:
+        pass
+
+
 def get_file_type(filename: str) -> str:
     """Determine file type from filename."""
     lower = filename.lower()

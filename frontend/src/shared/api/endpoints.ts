@@ -3,17 +3,30 @@ import type {
   LoginRequest,
   LoginResponse,
   AdminUser,
+  AdminUserListItem,
+  AdminUserCreatePayload,
+  AdminUserUpdatePayload,
   Tenant,
   TenantCreate,
   TenantUpdate,
   TenantApiKey,
   TenantApiKeyCreate,
   TenantApiKeyCreated,
+  TenantApiKeyUpdate,
+  TenantApiKeyGroup,
+  TenantApiKeyGroupCreate,
+  TenantApiKeyGroupUpdate,
   ShellConfig,
   ShellConfigUpdate,
   Tool,
   ToolCreate,
   ToolUpdate,
+  ToolTestRequest,
+  ToolTestResponse,
+  TenantDataSource,
+  TenantDataSourceCreate,
+  TenantDataSourceUpdate,
+  DataSourceSchema,
   KBDocument,
   KBDocumentCreate,
   KBDocumentUpdate,
@@ -40,6 +53,7 @@ import type {
   TenantModelConfig,
   TenantModelConfigUpdate,
   AttachmentBrief,
+  TenantStatsResponse,
 } from './types';
 
 // Auth
@@ -52,8 +66,36 @@ export const authApi = {
     const res = await apiClient.get('/api/admin/auth/me');
     return res.data;
   },
+  permissions: async (): Promise<string[]> => {
+    const res = await apiClient.get('/api/admin/auth/permissions');
+    return res.data;
+  },
+  changePassword: async (data: { current_password: string; new_password: string }): Promise<void> => {
+    await apiClient.post('/api/admin/auth/change-password', data);
+  },
   logout: () => {
     localStorage.removeItem('auth_token');
+  },
+};
+
+// Admin users (per-tenant, available to tenant_admin with `users` permission)
+export const adminUsersApi = {
+  list: async (tenantId: string, page = 1, pageSize = 50): Promise<PaginatedResponse<AdminUserListItem>> => {
+    const res = await apiClient.get(`/api/admin/tenants/${tenantId}/users/`, {
+      params: { page, page_size: pageSize },
+    });
+    return res.data;
+  },
+  create: async (tenantId: string, data: AdminUserCreatePayload): Promise<AdminUserListItem> => {
+    const res = await apiClient.post(`/api/admin/tenants/${tenantId}/users/`, data);
+    return res.data;
+  },
+  update: async (tenantId: string, userId: string, data: AdminUserUpdatePayload): Promise<AdminUserListItem> => {
+    const res = await apiClient.patch(`/api/admin/tenants/${tenantId}/users/${userId}`, data);
+    return res.data;
+  },
+  delete: async (tenantId: string, userId: string): Promise<void> => {
+    await apiClient.delete(`/api/admin/tenants/${tenantId}/users/${userId}`);
   },
 };
 
@@ -94,6 +136,10 @@ export const keysApi = {
     const res = await apiClient.post(`/api/admin/tenants/${tenantId}/keys/`, data);
     return res.data;
   },
+  update: async (tenantId: string, keyId: string, data: TenantApiKeyUpdate): Promise<TenantApiKey> => {
+    const res = await apiClient.patch(`/api/admin/tenants/${tenantId}/keys/${keyId}`, data);
+    return res.data;
+  },
   deactivate: async (tenantId: string, keyId: string): Promise<TenantApiKey> => {
     const res = await apiClient.patch(`/api/admin/tenants/${tenantId}/keys/${keyId}`, {
       is_active: false,
@@ -106,6 +152,26 @@ export const keysApi = {
   rotate: async (tenantId: string, keyId: string): Promise<TenantApiKeyCreated> => {
     const res = await apiClient.post(`/api/admin/tenants/${tenantId}/keys/${keyId}/rotate`);
     return res.data;
+  },
+};
+
+export const keyGroupsApi = {
+  list: async (tenantId: string, page = 1, pageSize = 100): Promise<PaginatedResponse<TenantApiKeyGroup>> => {
+    const res = await apiClient.get(`/api/admin/tenants/${tenantId}/key-groups/`, {
+      params: { page, page_size: pageSize },
+    });
+    return res.data;
+  },
+  create: async (tenantId: string, data: TenantApiKeyGroupCreate): Promise<TenantApiKeyGroup> => {
+    const res = await apiClient.post(`/api/admin/tenants/${tenantId}/key-groups/`, data);
+    return res.data;
+  },
+  update: async (tenantId: string, groupId: string, data: TenantApiKeyGroupUpdate): Promise<TenantApiKeyGroup> => {
+    const res = await apiClient.patch(`/api/admin/tenants/${tenantId}/key-groups/${groupId}`, data);
+    return res.data;
+  },
+  delete: async (tenantId: string, groupId: string): Promise<void> => {
+    await apiClient.delete(`/api/admin/tenants/${tenantId}/key-groups/${groupId}`);
   },
 };
 
@@ -127,10 +193,21 @@ export const shellApi = {
 
 // Tools
 export const toolsApi = {
-  list: async (tenantId: string, page = 1, pageSize = 20): Promise<PaginatedResponse<Tool>> => {
-    const res = await apiClient.get(`/api/admin/tenants/${tenantId}/tools/`, {
-      params: { page, page_size: pageSize },
-    });
+  list: async (
+    tenantId: string,
+    page = 1,
+    pageSize = 20,
+    filters?: { search?: string; group?: string; data_source_id?: string },
+  ): Promise<PaginatedResponse<Tool>> => {
+    const params: Record<string, unknown> = { page, page_size: pageSize };
+    if (filters?.search && filters.search.trim()) params.search = filters.search.trim();
+    if (filters?.group) params.group = filters.group;
+    if (filters?.data_source_id) params.data_source_id = filters.data_source_id;
+    const res = await apiClient.get(`/api/admin/tenants/${tenantId}/tools/`, { params });
+    return res.data;
+  },
+  listGroups: async (tenantId: string): Promise<string[]> => {
+    const res = await apiClient.get(`/api/admin/tenants/${tenantId}/tools/groups`);
     return res.data;
   },
   get: async (tenantId: string, toolId: string): Promise<Tool> => {
@@ -145,8 +222,40 @@ export const toolsApi = {
     const res = await apiClient.patch(`/api/admin/tenants/${tenantId}/tools/${toolId}`, data);
     return res.data;
   },
+  test: async (tenantId: string, data: ToolTestRequest): Promise<ToolTestResponse> => {
+    const res = await apiClient.post(`/api/admin/tenants/${tenantId}/tools/test`, data);
+    return res.data;
+  },
   delete: async (tenantId: string, toolId: string): Promise<void> => {
     await apiClient.delete(`/api/admin/tenants/${tenantId}/tools/${toolId}`);
+  },
+};
+
+export const dataSourcesApi = {
+  list: async (tenantId: string, page = 1, pageSize = 50): Promise<PaginatedResponse<TenantDataSource>> => {
+    const res = await apiClient.get(`/api/admin/tenants/${tenantId}/data-sources/`, {
+      params: { page, page_size: pageSize },
+    });
+    return res.data;
+  },
+  get: async (tenantId: string, dataSourceId: string): Promise<TenantDataSource> => {
+    const res = await apiClient.get(`/api/admin/tenants/${tenantId}/data-sources/${dataSourceId}`);
+    return res.data;
+  },
+  create: async (tenantId: string, data: TenantDataSourceCreate): Promise<TenantDataSource> => {
+    const res = await apiClient.post(`/api/admin/tenants/${tenantId}/data-sources/`, data);
+    return res.data;
+  },
+  update: async (tenantId: string, dataSourceId: string, data: TenantDataSourceUpdate): Promise<TenantDataSource> => {
+    const res = await apiClient.patch(`/api/admin/tenants/${tenantId}/data-sources/${dataSourceId}`, data);
+    return res.data;
+  },
+  delete: async (tenantId: string, dataSourceId: string): Promise<void> => {
+    await apiClient.delete(`/api/admin/tenants/${tenantId}/data-sources/${dataSourceId}`);
+  },
+  getSchema: async (tenantId: string, dataSourceId: string): Promise<DataSourceSchema> => {
+    const res = await apiClient.get(`/api/admin/tenants/${tenantId}/data-sources/${dataSourceId}/schema`);
+    return res.data;
   },
 };
 
@@ -196,9 +305,10 @@ export const kbApi = {
 
 // Memory
 export const memoryApi = {
-  list: async (tenantId: string, page = 1, pageSize = 20, memoryType?: string): Promise<PaginatedResponse<MemoryEntry>> => {
+  list: async (tenantId: string, page = 1, pageSize = 20, memoryType?: string, search?: string): Promise<PaginatedResponse<MemoryEntry>> => {
     const params: Record<string, unknown> = { page, page_size: pageSize };
     if (memoryType) params.memory_type = memoryType;
+    if (search && search.trim()) params.search = search.trim();
     const res = await apiClient.get(`/api/admin/tenants/${tenantId}/memory/`, { params });
     return res.data;
   },
@@ -221,9 +331,18 @@ export const memoryApi = {
 
 // Chats
 export const chatsApi = {
-  listAdmin: async (tenantId: string, page = 1, pageSize = 20): Promise<PaginatedResponse<Chat>> => {
+  listAdmin: async (
+    tenantId: string,
+    page = 1,
+    pageSize = 20,
+    filters?: { api_key_id?: string; status?: string; search?: string },
+  ): Promise<PaginatedResponse<Chat>> => {
+    const params: Record<string, unknown> = { page, page_size: pageSize };
+    if (filters?.api_key_id) params.api_key_id = filters.api_key_id;
+    if (filters?.status) params.status = filters.status;
+    if (filters?.search) params.search = filters.search;
     const res = await apiClient.get(`/api/admin/tenants/${tenantId}/chats/`, {
-      params: { page, page_size: pageSize },
+      params,
     });
     return res.data;
   },
@@ -238,14 +357,64 @@ export const chatsApi = {
     return res.data;
   },
   listMessages: async (tenantId: string, chatId: string, page = 1, pageSize = 50): Promise<PaginatedResponse<Message>> => {
-    const res = await apiClient.get(`/api/admin/tenants/${tenantId}/chats/${chatId}/messages/`, {
+    const res = await apiClient.get(`/api/admin/tenants/${tenantId}/chats/${chatId}/messages`, {
       params: { page, page_size: pageSize },
     });
     return res.data;
   },
   sendMessage: async (tenantId: string, chatId: string, data: MessageSend): Promise<Message> => {
-    const res = await apiClient.post(`/api/admin/tenants/${tenantId}/chats/${chatId}/messages/`, data);
+    const res = await apiClient.post(`/api/admin/tenants/${tenantId}/chats/${chatId}/messages`, data);
     return res.data;
+  },
+  sendMessageStream: async (
+    tenantId: string,
+    chatId: string,
+    data: MessageSend,
+    onEvent: (eventType: string, payload: Record<string, unknown>) => void,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    const token = localStorage.getItem('auth_token');
+    const res = await fetch(`/api/admin/tenants/${tenantId}/chats/${chatId}/messages/stream`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(data),
+      signal,
+    });
+    if (!res.ok || !res.body) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`Stream error ${res.status}: ${text || res.statusText}`);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let sep: number;
+      // SSE event delimited by blank line ("\n\n")
+      while ((sep = buffer.indexOf('\n\n')) !== -1) {
+        const block = buffer.slice(0, sep);
+        buffer = buffer.slice(sep + 2);
+        let eventType = 'message';
+        const dataLines: string[] = [];
+        for (const line of block.split('\n')) {
+          if (line.startsWith('event: ')) eventType = line.slice(7).trim();
+          else if (line.startsWith('data: ')) dataLines.push(line.slice(6));
+        }
+        if (dataLines.length > 0) {
+          try {
+            const payload = JSON.parse(dataLines.join('\n'));
+            onEvent(eventType, payload);
+          } catch (err) {
+            console.warn('SSE parse error', err, block);
+          }
+        }
+      }
+    }
   },
   update: async (tenantId: string, chatId: string, data: { title?: string; description?: string }): Promise<Chat> => {
     const res = await apiClient.patch(`/api/admin/tenants/${tenantId}/chats/${chatId}`, data);
@@ -279,9 +448,15 @@ export const chatsApi = {
 
 // Logs
 export const logsApi = {
-  list: async (tenantId: string, page = 1, pageSize = 20, filters?: { chat_id?: string; date_from?: string; date_to?: string }): Promise<PaginatedResponse<LLMLog>> => {
+  list: async (
+    tenantId: string,
+    page = 1,
+    pageSize = 20,
+    filters?: { chat_id?: string; api_key_id?: string; date_from?: string; date_to?: string },
+  ): Promise<PaginatedResponse<LLMLog>> => {
     const params: Record<string, unknown> = { page, page_size: pageSize };
     if (filters?.chat_id) params.chat_id = filters.chat_id;
+    if (filters?.api_key_id) params.api_key_id = filters.api_key_id;
     if (filters?.date_from) params.date_from = filters.date_from;
     if (filters?.date_to) params.date_to = filters.date_to;
     const res = await apiClient.get(`/api/admin/tenants/${tenantId}/logs/`, { params });
@@ -289,6 +464,17 @@ export const logsApi = {
   },
   getDetail: async (tenantId: string, logId: string): Promise<LLMLogDetail> => {
     const res = await apiClient.get(`/api/admin/tenants/${tenantId}/logs/${logId}`);
+    return res.data;
+  },
+};
+
+// Stats
+export const statsApi = {
+  get: async (tenantId: string, dateFrom?: string, dateTo?: string): Promise<TenantStatsResponse> => {
+    const params: Record<string, unknown> = {};
+    if (dateFrom) params.date_from = dateFrom;
+    if (dateTo) params.date_to = dateTo;
+    const res = await apiClient.get(`/api/admin/tenants/${tenantId}/stats/`, { params });
     return res.data;
   },
 };
@@ -375,5 +561,45 @@ export const healthApi = {
   check: async (): Promise<HealthStatus> => {
     const res = await apiClient.get('/health');
     return res.data;
+  },
+};
+
+export interface GpuLive {
+  ts: string;
+  gpus: Array<{
+    idx: number;
+    uuid: string;
+    name: string;
+    util_pct: number;
+    util_memory_pct: number;
+    memory_used_bytes: number;
+    memory_total_bytes: number;
+    temperature_c: number;
+    power_w: number;
+  }>;
+  vllm: {
+    running: number;
+    waiting: number;
+    kv_cache_usage: number | null;
+    prompt_tokens_total: number;
+    generation_tokens_total: number;
+    prefix_cache_hit_rate: number | null;
+  } | null;
+}
+
+export interface GpuHistoryPoint {
+  ts: string;
+  gpus: GpuLive['gpus'];
+  vllm: (GpuLive['vllm'] & { generation_tps?: number }) | null;
+}
+
+export const gpuApi = {
+  live: async (): Promise<GpuLive> => {
+    const r = await apiClient.get('/api/admin/gpu/stats');
+    return r.data;
+  },
+  history: async (range: '15m' | '1h' | '6h' | '24h' | '7d'): Promise<{ range: string; points: GpuHistoryPoint[] }> => {
+    const r = await apiClient.get('/api/admin/gpu/history', { params: { range } });
+    return r.data;
   },
 };

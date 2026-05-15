@@ -10,6 +10,7 @@ class LLMResponse:
     total_tokens: int | None = None
     finish_reason: str | None = None
     tool_calls: list | None = None
+    reasoning: str | None = None
     raw_response: dict | None = field(default=None, repr=False)
 
 
@@ -26,7 +27,38 @@ class BaseProvider(ABC):
         temperature: float = 0.7,
         max_tokens: int = 4096,
         tools: list[dict] | None = None,
-    ) -> LLMResponse: ...
+        on_chunk=None,
+        extra_body: dict | None = None,
+    ) -> LLMResponse:
+        """
+        If `on_chunk` is provided, the provider streams the response and calls
+        the callback for each delta with `{"type": "content"|"reasoning", "text": str}`.
+        The final return value still aggregates the full response.
+        """
+        ...
+
+    # ----- Multi-turn message format helpers -----
+    # Each provider can override to inject provider-specific fields when
+    # echoing the assistant turn back (e.g. DeepSeek requires reasoning_content;
+    # OpenAI o-series may require encrypted_reasoning; some local models use
+    # `thinking`). Default = OpenAI/Ollama-shaped without reasoning.
+
+    def format_assistant_turn(self, resp: "LLMResponse") -> dict:
+        """Return the assistant message dict to append to `messages` after a
+        provider response that requested tool calls (or to feed into the next
+        turn). Subclasses extend with provider-specific fields."""
+        msg: dict = {"role": "assistant", "content": resp.content or ""}
+        if resp.tool_calls:
+            msg["tool_calls"] = resp.tool_calls
+        return msg
+
+    def format_tool_result_turn(self, *, tool_call_id: str | None, content: str) -> dict:
+        """Return the `role: tool` message after a tool execution.
+        Default uses OpenAI shape with tool_call_id; Ollama omits the id."""
+        msg: dict = {"role": "tool", "content": content}
+        if tool_call_id:
+            msg["tool_call_id"] = tool_call_id
+        return msg
 
     @abstractmethod
     async def healthcheck(self) -> bool: ...
@@ -34,15 +66,20 @@ class BaseProvider(ABC):
     @abstractmethod
     async def list_models(self) -> list[str]: ...
 
-    async def summarize(self, text: str, model: str) -> str:
-        """Generate a short summary of the text."""
+    async def summarize(self, text: str, model: str, language_hint: str | None = None) -> str:
+        """Generate a short chat title in the user's language."""
+        language_clause = ""
+        if language_hint:
+            language_clause = f" Write the title in {language_hint}."
         resp = await self.chat_completion(
             messages=[
                 {
                     "role": "user",
                     "content": (
-                        "Summarize the following conversation in 5-10 words. "
-                        "Return ONLY the summary, nothing else:\n\n" + text
+                        "Generate a short chat title based on the user's message. "
+                        "Use 3-7 words. Return ONLY the title, with no quotes, labels, or extra text."
+                        f"{language_clause}\n\n"
+                        + text
                     ),
                 }
             ],

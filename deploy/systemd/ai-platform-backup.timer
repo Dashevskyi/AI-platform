@@ -1,0 +1,10 @@
+[Unit]
+Description=Run AI Platform backup twice a day
+
+[Timer]
+OnCalendar=*-*-* 03,15:00:00
+Persistent=true
+Unit=ai-platform-backup.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=AI Platform project backup
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/home/ai-platform
+Environment=RETENTION_DAYS=30
+ExecStart=/usr/bin/bash /home/ai-platform/backup.sh
+
+[Install]
+WantedBy=multi-user.target

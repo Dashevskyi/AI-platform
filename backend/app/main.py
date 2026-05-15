@@ -12,18 +12,23 @@ from app.models import AdminUser
 from app.schemas.common import HealthResponse
 
 from app.api.admin.auth import router as auth_router
+from app.api.admin.key_groups import router as key_groups_router
 from app.api.admin.tenants import router as tenants_router
 from app.api.admin.keys import router as keys_router
 from app.api.admin.shell_config import router as shell_router
 from app.api.admin.tools import router as tools_router
+from app.api.admin.data_sources import router as data_sources_router
 from app.api.admin.kb import router as kb_router
 from app.api.admin.memory import router as memory_router
 from app.api.admin.chats import router as admin_chats_router
 from app.api.admin.logs import router as logs_router
+from app.api.admin.stats import router as stats_router
 from app.api.admin.audit import router as audit_router
 from app.api.admin.models import router as models_router
 from app.api.admin.model_config import router as model_config_router
 from app.api.admin.custom_models import router as admin_custom_models_router
+from app.api.admin.users import tenant_router as admin_users_tenant_router, global_router as admin_users_global_router
+from app.api.admin.gpu import router as gpu_router
 from app.api.tenant.chats import router as tenant_chats_router
 from app.api.tenant.custom_models import router as tenant_custom_models_router
 
@@ -44,9 +49,20 @@ async def seed_admin():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import asyncio
+    from app.services.gpu_metrics import snapshot_worker
+
     await seed_admin()
-    yield
-    await engine.dispose()
+    gpu_task = asyncio.create_task(snapshot_worker())
+    try:
+        yield
+    finally:
+        gpu_task.cancel()
+        try:
+            await gpu_task
+        except asyncio.CancelledError:
+            pass
+        await engine.dispose()
 
 
 app = FastAPI(title="Multi-tenant AI Platform", version="1.0.0", lifespan=lifespan)
@@ -62,17 +78,23 @@ app.add_middleware(
 # Admin routes
 app.include_router(auth_router)
 app.include_router(tenants_router)
+app.include_router(key_groups_router)
 app.include_router(keys_router)
 app.include_router(shell_router)
 app.include_router(tools_router)
+app.include_router(data_sources_router)
 app.include_router(kb_router)
 app.include_router(memory_router)
 app.include_router(admin_chats_router)
 app.include_router(logs_router)
+app.include_router(stats_router)
 app.include_router(audit_router)
 app.include_router(models_router)
 app.include_router(model_config_router)
 app.include_router(admin_custom_models_router)
+app.include_router(admin_users_tenant_router)
+app.include_router(admin_users_global_router)
+app.include_router(gpu_router)
 
 # Tenant API routes
 app.include_router(tenant_chats_router)

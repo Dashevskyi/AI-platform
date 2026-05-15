@@ -3,9 +3,10 @@
 # Usage: ./restore.sh <backup_name>
 #   Example: ./restore.sh 20260407_194636
 
-set -e
+set -euo pipefail
 
 BACKUP_ROOT="/home/ai-platform/backups"
+PROJECT_ROOT="/home/ai-platform"
 
 if [ -z "$1" ]; then
   echo "Использование: ./restore.sh <backup_name>"
@@ -40,9 +41,23 @@ systemctl stop ai-platform-backend 2>/dev/null || true
 systemctl stop nginx 2>/dev/null || true
 
 # 2. Restore code
+if [ -f "${BACKUP_DIR}/backend.tar.gz" ]; then
+  echo "Восстановление backend..."
+  tar xzf "${BACKUP_DIR}/backend.tar.gz" -C "${PROJECT_ROOT}"
+fi
+
+if [ -f "${BACKUP_DIR}/frontend.tar.gz" ]; then
+  echo "Восстановление frontend..."
+  tar xzf "${BACKUP_DIR}/frontend.tar.gz" -C "${PROJECT_ROOT}"
+fi
+
+if [ -f "${BACKUP_DIR}/root-files.tar.gz" ]; then
+  echo "Восстановление корневых файлов..."
+  tar xzf "${BACKUP_DIR}/root-files.tar.gz" -C "${PROJECT_ROOT}"
+fi
+
 if [ -f "${BACKUP_DIR}/code.tar.gz" ]; then
-  echo "Восстановление кода..."
-  # Save venv and node_modules
+  echo "Восстановление legacy code archive..."
   tar xzf "${BACKUP_DIR}/code.tar.gz" -C /home
 fi
 
@@ -63,7 +78,7 @@ fi
 
 # 5. Rebuild frontend
 echo "Сборка фронтенда..."
-cd /home/ai-platform/frontend
+cd "${PROJECT_ROOT}/frontend"
 npm install --silent 2>/dev/null
 npm run build 2>/dev/null
 chcon -R -t httpd_sys_content_t dist/ 2>/dev/null || true

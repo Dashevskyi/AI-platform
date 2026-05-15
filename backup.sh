@@ -2,48 +2,64 @@
 # AI Platform — Backup Script
 # Usage: ./backup.sh [backup_name]
 
-set -e
+set -euo pipefail
 
-BACKUP_ROOT="/home/ai-platform/backups"
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+PROJECT_ROOT="/home/ai-platform"
+BACKUP_ROOT="${PROJECT_ROOT}/backups"
+TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 NAME="${1:-$TIMESTAMP}"
 BACKUP_DIR="${BACKUP_ROOT}/${NAME}"
+RETENTION_DAYS="${RETENTION_DAYS:-30}"
 
 mkdir -p "${BACKUP_DIR}"
 
 echo "=== AI Platform Backup: ${NAME} ==="
 
-# 1. Code
-echo -n "Код проекта... "
-tar czf "${BACKUP_DIR}/code.tar.gz" \
-  --exclude='*/venv/*' \
-  --exclude='*/node_modules/*' \
-  --exclude='*/dist/*' \
-  --exclude='*/__pycache__/*' \
-  --exclude='*/.pytest_cache/*' \
-  --exclude='*/backups/*' \
-  -C /home ai-platform/.env ai-platform/.env.example ai-platform/README.md \
-  ai-platform/backend ai-platform/frontend 2>/dev/null
-echo "$(du -sh ${BACKUP_DIR}/code.tar.gz | cut -f1)"
+echo -n "Backend... "
+tar czf "${BACKUP_DIR}/backend.tar.gz" \
+  --exclude='backend/venv' \
+  --exclude='backend/__pycache__' \
+  --exclude='backend/.pytest_cache' \
+  --exclude='backend/.mypy_cache' \
+  --exclude='backend/uploads' \
+  -C "${PROJECT_ROOT}" backend
+echo "$(du -sh "${BACKUP_DIR}/backend.tar.gz" | cut -f1)"
 
-# 2. Database
-echo -n "База данных... "
+echo -n "Frontend... "
+tar czf "${BACKUP_DIR}/frontend.tar.gz" \
+  --exclude='frontend/node_modules' \
+  --exclude='frontend/dist' \
+  -C "${PROJECT_ROOT}" frontend
+echo "$(du -sh "${BACKUP_DIR}/frontend.tar.gz" | cut -f1)"
+
+echo -n "Root files... "
+tar czf "${BACKUP_DIR}/root-files.tar.gz" \
+  -C "${PROJECT_ROOT}" \
+  .env .env.example README.md backup.sh restore.sh
+echo "$(du -sh "${BACKUP_DIR}/root-files.tar.gz" | cut -f1)"
+
+echo -n "Database... "
 sudo -u postgres pg_dump ai_platform | gzip > "${BACKUP_DIR}/database.sql.gz"
-echo "$(du -sh ${BACKUP_DIR}/database.sql.gz | cut -f1)"
+echo "$(du -sh "${BACKUP_DIR}/database.sql.gz" | cut -f1)"
 
-# 3. Configs
-echo -n "Конфигурация... "
+echo -n "Configs... "
 tar czf "${BACKUP_DIR}/configs.tar.gz" \
   /etc/nginx/conf.d/ai-platform.conf \
   /etc/systemd/system/ai-platform-backend.service \
-  2>/dev/null
-echo "$(du -sh ${BACKUP_DIR}/configs.tar.gz | cut -f1)"
+  /etc/systemd/system/ai-platform-backup.service \
+  /etc/systemd/system/ai-platform-backup.timer \
+  2>/dev/null || true
+if [ -f "${BACKUP_DIR}/configs.tar.gz" ]; then
+  echo "$(du -sh "${BACKUP_DIR}/configs.tar.gz" | cut -f1)"
+else
+  echo "пропущено"
+fi
 
-# 4. Keep only last 10 backups
-cd "${BACKUP_ROOT}"
-ls -dt */ 2>/dev/null | tail -n +11 | xargs rm -rf 2>/dev/null || true
+echo -n "Retention... "
+find "${BACKUP_ROOT}" -mindepth 1 -maxdepth 1 -type d -mtime +"$((RETENTION_DAYS - 1))" -print -exec rm -rf {} + 2>/dev/null || true
+echo "older than ${RETENTION_DAYS} days removed"
 
 echo ""
-echo "Готово: ${BACKUP_DIR}"
-echo "Размер: $(du -sh ${BACKUP_DIR} | cut -f1)"
+echo "Done: ${BACKUP_DIR}"
+echo "Size: $(du -sh "${BACKUP_DIR}" | cut -f1)"
 ls -la "${BACKUP_DIR}/"

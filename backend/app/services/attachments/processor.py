@@ -21,6 +21,7 @@ from app.providers.factory import get_provider
 from app.services.storage import read_file
 from app.services.kb.embedder import chunk_text
 from app.core.config import settings
+from app.core.database import async_session
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,9 @@ def extract_text_content(file_bytes: bytes, filename: str) -> str:
 
 
 def extract_pdf_content(file_bytes: bytes) -> str:
-    """Extract text from PDF."""
+    """Extract text from PDF — text-layer only. Fast path. Returns possibly
+    sparse/empty string on scanned PDFs (no text layer). See
+    `extract_pdf_content_async` for the OCR-fallback variant."""
     from pypdf import PdfReader
     reader = PdfReader(io.BytesIO(file_bytes))
     pages = []
@@ -44,6 +47,100 @@ def extract_pdf_content(file_bytes: bytes) -> str:
         if text:
             pages.append(text.strip())
     return "\n\n".join(pages)
+
+
+async def _ocr_image_bytes(png_bytes: bytes, filename: str) -> str:
+    """Send a single rendered page to the dual-pass OCR endpoint. Returns
+    empty string on failure — caller decides what to do."""
+    url = settings.OCR_URL
+    if not url:
+        return ""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=settings.OCR_TIMEOUT_SECONDS) as client:
+            resp = await client.post(
+                url,
+                files={"file": (filename, png_bytes, "image/png")},
+                data={"lang": "cyrillic"},  # ignored by /auto
+            )
+            resp.raise_for_status()
+            return (resp.json().get("text") or "").strip()
+    except Exception as e:
+        logger.warning(f"PDF page OCR failed for {filename}: {type(e).__name__}: {e!r}")
+        return ""
+
+
+async def extract_pdf_content_async(file_bytes: bytes, filename: str = "document.pdf") -> str:
+    """Per-page PDF extraction with OCR fallback for scanned pages.
+
+    Strategy: for each page, take pypdf's text-layer output. If shorter than
+    PDF_PAGE_TEXT_LAYER_MIN_CHARS, treat the page as a scan, render it to PNG
+    via PyMuPDF and run /v1/ocr/auto on it. Capped at PDF_OCR_MAX_PAGES OCR
+    operations so a 500-page scan can't lock the server."""
+    import asyncio
+    from pypdf import PdfReader
+
+    reader = PdfReader(io.BytesIO(file_bytes))
+    page_texts: dict[int, str] = {}
+    ocr_targets: list[int] = []
+    threshold = settings.PDF_PAGE_TEXT_LAYER_MIN_CHARS
+    for idx, page in enumerate(reader.pages):
+        text = (page.extract_text() or "").strip()
+        if len(text) >= threshold:
+            page_texts[idx] = text
+        else:
+            ocr_targets.append(idx)
+
+    # Cap how many pages we'll OCR.
+    max_ocr = settings.PDF_OCR_MAX_PAGES
+    if len(ocr_targets) > max_ocr:
+        logger.warning(
+            f"PDF {filename}: {len(ocr_targets)} scanned pages, OCR'ing first {max_ocr}"
+        )
+        ocr_targets = ocr_targets[:max_ocr]
+
+    if ocr_targets:
+        try:
+            import fitz  # PyMuPDF
+        except ImportError:
+            logger.error("PyMuPDF not installed — PDF OCR fallback disabled")
+            fitz = None  # type: ignore
+
+        if fitz is not None:
+            doc = fitz.open(stream=file_bytes, filetype="pdf")
+            try:
+                # Render in a thread pool — PyMuPDF is blocking C code.
+                loop = asyncio.get_event_loop()
+                dpi = settings.PDF_OCR_RENDER_DPI
+
+                def _render_page(page_idx: int) -> bytes:
+                    page = doc.load_page(page_idx)
+                    pix = page.get_pixmap(dpi=dpi)
+                    return pix.tobytes("png")
+
+                async def _process_page(page_idx: int) -> tuple[int, str]:
+                    png_bytes = await loop.run_in_executor(None, _render_page, page_idx)
+                    text = await _ocr_image_bytes(png_bytes, f"{filename}.page-{page_idx + 1}.png")
+                    return page_idx, text
+
+                import time
+                t0 = time.time()
+                results = await asyncio.gather(*[_process_page(i) for i in ocr_targets])
+                elapsed = time.time() - t0
+                ocr_chars = 0
+                for page_idx, text in results:
+                    if text:
+                        page_texts[page_idx] = text
+                        ocr_chars += len(text)
+                logger.info(
+                    f"PDF {filename}: OCR'd {len(ocr_targets)} pages → {ocr_chars} chars in {elapsed:.2f}s"
+                )
+            finally:
+                doc.close()
+
+    # Reassemble in page order.
+    ordered = [page_texts[i] for i in sorted(page_texts.keys()) if page_texts[i]]
+    return "\n\n".join(ordered)
 
 
 def extract_docx_content(file_bytes: bytes) -> str:
@@ -82,8 +179,8 @@ def extract_xlsx_content(file_bytes: bytes) -> str:
     return "\n\n".join(parts)
 
 
-def extract_image_ocr(file_bytes: bytes) -> str:
-    """Extract text from image using Tesseract OCR."""
+def _extract_image_ocr_tesseract(file_bytes: bytes) -> str:
+    """Local Tesseract OCR (CPU). Used as fallback when PaddleOCR server is down."""
     try:
         from PIL import Image
         import pytesseract
@@ -91,97 +188,214 @@ def extract_image_ocr(file_bytes: bytes) -> str:
         text = pytesseract.image_to_string(image, lang="rus+eng")
         return text.strip()
     except Exception as e:
-        logger.warning(f"OCR failed: {e}")
+        logger.warning(f"Tesseract OCR failed: {e}")
         return ""
 
 
-async def describe_image_vision(file_bytes: bytes, filename: str) -> str:
-    """Describe image using Ollama vision model (moondream)."""
+async def extract_image_ocr(file_bytes: bytes, filename: str = "image") -> str:
+    """Extract text from image via the PaddleOCR GPU server, with Tesseract fallback.
+    The GPU server (faster-ocr) handles ru/uk/en via the 'cyrillic' model and takes
+    fractions of a second; Tesseract is CPU and slow but covers offline fallback."""
+    url = settings.OCR_URL
+    if url:
+        try:
+            import httpx
+            ext = (filename.rsplit(".", 1)[-1] or "png").lower()
+            mime = {
+                "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                "gif": "image/gif", "webp": "image/webp", "bmp": "image/bmp",
+                "tiff": "image/tiff",
+            }.get(ext, "image/png")
+            import time
+            t0 = time.time()
+            async with httpx.AsyncClient(timeout=settings.OCR_TIMEOUT_SECONDS) as client:
+                # /v1/ocr/auto ignores `lang`; /v1/ocr accepts it. Send for the
+                # single-pass fallback case — server-side it's a no-op for auto.
+                resp = await client.post(
+                    url,
+                    files={"file": (filename, file_bytes, mime)},
+                    data={"lang": "cyrillic"},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                text = (data.get("text") or "").strip()
+                elapsed = time.time() - t0
+                avg_conf = data.get("avg_confidence")
+                conf_part = f", avg_conf={avg_conf:.2f}" if isinstance(avg_conf, (int, float)) else ""
+                logger.info(
+                    f"PaddleOCR {filename} ({len(file_bytes)} bytes) → "
+                    f"{data.get('line_count', 0)} lines, {len(text)} chars in {elapsed:.2f}s{conf_part}"
+                )
+                return text
+        except Exception as e:
+            logger.warning(
+                f"PaddleOCR call failed for {filename}: {type(e).__name__}: {e!r}; "
+                f"falling back to Tesseract"
+            )
+    # Fallback: local CPU OCR
+    return _extract_image_ocr_tesseract(file_bytes)
+
+
+async def describe_image_vision(file_bytes: bytes, filename: str, preferred_model: str | None = None) -> str:
+    """
+    Describe image using Ollama vision model.
+    Priority: preferred_model (if provided and available) → strongest available
+    in the order: qwen2-vl > llava:34b > llava:13b > llava > bakllava > llama-vision > moondream.
+    """
+    vision_model: str | None = None
     try:
         import httpx
         base_url = (settings.OLLAMA_BASE_URL or "http://localhost:11434").rstrip("/")
 
-        # Check if moondream is available
+        # List installed Ollama models
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.get(f"{base_url}/api/tags")
-            models = [m.get("name", "") for m in resp.json().get("models", [])]
-            vision_model = None
-            for m in models:
-                if any(v in m.lower() for v in ("moondream", "llava", "bakllava", "llama-vision")):
+            installed = [m.get("name", "") for m in resp.json().get("models", [])]
+
+        vision_model: str | None = None
+
+        # 1. Use explicitly preferred model if installed
+        if preferred_model:
+            for m in installed:
+                if m == preferred_model or m.startswith(preferred_model + ":"):
                     vision_model = m
+                    break
+            if not vision_model:
+                logger.warning(f"Preferred vision model '{preferred_model}' not installed, falling back")
+
+        # 2. Auto-pick best available by priority list
+        if not vision_model:
+            priority_substrings = [
+                "qwen2-vl", "qwen2.5-vl", "qwen-vl",
+                "llava:34b", "llava:13b", "llava-llama3",
+                "llava", "bakllava", "llama-vision", "llama3.2-vision",
+                "moondream",
+            ]
+            installed_lower = [(m, m.lower()) for m in installed]
+            for needle in priority_substrings:
+                for orig, low in installed_lower:
+                    if needle in low:
+                        vision_model = orig
+                        break
+                if vision_model:
                     break
 
         if not vision_model:
             logger.info("No vision model available in Ollama, using OCR only")
             return ""
 
+        logger.info(f"Vision: using model {vision_model} for {filename} ({len(file_bytes)} bytes)")
         img_b64 = base64.b64encode(file_bytes).decode("utf-8")
 
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        import time
+        t0 = time.time()
+        # Generous timeout — vision models on CPU can take minutes for first inference
+        async with httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0)) as client:
             resp = await client.post(f"{base_url}/api/chat", json={
                 "model": vision_model,
                 "messages": [{
                     "role": "user",
-                    "content": "Подробно опиши что изображено на этой картинке. Если есть текст — перепиши его.",
+                    "content": (
+                        "Подробно опиши, что изображено на картинке. "
+                        "Если это техническое оборудование — назови узлы, компоненты, маркировки, цвета проводов/волокон. "
+                        "Если есть любой текст, цифры, идентификаторы — перепиши их дословно."
+                    ),
                     "images": [img_b64],
                 }],
                 "stream": False,
+                "options": {"num_predict": 600, "temperature": 0.2},
             })
             resp.raise_for_status()
             data = resp.json()
-            return data.get("message", {}).get("content", "").strip()
+            elapsed = time.time() - t0
+            content = data.get("message", {}).get("content", "").strip()
+            logger.info(f"Vision: model {vision_model} returned {len(content)} chars in {elapsed:.1f}s")
+            return content
 
     except Exception as e:
-        logger.warning(f"Vision description failed: {e}")
+        logger.warning(
+            f"Vision description failed for {filename} (model={vision_model or 'unknown'}): "
+            f"{type(e).__name__}: {e!r}"
+        )
         return ""
 
 
-def extract_audio_whisper(file_bytes: bytes, filename: str) -> str:
-    """Transcribe audio using Whisper (runs synchronously on CPU/GPU)."""
-    import tempfile
+async def extract_audio_whisper(file_bytes: bytes, filename: str) -> str:
+    """Transcribe audio via host faster-whisper-server (Whisper large-v3 on GPU).
+    Replaces the old local 'openai-whisper' base model — much more accurate for
+    ru/uk and ~3-5× faster (GPU-bound)."""
     import os
+    import httpx
+
+    url = os.getenv("WHISPER_URL", "http://172.10.100.9:8001/v1/audio/transcriptions")
+    model = os.getenv("WHISPER_MODEL", "Systran/faster-whisper-large-v3")
+
+    ext = os.path.splitext(filename)[1].lower().lstrip(".") or "wav"
+    mime = {
+        "mp3": "audio/mpeg",
+        "wav": "audio/wav",
+        "ogg": "audio/ogg",
+        "m4a": "audio/mp4",
+        "aac": "audio/aac",
+        "flac": "audio/flac",
+        "opus": "audio/opus",
+        "webm": "audio/webm",
+        "wma": "audio/x-ms-wma",
+    }.get(ext, "application/octet-stream")
 
     try:
-        import whisper
-    except ImportError:
-        raise ValueError("Whisper not installed. Install with: pip install openai-whisper")
+        async with httpx.AsyncClient(timeout=300) as client:
+            r = await client.post(
+                url,
+                files={
+                    "file": (filename, file_bytes, mime),
+                    "model": (None, model),
+                    "response_format": (None, "json"),
+                },
+            )
+            r.raise_for_status()
+            data = r.json()
+            text = (data.get("text") or "").strip()
+            logger.info(
+                f"Whisper transcribed {filename} ({len(file_bytes)} bytes) → {len(text)} chars text"
+            )
+            return text
+    except httpx.HTTPStatusError as e:
+        logger.error(
+            f"Whisper HTTP {e.response.status_code} for {filename}: "
+            f"{e.response.text[:300] if e.response else ''}"
+        )
+        raise
+    except Exception as e:
+        logger.error(f"Whisper transcription failed for {filename}: {e}")
+        raise
 
-    # Write to temp file (whisper needs file path)
-    suffix = os.path.splitext(filename)[1] or ".wav"
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
-        f.write(file_bytes)
-        tmp_path = f.name
 
-    try:
-        model = whisper.load_model("base")
-        result = model.transcribe(tmp_path, language=None)
-        return result.get("text", "").strip()
-    finally:
-        os.unlink(tmp_path)
-
-
-async def extract_content(file_bytes: bytes, filename: str, file_type: str) -> str:
+async def extract_content(file_bytes: bytes, filename: str, file_type: str, vision_model: str | None = None) -> str:
     """Route to the appropriate extractor based on file type."""
     if file_type == "pdf":
-        return extract_pdf_content(file_bytes)
+        # Text-layer first, OCR fallback for scanned pages.
+        return await extract_pdf_content_async(file_bytes, filename)
     elif file_type == "docx":
         return extract_docx_content(file_bytes)
     elif file_type == "xlsx":
         return extract_xlsx_content(file_bytes)
     elif file_type == "image":
-        # Try vision first, then OCR
-        vision_text = await describe_image_vision(file_bytes, filename)
-        ocr_text = extract_image_ocr(file_bytes)
-        parts = []
-        if vision_text:
-            parts.append(f"[Описание изображения]\n{vision_text}")
+        # Fast path: GPU PaddleOCR for any text on the image.
+        ocr_text = await extract_image_ocr(file_bytes, filename)
+        parts: list[str] = []
         if ocr_text:
             parts.append(f"[Распознанный текст (OCR)]\n{ocr_text}")
+        # Optional slow path: VLM image description (only when explicitly enabled —
+        # otherwise CPU vision can spin for minutes per image).
+        if settings.ENABLE_CPU_VISION_DESCRIPTION:
+            vision_text = await describe_image_vision(file_bytes, filename, preferred_model=vision_model)
+            if vision_text:
+                parts.append(f"[Описание изображения]\n{vision_text}")
         return "\n\n".join(parts) if parts else ""
     elif file_type == "audio":
-        # Whisper is CPU-bound — run in thread pool
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, extract_audio_whisper, file_bytes, filename)
+        # Async HTTP call to host faster-whisper-server (Whisper large-v3 on GPU).
+        return await extract_audio_whisper(file_bytes, filename)
     else:
         # text, csv, json, html, xml, md, etc.
         return extract_text_content(file_bytes, filename)
@@ -215,24 +429,26 @@ async def process_attachment(
         # 1. Read file
         file_bytes = await read_file(att.storage_path)
 
-        # 2. Extract text based on file type
-        content_text = await extract_content(file_bytes, att.filename, att.file_type)
-        if not content_text or not content_text.strip():
-            raise ValueError(f"No content could be extracted from {att.file_type} file")
-
-        att.content_text = content_text
-
-        # 3. Get embedding config
+        # 2. Get tenant config (used for vision model + embedding model + summary LLM)
         config = (await db.execute(
             select(TenantShellConfig).where(TenantShellConfig.tenant_id == tenant_id)
         )).scalar_one_or_none()
-
         if not config:
             raise ValueError("Shell config not found for tenant")
 
         embedding_model = config.embedding_model_name
         if not embedding_model:
             raise ValueError("Embedding model not configured")
+
+        # 3. Extract text based on file type (uses config.vision_model_name for images)
+        content_text = await extract_content(
+            file_bytes, att.filename, att.file_type,
+            vision_model=config.vision_model_name,
+        )
+        if not content_text or not content_text.strip():
+            raise ValueError(f"No content could be extracted from {att.file_type} file")
+
+        att.content_text = content_text
 
         # Use Ollama for embeddings (local)
         embed_provider = get_provider("ollama", settings.OLLAMA_BASE_URL or "http://localhost:11434")
@@ -243,16 +459,16 @@ async def process_attachment(
 
         try:
             summary_text = content_text[:3000]
-            summary_resp = await resolved.provider.chat_completion(
-                messages=[{
-                    "role": "user",
-                    "content": f"Кратко опиши содержимое этого документа (2-3 предложения):\n\n{summary_text}",
-                }],
-                model=resolved.model_name,
-                temperature=0.3,
-                max_tokens=200,
+            from app.services.llm.language import build_language_pin_message
+            from app.services.attachments.summary_parser import generate_attachment_summary
+            att.summary = await generate_attachment_summary(
+                content=summary_text,
+                provider=resolved.provider,
+                model_name=resolved.model_name,
+                language=config.response_language,
             )
-            att.summary = summary_resp.content[:500]
+            if not att.summary:
+                att.summary = f"Файл: {att.filename} ({att.file_type}, {att.file_size_bytes} байт)"
         except Exception as e:
             logger.warning(f"Summary generation failed for attachment {attachment_id}: {e}")
             att.summary = f"Файл: {att.filename} ({att.file_type}, {att.file_size_bytes} байт)"
@@ -326,3 +542,14 @@ async def search_attachment_chunks(
 
     result = await db.execute(stmt)
     return list(result.scalars().all())
+
+
+async def process_attachment_background(attachment_id: str, tenant_id: str) -> None:
+    """Background entrypoint with its own DB session and transaction."""
+    async with async_session() as db:
+        try:
+            await process_attachment(uuid.UUID(str(attachment_id)), uuid.UUID(str(tenant_id)), db)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("Attachment background processing failed", extra={"attachment_id": attachment_id})

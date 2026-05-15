@@ -4,7 +4,7 @@ Admin CRUD for tenant memory entries.
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,12 +14,12 @@ from app.models.tenant import Tenant
 from app.models.memory_entry import MemoryEntry
 from app.schemas.memory import MemoryCreate, MemoryUpdate, MemoryResponse
 from app.schemas.common import PaginatedResponse
-from app.api.deps import require_role
+from app.api.deps import require_role, require_tenant_access, require_permission
 
 router = APIRouter(
     prefix="/api/admin/tenants/{tenant_id}/memory",
     tags=["admin-memory"],
-    dependencies=[Depends(require_role("superadmin", "tenant_admin"))],
+    dependencies=[Depends(require_role("superadmin", "tenant_admin")), Depends(require_tenant_access), Depends(require_permission("memory"))],
 )
 
 
@@ -55,6 +55,7 @@ async def list_memories(
     page_size: int = Query(20, ge=1, le=100),
     memory_type: str | None = Query(None),
     chat_id: uuid.UUID | None = Query(None),
+    search: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
     await _verify_tenant(tenant_id, db)
@@ -71,8 +72,11 @@ async def list_memories(
         query = query.where(MemoryEntry.memory_type == memory_type)
     if chat_id:
         query = query.where(MemoryEntry.chat_id == chat_id)
+    if search:
+        pattern = f"%{search.strip()}%"
+        query = query.where(MemoryEntry.content.ilike(pattern))
 
-    query = query.order_by(MemoryEntry.created_at.desc())
+    query = query.order_by(MemoryEntry.is_pinned.desc(), MemoryEntry.priority.desc(), MemoryEntry.created_at.desc())
 
     count_q = select(func.count()).select_from(query.subquery())
     total = (await db.execute(count_q)).scalar()
@@ -93,6 +97,7 @@ async def list_memories(
 async def create_memory(
     tenant_id: uuid.UUID,
     body: MemoryCreate,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     await _verify_tenant(tenant_id, db)
@@ -110,6 +115,9 @@ async def create_memory(
     db.add(mem)
     await db.flush()
     await db.refresh(mem)
+    # Schedule embedding in background so the entry is searchable next round.
+    from app.services.memory.embedder import embed_memory_entry
+    background_tasks.add_task(embed_memory_entry, mem.id)
     return _mem_to_response(mem)
 
 

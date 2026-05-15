@@ -13,13 +13,24 @@ from app.models.admin_user import AdminUser
 from app.models.tenant import Tenant
 from app.schemas.tenant import TenantCreate, TenantUpdate, TenantResponse
 from app.schemas.common import PaginatedResponse
-from app.api.deps import require_role
+from app.api.deps import require_role, get_current_admin
 
 router = APIRouter(
     prefix="/api/admin/tenants",
     tags=["admin-tenants"],
     dependencies=[Depends(require_role("superadmin", "tenant_admin"))],
 )
+
+
+def _enforce_tenant_scope(current_user: AdminUser, tenant_id: uuid.UUID) -> None:
+    if current_user.role == "superadmin":
+        return
+    if current_user.role == "tenant_admin" and current_user.tenant_id == tenant_id:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Forbidden: this account is not bound to the requested tenant.",
+    )
 
 
 def _tenant_to_response(t: Tenant) -> TenantResponse:
@@ -29,6 +40,12 @@ def _tenant_to_response(t: Tenant) -> TenantResponse:
         slug=t.slug,
         description=t.description,
         is_active=t.is_active,
+        throttle_enabled=t.throttle_enabled,
+        throttle_max_concurrent=t.throttle_max_concurrent,
+        throttle_overflow_policy=t.throttle_overflow_policy,
+        throttle_queue_max=t.throttle_queue_max,
+        merge_messages_enabled=t.merge_messages_enabled,
+        merge_window_ms=t.merge_window_ms,
         created_at=t.created_at,
         updated_at=t.updated_at,
     )
@@ -43,8 +60,13 @@ async def list_tenants(
     search: str | None = Query(None),
     is_active: bool | None = Query(None),
     db: AsyncSession = Depends(get_db),
+    current_user: AdminUser = Depends(get_current_admin),
 ):
     query = select(Tenant).where(Tenant.deleted_at.is_(None))
+    if current_user.role == "tenant_admin":
+        if current_user.tenant_id is None:
+            return PaginatedResponse[TenantResponse](items=[], total_count=0, page=page, page_size=page_size)
+        query = query.where(Tenant.id == current_user.tenant_id)
 
     if search:
         pattern = f"%{search}%"
@@ -81,7 +103,9 @@ async def list_tenants(
 async def create_tenant(
     body: TenantCreate,
     db: AsyncSession = Depends(get_db),
+    current_user: AdminUser = Depends(require_role("superadmin")),
 ):
+    _ = current_user
     # Check slug uniqueness
     existing = await db.execute(
         select(Tenant).where(Tenant.slug == body.slug, Tenant.deleted_at.is_(None))
@@ -107,7 +131,9 @@ async def create_tenant(
 async def get_tenant(
     tenant_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
+    current_user: AdminUser = Depends(get_current_admin),
 ):
+    _enforce_tenant_scope(current_user, tenant_id)
     result = await db.execute(
         select(Tenant).where(Tenant.id == tenant_id, Tenant.deleted_at.is_(None))
     )
@@ -122,7 +148,9 @@ async def update_tenant(
     tenant_id: uuid.UUID,
     body: TenantUpdate,
     db: AsyncSession = Depends(get_db),
+    current_user: AdminUser = Depends(get_current_admin),
 ):
+    _enforce_tenant_scope(current_user, tenant_id)
     result = await db.execute(
         select(Tenant).where(Tenant.id == tenant_id, Tenant.deleted_at.is_(None))
     )
@@ -157,7 +185,7 @@ async def update_tenant(
 async def delete_tenant(
     tenant_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: AdminUser = Depends(require_role("superadmin", "tenant_admin")),
+    current_user: AdminUser = Depends(require_role("superadmin")),
 ):
     result = await db.execute(
         select(Tenant).where(Tenant.id == tenant_id, Tenant.deleted_at.is_(None))

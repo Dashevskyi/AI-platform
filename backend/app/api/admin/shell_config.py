@@ -20,13 +20,15 @@ from app.schemas.shell_config import (
     TestConnectionRequest,
     TestConnectionResponse,
 )
-from app.api.deps import require_role
+from app.api.deps import require_role, require_tenant_access, require_permission
 
 router = APIRouter(
     prefix="/api/admin/tenants/{tenant_id}/shell",
     tags=["admin-shell-config"],
-    dependencies=[Depends(require_role("superadmin", "tenant_admin"))],
+    dependencies=[Depends(require_role("superadmin", "tenant_admin")), Depends(require_tenant_access), Depends(require_permission("shell_config"))],
 )
+
+MAX_SAFE_TEMPERATURE = 0.7
 
 
 async def _verify_tenant(tenant_id: uuid.UUID, db: AsyncSession) -> Tenant:
@@ -56,16 +58,21 @@ def _config_to_response(cfg: TenantShellConfig) -> ShellConfigResponse:
         provider_api_key_masked=masked_key,
         model_name=cfg.model_name,
         system_prompt=cfg.system_prompt,
+        ontology_prompt=cfg.ontology_prompt,
         rules_text=cfg.rules_text,
         temperature=cfg.temperature,
         max_context_messages=cfg.max_context_messages,
         max_tokens=cfg.max_tokens,
         summary_model_name=cfg.summary_model_name,
+        context_mode=cfg.context_mode,
         memory_enabled=cfg.memory_enabled,
         knowledge_base_enabled=cfg.knowledge_base_enabled,
         embedding_model_name=cfg.embedding_model_name,
+        vision_model_name=cfg.vision_model_name,
         kb_max_chunks=cfg.kb_max_chunks,
         tools_policy=cfg.tools_policy,
+        enable_thinking=cfg.enable_thinking,
+        response_language=cfg.response_language,
     )
 
 
@@ -80,11 +87,16 @@ def _config_to_dict(cfg: TenantShellConfig) -> dict:
         "max_context_messages": cfg.max_context_messages,
         "max_tokens": cfg.max_tokens,
         "summary_model_name": cfg.summary_model_name,
+        "context_mode": cfg.context_mode,
         "memory_enabled": cfg.memory_enabled,
         "knowledge_base_enabled": cfg.knowledge_base_enabled,
         "embedding_model_name": cfg.embedding_model_name,
+        "vision_model_name": cfg.vision_model_name,
         "kb_max_chunks": cfg.kb_max_chunks,
         "tools_policy": cfg.tools_policy,
+        "enable_thinking": cfg.enable_thinking,
+        "ontology_prompt": cfg.ontology_prompt,
+        "response_language": cfg.response_language,
     }
 
 
@@ -143,6 +155,8 @@ async def update_shell_config(
             cfg.provider_api_key_enc = None
 
     for field, value in update_data.items():
+        if field == "temperature" and value is not None:
+            value = min(float(value), MAX_SAFE_TEMPERATURE)
         setattr(cfg, field, value)
 
     await db.flush()

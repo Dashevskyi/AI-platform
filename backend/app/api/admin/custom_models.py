@@ -18,12 +18,12 @@ from app.schemas.llm_model import (
     TenantCustomModelResponse,
 )
 from app.schemas.common import PaginatedResponse
-from app.api.deps import require_role
+from app.api.deps import require_role, require_tenant_access, require_permission
 
 router = APIRouter(
     prefix="/api/admin/tenants/{tenant_id}/custom-models",
     tags=["admin-custom-models"],
-    dependencies=[Depends(require_role("superadmin", "tenant_admin"))],
+    dependencies=[Depends(require_role("superadmin", "tenant_admin")), Depends(require_tenant_access), Depends(require_permission("model_config"))],
 )
 
 
