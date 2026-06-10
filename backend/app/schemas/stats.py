@@ -26,9 +26,20 @@ class TierStats(BaseModel):
     estimated_cost: float
 
 
+class BreakdownRow(BaseModel):
+    """A by-model or by-API-key slice of usage."""
+    key: str
+    label: str | None = None  # human label (key name); for models == key
+    request_count: int
+    total_tokens: int
+    estimated_cost: float
+
+
 class TenantStatsResponse(BaseModel):
     summary: StatsSummary
     daily: list[DailyModelStats]
     # Deterministic (Tier 0, $0) vs LLM split, and the Tier 0 share of traffic.
     tiers: list[TierStats] = []
     tier0_share: float = 0.0
+    by_model: list[BreakdownRow] = []
+    by_key: list[BreakdownRow] = []

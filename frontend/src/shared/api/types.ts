@@ -713,11 +713,21 @@ export interface TierStats {
   estimated_cost: number;
 }
 
+export interface BreakdownRow {
+  key: string;
+  label: string | null;
+  request_count: number;
+  total_tokens: number;
+  estimated_cost: number;
+}
+
 export interface TenantStatsResponse {
   summary: StatsSummary;
   daily: DailyModelStats[];
   tiers?: TierStats[];
   tier0_share?: number;
+  by_model?: BreakdownRow[];
+  by_key?: BreakdownRow[];
 }
 
 export interface TenantModelConfigUpdate {

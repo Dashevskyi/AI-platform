@@ -29,10 +29,12 @@ import {
 import {
   IconCheck,
   IconCopy,
+  IconExternalLink,
   IconMaximize,
   IconRefresh,
   IconTool,
 } from '@tabler/icons-react';
+import { useNavigate } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { chatsApi, keysApi, logsApi } from '../../shared/api/endpoints';
 import type { LLMLogDetail } from '../../shared/api/types';
@@ -750,6 +752,7 @@ function RawRequestView({ raw }: { raw: Record<string, unknown> | null }) {
 
 export function LogsTab({ tenantId }: LogsTabProps) {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const [page, setPage] = useState(1);
   const [detailOpen, setDetailOpen] = useState(false);
   const [selectedLogId, setSelectedLogId] = useState<string | null>(null);
@@ -1136,7 +1139,20 @@ export function LogsTab({ tenantId }: LogsTabProps) {
         {detailLoading ? (
           <Center py="md"><Loader /></Center>
         ) : logDetail ? (
-          <LogDetailView logDetail={logDetail} />
+          <Stack gap="sm">
+            {logDetail.chat_id && (
+              <Button
+                variant="light"
+                size="xs"
+                leftSection={<IconExternalLink size={14} />}
+                onClick={() => navigate(`/tenants/${tenantId}/chat/${logDetail.chat_id}`)}
+                style={{ alignSelf: 'flex-start' }}
+              >
+                Открыть чат
+              </Button>
+            )}
+            <LogDetailView logDetail={logDetail} />
+          </Stack>
         ) : (
           <Text c="dimmed">Нет данных.</Text>
         )}

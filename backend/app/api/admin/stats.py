@@ -10,8 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.models.tenant import Tenant
+from app.models.tenant_api_key import TenantApiKey
 from app.models.llm_request_log import LLMRequestLog
-from app.schemas.stats import TenantStatsResponse, StatsSummary, DailyModelStats, TierStats
+from app.schemas.stats import TenantStatsResponse, StatsSummary, DailyModelStats, TierStats, BreakdownRow
 from app.api.deps import require_role, require_tenant_access
 
 router = APIRouter(
@@ -141,4 +142,49 @@ async def get_stats(
     tier0_reqs = sum(t.request_count for t in tiers if t.served_by == "tier0_template")
     tier0_share = (tier0_reqs / total_reqs) if total_reqs else 0.0
 
-    return TenantStatsResponse(summary=summary, daily=daily, tiers=tiers, tier0_share=tier0_share)
+    # Usage broken down by model and by API key (same window, successful only).
+    _window = [
+        LLMRequestLog.tenant_id == tenant_id,
+        cast(LLMRequestLog.created_at, Date) >= date_from,
+        cast(LLMRequestLog.created_at, Date) <= date_to,
+        LLMRequestLog.status == "success",
+    ]
+
+    model_rows = (await db.execute(
+        select(
+            LLMRequestLog.model_name.label("k"),
+            func.count().label("rc"),
+            func.coalesce(func.sum(LLMRequestLog.total_tokens), 0).label("tt"),
+            func.coalesce(func.sum(LLMRequestLog.estimated_cost), 0).label("ec"),
+        ).where(*_window).group_by(LLMRequestLog.model_name).order_by(func.count().desc())
+    )).all()
+    by_model = [
+        BreakdownRow(key=r.k or "—", label=r.k, request_count=r.rc, total_tokens=int(r.tt or 0), estimated_cost=float(r.ec or 0))
+        for r in model_rows
+    ]
+
+    key_rows = (await db.execute(
+        select(
+            LLMRequestLog.api_key_id.label("k"),
+            func.count().label("rc"),
+            func.coalesce(func.sum(LLMRequestLog.total_tokens), 0).label("tt"),
+            func.coalesce(func.sum(LLMRequestLog.estimated_cost), 0).label("ec"),
+        ).where(*_window).group_by(LLMRequestLog.api_key_id).order_by(func.count().desc())
+    )).all()
+    # Resolve key ids → names.
+    key_names = dict((await db.execute(
+        select(TenantApiKey.id, TenantApiKey.name).where(TenantApiKey.tenant_id == tenant_id)
+    )).all())
+    by_key = [
+        BreakdownRow(
+            key=str(r.k) if r.k else "—",
+            label=(key_names.get(r.k) or (str(r.k)[:8] if r.k else "без ключа")),
+            request_count=r.rc, total_tokens=int(r.tt or 0), estimated_cost=float(r.ec or 0),
+        )
+        for r in key_rows
+    ]
+
+    return TenantStatsResponse(
+        summary=summary, daily=daily, tiers=tiers, tier0_share=tier0_share,
+        by_model=by_model, by_key=by_key,
+    )

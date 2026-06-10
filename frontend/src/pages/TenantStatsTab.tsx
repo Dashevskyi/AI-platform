@@ -9,6 +9,7 @@ import {
   Loader,
   Center,
   SegmentedControl,
+  Table,
   Alert,
 } from '@mantine/core';
 import { DatePickerInput } from '@mantine/dates';
@@ -16,7 +17,39 @@ import { IconAlertCircle } from '@tabler/icons-react';
 import { useQuery } from '@tanstack/react-query';
 import { BarChart } from '@mantine/charts';
 import { statsApi } from '../shared/api/endpoints';
-import type { DailyModelStats } from '../shared/api/types';
+import type { DailyModelStats, BreakdownRow } from '../shared/api/types';
+
+function BreakdownCard({ title, rows }: { title: string; rows: BreakdownRow[] }) {
+  return (
+    <Card withBorder p="md">
+      <Title order={5} mb="sm">{title}</Title>
+      {rows.length ? (
+        <Table>
+          <Table.Thead>
+            <Table.Tr>
+              <Table.Th>Имя</Table.Th>
+              <Table.Th ta="right">Запросов</Table.Th>
+              <Table.Th ta="right">Токенов</Table.Th>
+              <Table.Th ta="right">Стоимость</Table.Th>
+            </Table.Tr>
+          </Table.Thead>
+          <Table.Tbody>
+            {rows.map((r) => (
+              <Table.Tr key={r.key}>
+                <Table.Td><Text size="sm" lineClamp={1}>{r.label || r.key}</Text></Table.Td>
+                <Table.Td ta="right">{r.request_count.toLocaleString('ru-RU')}</Table.Td>
+                <Table.Td ta="right">{r.total_tokens.toLocaleString('ru-RU')}</Table.Td>
+                <Table.Td ta="right">${r.estimated_cost.toFixed(4)}</Table.Td>
+              </Table.Tr>
+            ))}
+          </Table.Tbody>
+        </Table>
+      ) : (
+        <Text c="dimmed" size="sm">Нет данных.</Text>
+      )}
+    </Card>
+  );
+}
 
 function formatDate(d: Date): string {
   return d.toISOString().slice(0, 10);
@@ -214,6 +247,11 @@ export function StatsTab({ tenantId }: { tenantId: string }) {
           </Center>
         )}
       </Card>
+
+      <SimpleGrid cols={{ base: 1, md: 2 }}>
+        <BreakdownCard title="По моделям" rows={data?.by_model || []} />
+        <BreakdownCard title="По API-ключам" rows={data?.by_key || []} />
+      </SimpleGrid>
     </Stack>
   );
 }
