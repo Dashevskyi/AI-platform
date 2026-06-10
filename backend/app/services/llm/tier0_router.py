@@ -1074,7 +1074,7 @@ async def explain_tier0(
                                 else:
                                     recs.append({"severity": "warning",
                                                  "text": "Поля шаблона/required_fields не совпадают с реальным выводом "
-                                                         "инструмента — сверьте пути с JSON выше."})
+                                                         "инструмента — сверьте пути с блоком «JSON-вывод инструмента»."})
                         else:
                             decision["rendered"] = rendered
                             decision["fired"] = True

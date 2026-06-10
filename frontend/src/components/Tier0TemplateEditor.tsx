@@ -1940,6 +1940,28 @@ function Tier0TestBench({ tenantId, toolName, currentConfig, embedded }: {
                 </div>
               )}
 
+              {/* Assembled tool arguments */}
+              {d?.arguments && (
+                <Text size="xs" c="dimmed">
+                  Аргументы вызова: <Code fz="xs">{JSON.stringify(d.arguments)}</Code>
+                </Text>
+              )}
+
+              {/* Raw tool output JSON — what template paths must match */}
+              {d?.tool_output && (
+                <div>
+                  <Text size="xs" fw={600} c="dimmed" mb={2}>
+                    JSON-вывод инструмента <Text span c="dimmed">(сверяй пути шаблона с этой структурой)</Text>:
+                  </Text>
+                  <Box style={{ background: 'var(--mantine-color-dark-8)', borderRadius: 6, padding: '8px 10px',
+                               fontFamily: 'monospace', fontSize: 11, whiteSpace: 'pre-wrap',
+                               maxHeight: 280, overflowY: 'auto' }}>
+                    {(() => { try { return JSON.stringify(JSON.parse(d.tool_output), null, 2); }
+                              catch { return d.tool_output; } })()}
+                  </Box>
+                </div>
+              )}
+
               {/* Rendered output (if tool ran) */}
               {d?.rendered && (
                 <div>
