@@ -168,3 +168,37 @@ def test_tool_loop_executes_then_finalizes(event_loop):
     # The plan tool result was fed back into the second (final) call's messages.
     second_round_msgs = provider.calls[1]["messages"]
     assert any(m.get("role") == "tool" or "План" in str(m.get("content", "")) for m in second_round_msgs)
+
+
+def _plan_call(cid, steps):
+    return LLMResponse(content="", finish_reason="tool_calls", tool_calls=[
+        {"id": cid, "type": "function", "function": {"name": "plan", "arguments": {"steps": steps}}}])
+
+
+def test_tool_loop_feeds_error_back(event_loop):
+    """A failing tool (plan with <2 steps) must not abort the loop — the error
+    is fed back so the model can recover, then it answers."""
+    bad = _plan_call("c1", ["единственный шаг"])  # plan requires >=2 steps → error
+    final = LLMResponse(content="Понял, ошибка обработана.", finish_reason="stop")
+    result, provider = run_pipeline(
+        event_loop, "Сделай что-то",
+        tools_policy="always", supports_tools=True, scripted=[bad, final],
+    )
+    assert result["content"] == "Понял, ошибка обработана."
+    # The tool error text is fed into the next round's messages.
+    assert any("шаг" in str(m.get("content", "")).lower() or "ошибк" in str(m.get("content", "")).lower()
+               for m in provider.calls[1]["messages"])
+
+
+def test_tool_loop_multi_round(event_loop):
+    """Two tool rounds before the final answer — exercises the loop iterating."""
+    final = LLMResponse(content="Оба шага выполнены.", finish_reason="stop")
+    result, provider = run_pipeline(
+        event_loop, "Сделай A, потом B",
+        tools_policy="always", supports_tools=True,
+        scripted=[_plan_call("c1", ["a1", "a2"]), _plan_call("c2", ["b1", "b2"]), final],
+    )
+    assert result["content"] == "Оба шага выполнены."
+    assert result.get("tool_calls_count", 0) >= 2   # two tool rounds happened
+    # At least 3 provider rounds (2 tool + 1 final; a 4th may be the auto-title).
+    assert len(provider.calls) >= 3
