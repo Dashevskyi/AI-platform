@@ -21,7 +21,7 @@ class TenantTool(Base):
     tool_type: Mapped[str] = mapped_column(String(50), default="function")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     is_pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    embedding = mapped_column(Vector(None), nullable=True)
+    embedding = mapped_column(Vector(1024), nullable=True)
     embedding_model: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))

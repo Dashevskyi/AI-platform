@@ -54,7 +54,7 @@ class Artifact(Base):
 
     # Semantic-search index over label + content head. embedding_model is kept
     # so we know whether to re-embed when the tenant changes embedding model.
-    embedding = mapped_column(Vector(None), nullable=True)
+    embedding = mapped_column(Vector(1024), nullable=True)
     embedding_model: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
     # Touched every time the pipeline auto-grounds this artifact into a payload.

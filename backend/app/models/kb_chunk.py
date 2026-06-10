@@ -20,5 +20,5 @@ class KBChunk(Base):
     doc_title: Mapped[str] = mapped_column(String(500), nullable=False)
     source_type: Mapped[str] = mapped_column(String(50), default="manual")
     source_url: Mapped[str | None] = mapped_column(String(2000), nullable=True)
-    embedding = mapped_column(Vector(None), nullable=True)  # dimension set dynamically based on model
+    embedding = mapped_column(Vector(1024), nullable=True)  # dimension set dynamically based on model
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

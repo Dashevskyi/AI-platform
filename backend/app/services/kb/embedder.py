@@ -221,9 +221,21 @@ async def process_document(doc_id: uuid.UUID, tenant_id: uuid.UUID, db: AsyncSes
         BATCH_SIZE = 10
         all_chunk_objs = []
 
+        from app.core.config import settings as _settings
+
         for i in range(0, len(chunks), BATCH_SIZE):
             batch = chunks[i:i + BATCH_SIZE]
             embeddings = await provider.embed(batch, embedding_model)
+
+            # Embedding columns are fixed at EMBEDDING_DIM (see migration
+            # embdim01). Surface a clear error instead of an opaque DB type
+            # mismatch if the configured model produces a different dimension.
+            if embeddings and len(embeddings[0]) != _settings.EMBEDDING_DIM:
+                raise ValueError(
+                    f"Модель '{embedding_model}' выдаёт {len(embeddings[0])}-мерные эмбеддинги, "
+                    f"а система ожидает {_settings.EMBEDDING_DIM}. Используйте 1024-мерную модель "
+                    f"(bge-m3 и др.)."
+                )
 
             for j, (chunk_text_item, emb) in enumerate(zip(batch, embeddings)):
                 chunk = KBChunk(

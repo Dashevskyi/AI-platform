@@ -11,6 +11,10 @@ class Settings(BaseSettings):
     ENCRYPTION_KEY: str = "change-me"
     CORS_ORIGINS: str = '["http://localhost:5173"]'
     OLLAMA_BASE_URL: str = "http://localhost:11434"
+    # Embedding vector dimension. Fixed system-wide so pgvector can index the
+    # embedding columns (see migration embdim01). bge-m3 = 1024; any configured
+    # embedding model must produce this many dimensions.
+    EMBEDDING_DIM: int = 1024
     ADMIN_LOGIN: str = "admin"
     ADMIN_PASSWORD: str = "admin"
     LOG_RETENTION_DAYS: int = 90

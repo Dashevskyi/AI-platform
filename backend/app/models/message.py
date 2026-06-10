@@ -32,7 +32,7 @@ class Message(Base):
     # on the user-message row, resume_response — on the matching assistant row.
     resume_query: Mapped[str | None] = mapped_column(Text, nullable=True)
     resume_response: Mapped[str | None] = mapped_column(Text, nullable=True)
-    resume_embedding = mapped_column(Vector(None), nullable=True)
+    resume_embedding = mapped_column(Vector(1024), nullable=True)
     resume_embedding_model: Mapped[str | None] = mapped_column(String(200), nullable=True)
     # Structured list of artifacts present in this message: code blocks, scripts,
     # configs, SQL queries, instructions. Each item: {"kind": "...", "label": "...", "lang": "..."}.
