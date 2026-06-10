@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import String, Boolean, DateTime, Text, Integer, ForeignKey
+from sqlalchemy import String, Boolean, DateTime, Text, Integer, ForeignKey, Index
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from pgvector.sqlalchemy import Vector
@@ -11,6 +11,9 @@ from app.core.database import Base
 
 class MemoryEntry(Base):
     __tablename__ = "memory_entries"
+    __table_args__ = (
+        Index("ix_memory_entries_tenant_chat", "tenant_id", "chat_id"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)

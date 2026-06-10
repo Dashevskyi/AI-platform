@@ -165,9 +165,31 @@ export interface ShellConfig {
   embedding_model_name: string | null;
   vision_model_name: string | null;
   kb_max_chunks: number;
+  kb_inject_auto: boolean;
   tools_policy: string;
   enable_thinking: string;
   response_language: string;
+  debug_enabled: boolean;
+  timezone: string | null;
+  tool_semantic_floor: number;
+  tool_routing_temperature: number;
+  lazy_tool_catalog_topk: number;
+  max_tool_rounds: number;
+  tier0_enabled: boolean;
+  tier0_min_tool_score: number;
+  tier0_max_score_gap: number;
+  pii_routing_enabled: boolean;
+  stt_initial_prompt: string | null;
+  stt_hotwords: string | null;
+  stt_vocab_source: Record<string, unknown> | null;
+  stt_vocab_source_dsn_masked: string | null;
+  stt_fuzzy_threshold: number;
+  tts_provider: string;
+  tts_api_key_masked: string | null;
+  tts_voice_id: string | null;
+  tts_model: string | null;
+  tts_speed: number | null;
+  tts_fish_url: string | null;
 }
 
 export interface ShellConfigUpdate {
@@ -188,9 +210,31 @@ export interface ShellConfigUpdate {
   embedding_model_name?: string;
   vision_model_name?: string;
   kb_max_chunks?: number;
+  kb_inject_auto?: boolean;
   tools_policy?: string;
   enable_thinking?: string;
   response_language?: string;
+  debug_enabled?: boolean;
+  timezone?: string;
+  tool_semantic_floor?: number;
+  tool_routing_temperature?: number;
+  lazy_tool_catalog_topk?: number;
+  max_tool_rounds?: number;
+  tier0_enabled?: boolean;
+  tier0_min_tool_score?: number;
+  tier0_max_score_gap?: number;
+  pii_routing_enabled?: boolean;
+  stt_initial_prompt?: string;
+  stt_hotwords?: string;
+  stt_vocab_source?: Record<string, unknown> | null;
+  stt_vocab_source_dsn?: string;
+  stt_fuzzy_threshold?: number;
+  tts_provider?: string;
+  tts_api_key?: string;
+  tts_voice_id?: string;
+  tts_model?: string;
+  tts_speed?: number;
+  tts_fish_url?: string;
 }
 
 export interface Tool {
@@ -438,6 +482,7 @@ export interface LLMLogDetail extends LLMLog {
   tokens_kb: number | null;
   tokens_history: number | null;
   tokens_user: number | null;
+  debug: Record<string, unknown> | null;
 }
 
 export interface AuditLog {
@@ -480,8 +525,20 @@ export interface LLMModel {
   cost_per_1k_input: number | null;
   cost_per_1k_output: number | null;
   is_active: boolean;
+  last_check_at: string | null;
+  last_check_status: string | null;
+  last_check_detail: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface ModelHealthCheckResult {
+  status: string;
+  detail: string | null;
+  content: string | null;
+  completion_tokens: number | null;
+  latency_ms: number | null;
+  checked_at: string;
 }
 
 export interface LLMModelCreate {
@@ -579,6 +636,8 @@ export interface TenantModelConfig {
   auto_light_custom_model_id: string | null;
   auto_heavy_custom_model_id: string | null;
   complexity_threshold: number;
+  auto_size_threshold: number;
+  use_complexity_classifier: boolean;
   manual_model_name: string | null;
   manual_custom_model_name: string | null;
   auto_light_model_name: string | null;
@@ -616,9 +675,17 @@ export interface StatsSummary {
   request_count: number;
 }
 
+export interface TierStats {
+  served_by: string; // 'tier0_template' | 'llm'
+  request_count: number;
+  estimated_cost: number;
+}
+
 export interface TenantStatsResponse {
   summary: StatsSummary;
   daily: DailyModelStats[];
+  tiers?: TierStats[];
+  tier0_share?: number;
 }
 
 export interface TenantModelConfigUpdate {
@@ -630,4 +697,6 @@ export interface TenantModelConfigUpdate {
   auto_light_custom_model_id?: string | null;
   auto_heavy_custom_model_id?: string | null;
   complexity_threshold?: number;
+  auto_size_threshold?: number;
+  use_complexity_classifier?: boolean;
 }

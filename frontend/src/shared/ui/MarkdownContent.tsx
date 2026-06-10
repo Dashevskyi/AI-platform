@@ -431,11 +431,7 @@ export function MarkdownContent({ content, color, linkColor }: MarkdownContentPr
 
         if (block.type === 'table') {
           return (
-            <Box
-              key={key}
-              mt={index === 0 ? 0 : 'xs'}
-              style={{ overflowX: 'auto' }}
-            >
+            <Box key={key} mt={index === 0 ? 0 : 'xs'}>
               <Group justify="flex-end" mb={6}>
                 <Tooltip label="Скачать CSV">
                   <ActionIcon
@@ -460,6 +456,7 @@ export function MarkdownContent({ content, color, linkColor }: MarkdownContentPr
                   </ActionIcon>
                 </Tooltip>
               </Group>
+              <Box style={{ overflowX: 'auto' }}>
               <Table
                 striped
                 highlightOnHover
@@ -467,12 +464,12 @@ export function MarkdownContent({ content, color, linkColor }: MarkdownContentPr
                 withColumnBorders
                 horizontalSpacing="sm"
                 verticalSpacing="xs"
-                style={{ minWidth: '100%' }}
+                style={{ minWidth: 'max-content' }}
               >
                 <Table.Thead>
                   <Table.Tr>
                     {block.headers.map((header, headerIndex) => (
-                      <Table.Th key={`${key}-head-${headerIndex}`}>
+                      <Table.Th key={`${key}-head-${headerIndex}`} style={{ whiteSpace: 'nowrap' }}>
                         <Text size="sm" fw={600} c={color}>
                           {renderInline(header, `${key}-head-${headerIndex}`, resolvedLinkColor)}
                         </Text>
@@ -484,7 +481,7 @@ export function MarkdownContent({ content, color, linkColor }: MarkdownContentPr
                   {block.rows.map((row, rowIndex) => (
                     <Table.Tr key={`${key}-row-${rowIndex}`}>
                       {row.map((cell, cellIndex) => (
-                        <Table.Td key={`${key}-row-${rowIndex}-cell-${cellIndex}`}>
+                        <Table.Td key={`${key}-row-${rowIndex}-cell-${cellIndex}`} style={{ whiteSpace: 'nowrap' }}>
                           <Text size="sm" c={color}>
                             {renderInline(cell, `${key}-row-${rowIndex}-cell-${cellIndex}`, resolvedLinkColor)}
                           </Text>
@@ -494,6 +491,7 @@ export function MarkdownContent({ content, color, linkColor }: MarkdownContentPr
                   ))}
                 </Table.Tbody>
               </Table>
+              </Box>
             </Box>
           );
         }

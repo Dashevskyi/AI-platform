@@ -39,7 +39,7 @@ ALL_PERMISSIONS = [
 
 class AdminUserCreate(BaseModel):
     login: str = Field(min_length=1, max_length=100)
-    password: str = Field(min_length=4, max_length=200)
+    password: str = Field(min_length=8, max_length=200)
     role: Literal["superadmin", "tenant_admin"] = "tenant_admin"
     tenant_id: str | None = None
     permissions: list[str] = Field(default_factory=list)
@@ -47,7 +47,7 @@ class AdminUserCreate(BaseModel):
 
 
 class AdminUserUpdate(BaseModel):
-    password: str | None = Field(default=None, min_length=4, max_length=200)
+    password: str | None = Field(default=None, min_length=8, max_length=200)
     role: Literal["superadmin", "tenant_admin"] | None = None
     tenant_id: str | None = None
     permissions: list[str] | None = None

@@ -2,7 +2,7 @@ import { Suspense, lazy } from 'react';
 import { Center, Loader } from '@mantine/core';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { AppShellLayout } from './shared/ui/AppShell';
-import { useAuth } from './shared/hooks/useAuth';
+import { useAuth, isAuthFlagSet } from './shared/hooks/useAuth';
 import { usePermissions } from './shared/hooks/usePermissions';
 
 const LoginPage = lazy(() =>
@@ -36,8 +36,7 @@ function RouteFallback() {
 }
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const token = localStorage.getItem('auth_token');
-  if (!token) {
+  if (!isAuthFlagSet()) {
     return <Navigate to="/login" replace />;
   }
   return <>{children}</>;
@@ -54,8 +53,7 @@ function SuperadminOnly({ children }: { children: React.ReactNode }) {
 }
 
 function RootRedirect() {
-  const token = localStorage.getItem('auth_token');
-  return <Navigate to={token ? '/dashboard' : '/login'} replace />;
+  return <Navigate to={isAuthFlagSet() ? '/dashboard' : '/login'} replace />;
 }
 
 export default function App() {

@@ -78,6 +78,8 @@ def _chat_to_response(c: Chat) -> ChatResponse:
         created_by=c.created_by,
         created_at=c.created_at,
         updated_at=c.updated_at,
+        flagged_issue=c.flagged_issue,
+        flagged_at=c.flagged_at,
     )
 
 
@@ -317,6 +319,7 @@ async def send_message(
                 db=db,
                 user_message_id=str(user_message.id),
                 api_key_id=str(auth.api_key.id),
+                voice_mode=getattr(body, "voice_mode", False),
             )
         except ThrottleRejected as exc:
             raise HTTPException(
@@ -343,6 +346,7 @@ async def send_message(
             "attachment_summary": llm_result.get("attachment_summary"),
             "context_card": llm_result.get("context_card"),
             "history_exclude": llm_result.get("history_exclude"),
+            "tier0": llm_result.get("tier0"),
         }
         assistant_status = "sent"
     except ImportError:
@@ -404,6 +408,8 @@ def _build_assistant_metadata(llm_result: dict | None) -> dict | None:
         "attachment_summary": llm_result.get("attachment_summary"),
         "context_card": llm_result.get("context_card"),
         "history_exclude": llm_result.get("history_exclude"),
+        "context_warning": llm_result.get("context_warning"),
+        "tier0": llm_result.get("tier0"),
     }
 
 
@@ -422,6 +428,7 @@ PUBLIC_SSE_EVENTS = {
     "merge_start",
     "tool_call_start",
     "tool_call_done",
+    "context_warning",
 }
 
 
@@ -552,6 +559,7 @@ async def send_message_stream(
                         user_message_id=user_message_id,
                         api_key_id=api_key_id_str,
                         on_event=emitter,
+                        voice_mode=getattr(body, "voice_mode", False),
                     )
                     await fresh_db.commit()
                 final_id = await _save_assistant(result.get("content", ""), llm_result=result)
@@ -614,6 +622,7 @@ async def send_message_with_files(
     # POST .../attachments/draft. They get reparented to the new user message
     # without re-processing — summaries are already there.
     attachment_ids: Optional[str] = Form(default=None),
+    voice_mode: bool = Form(default=False),
     db: AsyncSession = Depends(get_db),
     auth: TenantAuthContext = Depends(get_current_tenant_auth_context),
 ):
@@ -762,6 +771,7 @@ async def send_message_with_files(
             user_content=content, db=db,
             user_message_id=str(user_message.id),
             api_key_id=str(auth.api_key.id),
+            voice_mode=voice_mode,
         )
 
         assistant_content = llm_result.get("content", "")

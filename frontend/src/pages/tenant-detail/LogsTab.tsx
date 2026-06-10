@@ -21,15 +21,12 @@ import {
   Stack,
   Switch,
   Table,
+  Tabs,
   Text,
   TextInput,
-  ThemeIcon,
-  Timeline,
   Tooltip,
 } from '@mantine/core';
 import {
-  IconArrowBack,
-  IconArrowRight,
   IconCheck,
   IconCopy,
   IconMaximize,
@@ -1039,6 +1036,11 @@ export function LogsTab({ tenantId }: LogsTabProps) {
         title="Детали лога"
         position="right"
         size="xl"
+        // Закрытие Drawer'а только по крестику. Нужно потому что внутри
+        // открываются Modal'ы (tool-call detail, tool-payload detail) —
+        // клик по их подложке или Escape иначе закрывают и сам Drawer.
+        closeOnClickOutside={false}
+        closeOnEscape={false}
       >
         {detailLoading ? (
           <Center py="md"><Loader /></Center>
@@ -1052,99 +1054,400 @@ export function LogsTab({ tenantId }: LogsTabProps) {
   );
 }
 
-function ToolExecutionView({ toolExecution }: { toolExecution: ToolExecutionEntry[] }) {
-  const items: Array<{ type: 'call' | 'result'; name?: string; arguments?: unknown; content?: unknown }> = [];
+// =====================================================================
+// Debug-trace views (rendered when llm_request_logs.debug is populated).
+// =====================================================================
 
-  for (const entry of toolExecution) {
-    if (entry.role === 'assistant_tool_calls' && Array.isArray(entry.calls)) {
-      for (const call of entry.calls as Array<{ name?: string; arguments?: unknown }>) {
-        items.push({ type: 'call', name: call.name, arguments: call.arguments });
+type DebugToolCall = {
+  round: number;
+  name: string;
+  args_preview: string;
+  ok: boolean;
+  latency_ms: number;
+  output_chars: number;
+};
+
+type DebugRound = {
+  round: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  latency_ms: number;
+  has_tool_calls: boolean;
+  tool_calls_count: number;
+  messages_snapshot?: Array<{
+    role: string;
+    chars: number;
+    est_tokens: number;
+    brief: string;
+    tool_calls?: string[];
+    tool_call_id?: string;
+  }>;
+  response_content_chars?: number;
+  response_reasoning_chars?: number;
+  artifacts_captured?: Array<{ tool_name: string; artifact_id: string | null }>;
+};
+
+type DebugToolPayloadEntry = {
+  name: string;
+  source: string;
+  similarity: number | null;
+  description_chars: number;
+  parameters_chars: number;
+  description: string;
+  parameters: unknown;
+};
+
+type ToolExecutionPair = {
+  name: string;
+  args: unknown;
+  result: unknown;
+  resultIsError?: boolean;
+};
+
+function _pairExecutionByName(exec: ToolExecutionEntry[]): ToolExecutionPair[] {
+  // tool_execution interleaves: assistant_tool_calls (with N calls) then N tool results.
+  const pairs: ToolExecutionPair[] = [];
+  const pendingCalls: Array<{ name: string; args: unknown }> = [];
+  for (const e of exec || []) {
+    if (e.role === 'assistant_tool_calls' && Array.isArray(e.calls)) {
+      for (const c of e.calls as Array<{ name?: string; arguments?: unknown }>) {
+        pendingCalls.push({ name: c.name || 'unknown', args: c.arguments });
       }
-    } else if (entry.role === 'tool') {
-      items.push({ type: 'result', content: entry.content });
+    } else if (e.role === 'tool') {
+      const call = pendingCalls.shift();
+      if (call) {
+        const resultStr = typeof e.content === 'string' ? e.content : JSON.stringify(e.content);
+        const isErr = /^Ошибка:|"error"|HTTP 4\d\d|HTTP 5\d\d/i.test(resultStr || '');
+        pairs.push({ name: call.name, args: call.args, result: e.content, resultIsError: isErr });
+      }
     }
   }
+  return pairs;
+}
 
-  if (!items.length) {
-    return null;
+function _toolCallColor(call: DebugToolCall): { color: string; label: string } {
+  if (!call.ok) return { color: 'red', label: 'ERROR' };
+  if (call.output_chars === 0) return { color: 'gray', label: 'EMPTY' };
+  return { color: 'teal', label: 'OK' };
+}
+
+const _fmtN = (n: number | null | undefined): string =>
+  n == null ? '—' : Number(n).toLocaleString('ru-RU');
+
+function RoundsView(props: {
+  rounds: DebugRound[];
+  toolCalls: DebugToolCall[];
+  execution: ToolExecutionPair[];
+  onOpenCall: (entry: { call: DebugToolCall; execution?: ToolExecutionPair }) => void;
+  selectedTab: string;
+  onTabChange: (val: string) => void;
+}) {
+  const { rounds, toolCalls, execution, onOpenCall, selectedTab, onTabChange } = props;
+  if (!rounds.length) return null;
+
+  // Group tool calls by round (round=0 has no tool calls — it's the initial call;
+  // round N tool calls were emitted by round N-1's LLM response, executed before round N).
+  const callsByRound = new Map<number, DebugToolCall[]>();
+  for (const c of toolCalls) {
+    const arr = callsByRound.get(c.round) || [];
+    arr.push(c);
+    callsByRound.set(c.round, arr);
   }
 
-  return (
-    <Timeline active={items.length - 1} bulletSize={28} lineWidth={2}>
-      {items.map((item, idx) => (
-        <Timeline.Item
-          key={idx}
-          bullet={
-            <ThemeIcon
-              size={28}
-              variant="filled"
-              color={item.type === 'call' ? 'blue' : 'teal'}
-              radius="xl"
+  // Assign execution pairs in order (best-effort: pairs[i] aligns with the i-th call
+  // across all rounds, since both arrays are time-ordered).
+  let execIdx = 0;
+  const callExec = new Map<DebugToolCall, ToolExecutionPair | undefined>();
+  for (const c of toolCalls) {
+    callExec.set(c, execution[execIdx]);
+    execIdx += 1;
+  }
+
+  const totalPrompt = rounds.reduce((s, r) => s + (r.prompt_tokens || 0), 0);
+  const totalCompletion = rounds.reduce((s, r) => s + (r.completion_tokens || 0), 0);
+  const totalLatency = rounds.reduce((s, r) => s + (r.latency_ms || 0), 0);
+
+  const renderCallList = (calls: DebugToolCall[]) => {
+    if (!calls.length) {
+      return <Text size="xs" c="dimmed" fs="italic">— нет tool-вызовов —</Text>;
+    }
+    return (
+      <Stack gap={4}>
+        {calls.map((c, i) => {
+          const { color, label } = _toolCallColor(c);
+          return (
+            <Group
+              key={`${c.round}-${i}`}
+              gap="xs"
+              wrap="nowrap"
+              style={{ cursor: 'pointer', padding: '4px 6px', borderRadius: 4 }}
+              onClick={() => onOpenCall({ call: c, execution: callExec.get(c) })}
             >
-              {item.type === 'call' ? <IconArrowRight size={14} /> : <IconArrowBack size={14} />}
-            </ThemeIcon>
-          }
-          title={
-            item.type === 'call' ? (
-              <Group gap="xs">
-                <Badge variant="filled" color="blue" size="sm">CALL</Badge>
-                <Text size="sm" fw={600} ff="monospace">{item.name || 'unknown'}</Text>
+              <Badge variant="filled" color={color} size="xs" w={56}>{label}</Badge>
+              <Text size="xs" c="dimmed" w={28}>R{c.round}</Text>
+              <Text size="xs" ff="monospace" fw={500} style={{ flex: 1, minWidth: 0 }}>{c.name}</Text>
+              <Text size="xs" c="dimmed" style={{ whiteSpace: 'nowrap' }}>
+                {_fmtN(c.latency_ms)}ms · {_fmtN(c.output_chars)}ch
+              </Text>
+            </Group>
+          );
+        })}
+      </Stack>
+    );
+  };
+
+  return (
+    <Card withBorder>
+      <Stack gap="sm">
+        <Group justify="space-between">
+          <Text size="sm" fw={600}>Раунды LLM ({rounds.length})</Text>
+        </Group>
+
+        <Tabs value={selectedTab} onChange={(v) => v && onTabChange(v)} variant="outline">
+          <Tabs.List>
+            <Tabs.Tab value="summary">
+              <Group gap={4}>
+                <Text size="xs" fw={600}>Summary</Text>
+                <Badge size="xs" variant="light" color="gray">{toolCalls.length}</Badge>
               </Group>
-            ) : (
-              <Badge variant="filled" color="teal" size="sm">RESULT</Badge>
-            )
-          }
-        >
-          {item.type === 'call' && item.arguments != null && (
-            <Spoiler maxHeight={120} showLabel="Показать полностью" hideLabel="Свернуть" mt={4}>
-              <Code block style={{ fontSize: '12px' }}>
-                {typeof item.arguments === 'string'
-                  ? (() => {
-                      try {
-                        return JSON.stringify(JSON.parse(item.arguments), null, 2);
-                      } catch {
-                        return item.arguments;
-                      }
-                    })()
-                  : JSON.stringify(item.arguments, null, 2)}
-              </Code>
-            </Spoiler>
-          )}
-          {item.type === 'result' && item.content != null && item.content !== '' && (
-            <Spoiler maxHeight={120} showLabel="Показать полностью" hideLabel="Свернуть" mt={4}>
-              <ToolResultContent value={item.content} />
-            </Spoiler>
-          )}
-        </Timeline.Item>
-      ))}
-    </Timeline>
+            </Tabs.Tab>
+            {rounds.map((r) => {
+              const calls = callsByRound.get(r.round) || [];
+              const hasErr = calls.some((c) => !c.ok);
+              const hasEmpty = calls.some((c) => c.ok && c.output_chars === 0);
+              const dot = hasErr ? 'red' : (hasEmpty ? 'gray' : (calls.length ? 'teal' : 'indigo'));
+              return (
+                <Tabs.Tab
+                  key={r.round}
+                  value={`r${r.round}`}
+                  rightSection={
+                    <Badge variant="dot" color={dot} size="xs">{calls.length}</Badge>
+                  }
+                >
+                  R{r.round}
+                </Tabs.Tab>
+              );
+            })}
+          </Tabs.List>
+
+          <Tabs.Panel value="summary" pt="sm">
+            <Stack gap="xs">
+              <Group gap="md">
+                <Text size="xs" c="dimmed">
+                  Σ prompt: <Text component="span" fw={600} c="bright">{_fmtN(totalPrompt)}</Text>
+                </Text>
+                <Text size="xs" c="dimmed">
+                  Σ completion: <Text component="span" fw={600} c="bright">{_fmtN(totalCompletion)}</Text>
+                </Text>
+                <Text size="xs" c="dimmed">
+                  Σ latency: <Text component="span" fw={600} c="bright">{_fmtN(totalLatency)}ms</Text>
+                </Text>
+                <Text size="xs" c="dimmed">
+                  Раундов: <Text component="span" fw={600} c="bright">{rounds.length}</Text>
+                </Text>
+                <Text size="xs" c="dimmed">
+                  Tool calls: <Text component="span" fw={600} c="bright">{toolCalls.length}</Text>
+                </Text>
+              </Group>
+              <Text size="xs" c="dimmed">
+                Все tool-вызовы (в порядке выполнения, клик — детали):
+              </Text>
+              {renderCallList(toolCalls)}
+            </Stack>
+          </Tabs.Panel>
+
+          {rounds.map((r) => {
+            const calls = callsByRound.get(r.round) || [];
+            const snap = r.messages_snapshot || [];
+            const totalCtxChars = snap.reduce((s, m) => s + (m.chars || 0), 0);
+            const totalCtxTokens = snap.reduce((s, m) => s + (m.est_tokens || 0), 0);
+            const arts = r.artifacts_captured || [];
+            return (
+              <Tabs.Panel key={r.round} value={`r${r.round}`} pt="sm">
+                <Stack gap="sm">
+                  <Group gap="md">
+                    <Text size="xs" c="dimmed">
+                      prompt: <Text component="span" fw={600} c="bright">{_fmtN(r.prompt_tokens)}</Text>
+                    </Text>
+                    <Text size="xs" c="dimmed">
+                      completion: <Text component="span" fw={600} c="bright">{_fmtN(r.completion_tokens)}</Text>
+                    </Text>
+                    <Text size="xs" c="dimmed">
+                      latency: <Text component="span" fw={600} c="bright">{_fmtN(r.latency_ms)}ms</Text>
+                    </Text>
+                    {r.response_content_chars != null && (
+                      <Text size="xs" c="dimmed">
+                        ответ: <Text component="span" fw={600} c="bright">{_fmtN(r.response_content_chars)} симв</Text>
+                        {r.response_reasoning_chars ? <Text component="span" c="dimmed"> (reasoning {_fmtN(r.response_reasoning_chars)})</Text> : null}
+                      </Text>
+                    )}
+                    {r.has_tool_calls && (
+                      <Badge variant="light" color="blue" size="xs">
+                        → {r.tool_calls_count} tool call(s)
+                      </Badge>
+                    )}
+                  </Group>
+
+                  {/* Tool calls of this round (those triggered after this round's response) */}
+                  <div>
+                    <Text size="xs" fw={600} c="dimmed" mb={4}>Tool calls раунда</Text>
+                    {renderCallList(calls)}
+                  </div>
+
+                  {/* Context that went into the LLM for this round */}
+                  {snap.length > 0 && (
+                    <div>
+                      <Group justify="space-between" mb={4}>
+                        <Text size="xs" fw={600} c="dimmed">
+                          Контекст (что отправили в LLM)
+                        </Text>
+                        <Text size="xs" c="dimmed">
+                          {snap.length} сообщ. · Σ {_fmtN(totalCtxChars)} симв · ~{_fmtN(totalCtxTokens)} ток.
+                        </Text>
+                      </Group>
+                      <Stack gap={4}>
+                        {snap.map((m, i) => {
+                          const roleColor =
+                            m.role === 'system' ? 'gray' :
+                            m.role === 'user' ? 'green' :
+                            m.role === 'assistant' ? 'blue' :
+                            m.role === 'tool' ? 'teal' : 'orange';
+                          return (
+                            <Card key={i} withBorder padding="xs" bg="var(--mantine-color-body)">
+                              <Group justify="space-between" wrap="nowrap" mb={2}>
+                                <Group gap="xs">
+                                  <Badge color={roleColor} variant="filled" size="xs">{m.role}</Badge>
+                                  {m.tool_calls && m.tool_calls.length > 0 && (
+                                    <Text size="xs" c="dimmed">→ tool_calls: {m.tool_calls.join(', ')}</Text>
+                                  )}
+                                  {m.tool_call_id && (
+                                    <Text size="xs" c="dimmed">tool_call_id: {m.tool_call_id}</Text>
+                                  )}
+                                </Group>
+                                <Text size="xs" c="dimmed">{_fmtN(m.chars)} симв · ~{_fmtN(m.est_tokens)} ток</Text>
+                              </Group>
+                              <Text size="xs" ff="monospace" c="dimmed" style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                                {m.brief || '—'}
+                              </Text>
+                            </Card>
+                          );
+                        })}
+                      </Stack>
+                    </div>
+                  )}
+
+                  {/* Artifacts captured from THIS round's tool results */}
+                  {arts.length > 0 && (
+                    <div>
+                      <Text size="xs" fw={600} c="dimmed" mb={4}>
+                        Артефакты, созданные раундом ({arts.length})
+                      </Text>
+                      <Stack gap={3}>
+                        {arts.map((a, i) => (
+                          <Group key={i} gap="xs" wrap="nowrap">
+                            <Badge variant="light" color={a.artifact_id ? 'violet' : 'gray'} size="xs">
+                              {a.artifact_id ? 'saved' : 'skipped'}
+                            </Badge>
+                            <Text size="xs" ff="monospace">{a.tool_name}</Text>
+                            {a.artifact_id && (
+                              <Text size="xs" c="dimmed" ff="monospace" style={{ flex: 1, minWidth: 0 }}>
+                                id={a.artifact_id}
+                              </Text>
+                            )}
+                          </Group>
+                        ))}
+                      </Stack>
+                    </div>
+                  )}
+                </Stack>
+              </Tabs.Panel>
+            );
+          })}
+        </Tabs>
+      </Stack>
+    </Card>
   );
 }
 
-function PromptStructureView({ promptLayout }: { promptLayout: Record<string, unknown> }) {
+function _payloadSourceBadge(source: string, similarity: number | null) {
+  if (source === 'pinned') return { color: 'grape', label: 'pinned', tip: 'Закреплён админом — всегда в payload' };
+  if (source === 'builtin') return { color: 'cyan', label: 'builtin', tip: 'Системный tool из builtin_registry — всегда выше budget' };
+  if (source === 'semantic') {
+    const sim = similarity != null ? ` ${similarity.toFixed(2)}` : '';
+    return { color: 'green', label: `semantic${sim}`, tip: `Выбран по semantic similarity (cosine ${similarity ?? '?'})` };
+  }
+  if (source && source.startsWith('route:')) {
+    return { color: 'orange', label: source, tip: 'Выбран по доменному tool-route' };
+  }
+  if (source === 'keyword') return { color: 'yellow', label: 'keyword', tip: 'Выбран keyword-matcher (fallback)' };
+  if (source === 'llm-pick') return { color: 'lime', label: 'llm-pick', tip: 'Выбран отдельным LLM-выбором (последний fallback)' };
+  if (source === 'non-embedded-fallback') return { color: 'gray', label: 'no-embed', tip: 'Без embedding — добавлен сверху semantic-выборки' };
+  if (source === 'attachment') return { color: 'violet', label: 'attachment', tip: 'Поиск внутри вложений чата' };
+  return { color: 'gray', label: source || 'unknown', tip: source };
+}
+
+
+type SystemBlock = { label: string; content: string; chars: number; est_tokens: number };
+
+function asSystemBlock(value: unknown): SystemBlock | null {
+  if (!isPlainObject(value)) return null;
+  return {
+    label: typeof value.label === 'string' ? value.label : 'System block',
+    content: typeof value.content === 'string' ? value.content : '',
+    chars: typeof value.chars === 'number' ? value.chars : 0,
+    est_tokens: typeof value.est_tokens === 'number' ? value.est_tokens : 0,
+  };
+}
+
+function systemBlockColor(label: string): string {
+  const u = label.toLowerCase();
+  if (u.startsWith('hardcoded')) return 'indigo';
+  if (u.startsWith('block-memory')) return 'grape';
+  if (u.startsWith('block-kb')) return 'teal';
+  if (u.startsWith('block-attachments')) return 'pink';
+  if (u.startsWith('history-resumes')) return 'orange';
+  if (u.startsWith('tenant')) return 'cyan';
+  if (u.startsWith('language')) return 'lime';
+  return 'gray';
+}
+
+function PromptStructureView(props: {
+  promptLayout: Record<string, unknown>;
+  toolsPayload?: DebugToolPayloadEntry[];
+  onOpenTool?: (entry: DebugToolPayloadEntry) => void;
+}) {
+  const { promptLayout, toolsPayload, onOpenTool } = props;
   const rawSections = Array.isArray(promptLayout.sections) ? promptLayout.sections : [];
   const sections = rawSections.map(asPromptLayoutSection).filter((x): x is PromptLayoutSection => !!x);
+  const rawBlocks = Array.isArray(promptLayout.system_blocks) ? promptLayout.system_blocks : [];
+  const systemBlocks = rawBlocks.map(asSystemBlock).filter((x): x is SystemBlock => !!x);
   const tools = isPlainObject(promptLayout.tools) ? promptLayout.tools : null;
   const toolNames = Array.isArray(tools?.names)
     ? tools.names.filter((x): x is string => typeof x === 'string')
     : [];
   const mode = typeof promptLayout.mode === 'string' ? promptLayout.mode : null;
+  const enrichedTools = (toolsPayload && toolsPayload.length > 0) ? toolsPayload : null;
 
-  if (!sections.length) {
+  if (!sections.length && systemBlocks.length === 0) {
     return null;
   }
+
+  // Pull the user's current question out of sections — it's THE thing
+  // admins look for and we want it rendered prominently at the top, not
+  // buried below 15 system blocks.
+  const currentRequest = sections.find((s) => s.kind === 'current_request') || null;
+  const nonRequestSections = sections.filter((s) => s.kind !== 'current_request');
+  const systemInstrIdx = nonRequestSections.findIndex((s) => s.kind === 'system_instructions');
 
   const colorByKind: Record<string, string> = {
     system_instructions: 'gray',
     history_reference: 'orange',
-    current_request: 'green',
     history_message: 'blue',
   };
 
   const labelByKind: Record<string, string> = {
     system_instructions: 'SYSTEM',
     history_reference: 'HISTORY',
-    current_request: 'CURRENT',
     history_message: 'CHAT',
   };
 
@@ -1160,30 +1463,93 @@ function PromptStructureView({ promptLayout }: { promptLayout: Record<string, un
                 : 'Обычный режим диалога без специального разделения истории.'}
             </Text>
           </div>
-          {toolNames.length > 0 && (
+          {(enrichedTools?.length ?? toolNames.length) > 0 && (
             <Badge variant="light" color="blue">
-              Tools: {toolNames.length}
+              Tools: {enrichedTools?.length ?? toolNames.length}
             </Badge>
           )}
         </Group>
 
-        {toolNames.length > 0 && (
-          <Group gap={6}>
-            {toolNames.map((name) => (
-              <Badge key={name} variant="light" color="blue" ff="monospace">
-                {name}
-              </Badge>
-            ))}
-          </Group>
+        {currentRequest && (() => {
+          const reqContent = typeof currentRequest.content === 'string' ? currentRequest.content : '';
+          const reqChars = typeof currentRequest.chars === 'number' ? currentRequest.chars : 0;
+          const reqTokens = typeof currentRequest.est_tokens === 'number' ? currentRequest.est_tokens : 0;
+          return (
+            <Card
+              withBorder
+              padding="md"
+              radius="md"
+              style={{
+                borderColor: 'var(--mantine-color-green-6)',
+                borderWidth: 2,
+                background: 'var(--mantine-color-green-light)',
+              }}
+            >
+              <Stack gap={4}>
+                <Group justify="space-between" align="center">
+                  <Group gap="xs">
+                    <Badge variant="filled" color="green" size="lg">📍 Запрос пользователя</Badge>
+                    <Text size="xs" c="dimmed">— то что прислал юзер в этом обмене</Text>
+                  </Group>
+                  <Text size="xs" c="dimmed">
+                    {reqChars} симв · ~{reqTokens} ток
+                  </Text>
+                </Group>
+                <Code block style={{ fontSize: '13px', whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontWeight: 500 }}>
+                  {reqContent || '—'}
+                </Code>
+              </Stack>
+            </Card>
+          );
+        })()}
+
+        {enrichedTools ? (
+          <>
+            <Text size="xs" c="dimmed">
+              Tools в порядке payload (клик — детали; цвет = источник).
+            </Text>
+            <Group gap={6}>
+              {enrichedTools.map((t) => {
+                const b = _payloadSourceBadge(t.source, t.similarity);
+                return (
+                  <Tooltip key={t.name} label={`${b.tip} · ${t.description_chars}+${t.parameters_chars} симв`} multiline w={280}>
+                    <Badge
+                      variant="light"
+                      color={b.color}
+                      ff="monospace"
+                      style={{ cursor: onOpenTool ? 'pointer' : 'default' }}
+                      onClick={() => onOpenTool?.(t)}
+                      rightSection={
+                        <Text size="xs" c="dimmed" component="span" ml={4}>· {b.label}</Text>
+                      }
+                    >
+                      {t.name}
+                    </Badge>
+                  </Tooltip>
+                );
+              })}
+            </Group>
+          </>
+        ) : (
+          toolNames.length > 0 && (
+            <Group gap={6}>
+              {toolNames.map((name) => (
+                <Badge key={name} variant="light" color="blue" ff="monospace">
+                  {name}
+                </Badge>
+              ))}
+            </Group>
+          )
         )}
 
         <Stack gap="xs">
-          {sections.map((section, index) => {
+          {nonRequestSections.map((section, index) => {
             const kind = typeof section.kind === 'string' ? section.kind : 'history_message';
             const title = typeof section.title === 'string' ? section.title : 'Секция';
             const content = typeof section.content === 'string' ? section.content : '';
             const chars = typeof section.chars === 'number' ? section.chars : null;
             const estTokens = typeof section.est_tokens === 'number' ? section.est_tokens : null;
+            const isSystemInstructions = kind === 'system_instructions' && index === systemInstrIdx;
 
             return (
               <Card key={`${kind}-${index}`} withBorder padding="sm" bg="var(--mantine-color-body)">
@@ -1194,15 +1560,68 @@ function PromptStructureView({ promptLayout }: { promptLayout: Record<string, un
                         {labelByKind[kind] || kind.toUpperCase()}
                       </Badge>
                       <Text size="sm" fw={500}>{title}</Text>
+                      {isSystemInstructions && systemBlocks.length > 0 && (
+                        <Badge variant="light" color="indigo" size="sm">
+                          {systemBlocks.length} блоков
+                        </Badge>
+                      )}
                     </Group>
                     <Text size="xs" c="dimmed">
                       {chars != null ? `${chars} симв.` : '-'}
                       {estTokens != null ? ` · ~${estTokens} ток.` : ''}
                     </Text>
                   </Group>
-                  <Code block style={{ fontSize: '12px', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                    {content || '—'}
-                  </Code>
+
+                  {isSystemInstructions && systemBlocks.length > 0 ? (
+                    <Stack gap={6}>
+                      <Text size="xs" c="dimmed">
+                        System-сообщение собирается из этих именованных блоков (порядок = порядок в промпте).
+                        Раскройте, чтобы увидеть содержимое каждого.
+                      </Text>
+                      {systemBlocks.map((blk, i) => {
+                        const color = systemBlockColor(blk.label);
+                        return (
+                          <details key={i}>
+                            <summary
+                              style={{
+                                cursor: 'pointer',
+                                listStyle: 'none',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: 8,
+                                padding: '4px 6px',
+                                borderRadius: 4,
+                                userSelect: 'none',
+                              }}
+                              onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--mantine-color-default-hover)'; }}
+                              onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
+                            >
+                              <Text size="xs" c="dimmed" style={{ cursor: 'pointer' }}>▸</Text>
+                              <Badge
+                                variant="light"
+                                color={color}
+                                ff="monospace"
+                                size="sm"
+                                style={{ cursor: 'pointer' }}
+                              >
+                                {blk.label}
+                              </Badge>
+                              <Text size="xs" c="dimmed" style={{ cursor: 'pointer' }}>
+                                {blk.chars} симв · ~{blk.est_tokens} ток
+                              </Text>
+                            </summary>
+                            <Code block mt={4} style={{ fontSize: '11.5px', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                              {blk.content || '—'}
+                            </Code>
+                          </details>
+                        );
+                      })}
+                    </Stack>
+                  ) : (
+                    <Code block style={{ fontSize: '12px', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                      {content || '—'}
+                    </Code>
+                  )}
                 </Stack>
               </Card>
             );
@@ -1213,10 +1632,145 @@ function PromptStructureView({ promptLayout }: { promptLayout: Record<string, un
   );
 }
 
+function TokenBreakdownView(props: {
+  selectedTab: string;
+  rounds: DebugRound[];
+  logDetail: LLMLogDetail;
+}) {
+  const { selectedTab, rounds, logDetail } = props;
+
+  if (selectedTab === 'summary') {
+    const parts = [
+      { name: 'system', value: logDetail.tokens_system, color: 'indigo' },
+      { name: 'tools', value: logDetail.tokens_tools, color: 'blue' },
+      { name: 'memory', value: logDetail.tokens_memory, color: 'grape' },
+      { name: 'kb', value: logDetail.tokens_kb, color: 'teal' },
+      { name: 'history', value: logDetail.tokens_history, color: 'orange' },
+      { name: 'user', value: logDetail.tokens_user, color: 'green' },
+    ];
+    const has = parts.some((p) => p.value != null && p.value > 0);
+    if (!has) return null;
+    const total = parts.reduce((s, p) => s + (p.value || 0), 0);
+    const partLabels: Record<string, string> = {
+      system: 'System', tools: 'Tools', memory: 'Memory', kb: 'KB', history: 'История', user: 'Запрос',
+    };
+    const visible = parts.filter((p) => p.value && p.value > 0).sort((a, b) => (b.value || 0) - (a.value || 0));
+    return (
+      <Card withBorder padding="sm">
+        <Text size="sm" fw={600} mb={8}>
+          Структура prompt начального раунда <Text component="span" size="xs" c="dimmed">(≈, tiktoken; за весь запрос)</Text>
+        </Text>
+        <div style={{ display: 'flex', width: '100%', height: 18, borderRadius: 4, overflow: 'hidden', marginBottom: 10, border: '1px solid var(--mantine-color-gray-3)' }}>
+          {visible.map((p) => {
+            const pct = total > 0 ? (p.value! / total) * 100 : 0;
+            return (
+              <Tooltip key={p.name} label={`${partLabels[p.name] || p.name}: ${_fmtN(p.value!)} (${pct.toFixed(1)}%)`}>
+                <div style={{ width: `${pct}%`, backgroundColor: `var(--mantine-color-${p.color}-6)`, cursor: 'help' }} />
+              </Tooltip>
+            );
+          })}
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr auto auto', columnGap: 12, rowGap: 6, alignItems: 'center' }}>
+          {visible.map((p) => {
+            const pct = total > 0 ? (p.value! / total) * 100 : 0;
+            return (
+              <React.Fragment key={p.name}>
+                <Badge size="sm" variant="dot" color={p.color} style={{ justifySelf: 'start' }}>{partLabels[p.name] || p.name}</Badge>
+                <Progress value={pct} color={p.color} size="md" radius="sm" />
+                <Text size="sm" ff="monospace" ta="right" style={{ minWidth: 64 }}>{_fmtN(p.value!)}</Text>
+                <Text size="xs" c="dimmed" ta="right" style={{ minWidth: 48 }}>{pct.toFixed(1)}%</Text>
+              </React.Fragment>
+            );
+          })}
+        </div>
+        <Text size="xs" c="dimmed" mt={10}>
+          Σ начальный раунд: <b>{_fmtN(total)}</b> токенов
+          {logDetail.tool_calls_count && logDetail.tool_calls_count > 0
+            ? <> · провайдер посчитал <b>{_fmtN(logDetail.prompt_tokens ?? null)}</b> суммарно по {logDetail.tool_calls_count + 1} раундам</>
+            : <> ≈ {_fmtN(logDetail.prompt_tokens ?? null)} (точное от провайдера)</>}
+        </Text>
+      </Card>
+    );
+  }
+
+  // Per-round view: bucket the round's messages_snapshot by role.
+  const m = /^r(\d+)$/.exec(selectedTab);
+  if (!m) return null;
+  const rNum = Number(m[1]);
+  const round = rounds.find((x) => x.round === rNum);
+  if (!round || !round.messages_snapshot) return null;
+
+  const roleColors: Record<string, string> = {
+    system: 'indigo', user: 'green', assistant: 'blue', tool: 'teal',
+  };
+  const buckets = new Map<string, { count: number; chars: number; tokens: number }>();
+  for (const msg of round.messages_snapshot) {
+    const b = buckets.get(msg.role) || { count: 0, chars: 0, tokens: 0 };
+    b.count += 1;
+    b.chars += msg.chars || 0;
+    b.tokens += msg.est_tokens || 0;
+    buckets.set(msg.role, b);
+  }
+  const rows = Array.from(buckets.entries()).map(([role, b]) => ({ role, ...b }))
+    .sort((a, b) => b.tokens - a.tokens);
+  const totalTokens = rows.reduce((s, r) => s + r.tokens, 0);
+  const totalChars = rows.reduce((s, r) => s + r.chars, 0);
+
+  return (
+    <Card withBorder padding="sm">
+      <Text size="sm" fw={600} mb={8}>
+        Структура prompt раунда R{rNum} <Text component="span" size="xs" c="dimmed">(по ролям, ≈ tiktoken)</Text>
+      </Text>
+      <div style={{ display: 'flex', width: '100%', height: 18, borderRadius: 4, overflow: 'hidden', marginBottom: 10, border: '1px solid var(--mantine-color-gray-3)' }}>
+        {rows.map((r) => {
+          const pct = totalTokens > 0 ? (r.tokens / totalTokens) * 100 : 0;
+          const color = roleColors[r.role] || 'gray';
+          return (
+            <Tooltip key={r.role} label={`${r.role}: ${_fmtN(r.tokens)} ток (${pct.toFixed(1)}%)`}>
+              <div style={{ width: `${pct}%`, backgroundColor: `var(--mantine-color-${color}-6)`, cursor: 'help' }} />
+            </Tooltip>
+          );
+        })}
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr auto auto auto', columnGap: 12, rowGap: 6, alignItems: 'center' }}>
+        {rows.map((r) => {
+          const pct = totalTokens > 0 ? (r.tokens / totalTokens) * 100 : 0;
+          const color = roleColors[r.role] || 'gray';
+          return (
+            <React.Fragment key={r.role}>
+              <Badge size="sm" variant="dot" color={color}>{r.role} ×{r.count}</Badge>
+              <Progress value={pct} color={color} size="md" radius="sm" />
+              <Text size="sm" ff="monospace" ta="right">{_fmtN(r.tokens)} ток</Text>
+              <Text size="xs" c="dimmed" ta="right">{_fmtN(r.chars)} симв</Text>
+              <Text size="xs" c="dimmed" ta="right" style={{ minWidth: 48 }}>{pct.toFixed(1)}%</Text>
+            </React.Fragment>
+          );
+        })}
+      </div>
+      <Text size="xs" c="dimmed" mt={10}>
+        Σ R{rNum}: <b>{_fmtN(totalTokens)}</b> ≈ ток · {_fmtN(totalChars)} симв · провайдер посчитал <b>{_fmtN(round.prompt_tokens)}</b> на этом раунде
+      </Text>
+    </Card>
+  );
+}
+
 function LogDetailView({ logDetail }: { logDetail: LLMLogDetail }) {
   const toolExecution = (logDetail.normalized_response as Record<string, unknown> | null)?.tool_execution as
     ToolExecutionEntry[] | undefined;
   const promptLayout = (logDetail.normalized_request as Record<string, unknown> | null)?.prompt_layout;
+  const debug = (logDetail.debug as Record<string, unknown> | null) || null;
+  const debugRounds = (debug?.rounds as DebugRound[] | undefined) || [];
+  const debugToolCalls = (debug?.tool_calls as DebugToolCall[] | undefined) || [];
+  const debugToolsPayload = (debug?.tools_payload as DebugToolPayloadEntry[] | undefined) || [];
+  const debugUserQuery = (debug?.user_query as string | undefined) || '';
+  const executionPairs = useMemo(
+    () => _pairExecutionByName(toolExecution || []),
+    [toolExecution],
+  );
+  const [openCall, setOpenCall] = useState<{ call: DebugToolCall; execution?: ToolExecutionPair } | null>(null);
+  const [openPayloadTool, setOpenPayloadTool] = useState<DebugToolPayloadEntry | null>(null);
+  // Round tab state lifted up so TokenBreakdownView reacts to it too.
+  const [selectedRoundTab, setSelectedRoundTab] = useState<string>('summary');
 
   return (
     <ScrollArea h="calc(100vh - 100px)">
@@ -1239,104 +1793,6 @@ function LogDetailView({ logDetail }: { logDetail: LLMLogDetail }) {
                 Промпт: {logDetail.prompt_tokens?.toLocaleString('ru-RU') ?? '-'} | Ответ: {logDetail.completion_tokens?.toLocaleString('ru-RU') ?? '-'} | Всего: {logDetail.total_tokens?.toLocaleString('ru-RU') ?? '-'}
               </Text>
             </Group>
-            {(() => {
-              const parts = [
-                { name: 'system', value: logDetail.tokens_system, color: 'indigo' },
-                { name: 'tools', value: logDetail.tokens_tools, color: 'blue' },
-                { name: 'memory', value: logDetail.tokens_memory, color: 'grape' },
-                { name: 'kb', value: logDetail.tokens_kb, color: 'teal' },
-                { name: 'history', value: logDetail.tokens_history, color: 'orange' },
-                { name: 'user', value: logDetail.tokens_user, color: 'green' },
-              ];
-              const has = parts.some((p) => p.value != null && p.value > 0);
-              if (!has) return null;
-              const total = parts.reduce((s, p) => s + (p.value || 0), 0);
-              const partLabels: Record<string, string> = {
-                system: 'System',
-                tools: 'Tools',
-                memory: 'Memory',
-                kb: 'KB',
-                history: 'История',
-                user: 'Запрос',
-              };
-              const visible = parts.filter((p) => p.value && p.value > 0)
-                .sort((a, b) => (b.value || 0) - (a.value || 0));
-              return (
-                <Card withBorder padding="sm" mt="xs">
-                  <Text size="sm" fw={600} mb={8}>
-                    Структура prompt начального раунда <Text component="span" size="xs" c="dimmed">(≈, tiktoken)</Text>
-                  </Text>
-
-                  {/* Stacked bar — all sections in one row, proportionally */}
-                  <div
-                    style={{
-                      display: 'flex',
-                      width: '100%',
-                      height: 18,
-                      borderRadius: 4,
-                      overflow: 'hidden',
-                      marginBottom: 10,
-                      border: '1px solid var(--mantine-color-gray-3)',
-                    }}
-                  >
-                    {visible.map((p) => {
-                      const pct = total > 0 ? (p.value! / total) * 100 : 0;
-                      return (
-                        <Tooltip
-                          key={p.name}
-                          label={`${partLabels[p.name] || p.name}: ${p.value!.toLocaleString('ru-RU')} (${pct.toFixed(1)}%)`}
-                        >
-                          <div
-                            style={{
-                              width: `${pct}%`,
-                              backgroundColor: `var(--mantine-color-${p.color}-6)`,
-                              cursor: 'help',
-                            }}
-                          />
-                        </Tooltip>
-                      );
-                    })}
-                  </div>
-
-                  {/* Aligned grid: label · count · % · sparkline */}
-                  <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr auto auto', columnGap: 12, rowGap: 6, alignItems: 'center' }}>
-                    {visible.map((p) => {
-                      const pct = total > 0 ? (p.value! / total) * 100 : 0;
-                      return (
-                        <React.Fragment key={p.name}>
-                          <Badge size="sm" variant="dot" color={p.color} style={{ justifySelf: 'start' }}>
-                            {partLabels[p.name] || p.name}
-                          </Badge>
-                          <Progress value={pct} color={p.color} size="md" radius="sm" />
-                          <Text size="sm" ff="monospace" ta="right" style={{ minWidth: 64 }}>
-                            {p.value!.toLocaleString('ru-RU')}
-                          </Text>
-                          <Text size="xs" c="dimmed" ta="right" style={{ minWidth: 48 }}>
-                            {pct.toFixed(1)}%
-                          </Text>
-                        </React.Fragment>
-                      );
-                    })}
-                  </div>
-
-                  <Text size="xs" c="dimmed" mt={10}>
-                    Σ начальный раунд: <b>{total.toLocaleString('ru-RU')}</b> токенов
-                    {logDetail.tool_calls_count && logDetail.tool_calls_count > 0 ? (
-                      <>
-                        {' · '}провайдер посчитал{' '}
-                        <b>{logDetail.prompt_tokens?.toLocaleString('ru-RU') ?? '?'}</b>{' '}
-                        суммарно по {logDetail.tool_calls_count + 1} раундам (tool-результаты
-                        наращивают prompt с каждым)
-                      </>
-                    ) : (
-                      <>
-                        {' ≈ '}{logDetail.prompt_tokens?.toLocaleString('ru-RU') ?? '?'} (точное от провайдера)
-                      </>
-                    )}
-                  </Text>
-                </Card>
-              );
-            })()}
             <Group>
               <Text size="sm" fw={500}>Задержка:</Text>
               <Text size="sm">
@@ -1367,21 +1823,47 @@ function LogDetailView({ logDetail }: { logDetail: LLMLogDetail }) {
           </Stack>
         </Card>
 
-        {isPlainObject(promptLayout) && <PromptStructureView promptLayout={promptLayout} />}
+        {debugRounds.length > 0 && (
+          <RoundsView
+            rounds={debugRounds}
+            toolCalls={debugToolCalls}
+            execution={executionPairs}
+            onOpenCall={setOpenCall}
+            selectedTab={selectedRoundTab}
+            onTabChange={setSelectedRoundTab}
+          />
+        )}
 
-        {toolExecution && toolExecution.length > 0 && (
-          <Card withBorder>
-            <Text size="sm" fw={600} mb="md">
-              <Group gap="xs">
-                <IconTool size={16} />
-                Выполнение инструментов
-              </Group>
-            </Text>
-            <ToolExecutionView toolExecution={toolExecution} />
-          </Card>
+        {(debugRounds.length > 0 || logDetail.tokens_user) && (
+          <TokenBreakdownView
+            selectedTab={selectedRoundTab}
+            rounds={debugRounds}
+            logDetail={logDetail}
+          />
+        )}
+
+        {isPlainObject(promptLayout) && (
+          <PromptStructureView
+            promptLayout={promptLayout}
+            toolsPayload={debugToolsPayload}
+            onOpenTool={setOpenPayloadTool}
+          />
         )}
 
         <Accordion variant="separated">
+          {logDetail.debug && (
+            <Accordion.Item value="debug">
+              <Accordion.Control>
+                <Text size="sm" fw={500} c="teal">Debug-трейс (телеметрия)</Text>
+              </Accordion.Control>
+              <Accordion.Panel>
+                <Code block style={{ maxHeight: 500, overflow: 'auto' }}>
+                  {JSON.stringify(logDetail.debug, null, 2)}
+                </Code>
+              </Accordion.Panel>
+            </Accordion.Item>
+          )}
+
           {logDetail.raw_request && (
             <Accordion.Item value="raw_request">
               <Accordion.Control>
@@ -1433,6 +1915,186 @@ function LogDetailView({ logDetail }: { logDetail: LLMLogDetail }) {
           )}
         </Accordion>
       </Stack>
+
+      {/* Tool-call detail modal (from RoundsView click) */}
+      <Modal
+        opened={!!openCall}
+        onClose={() => setOpenCall(null)}
+        title={openCall ? `Tool: ${openCall.call.name} (R${openCall.call.round})` : ''}
+        size="xl"
+        scrollAreaComponent={ScrollArea.Autosize}
+      >
+        {openCall && (() => {
+          const { call, execution } = openCall;
+          const { color, label } = _toolCallColor(call);
+          const formatArgs = (raw: unknown): string => {
+            if (typeof raw === 'string') {
+              try { return JSON.stringify(JSON.parse(raw), null, 2); } catch { return raw; }
+            }
+            return JSON.stringify(raw, null, 2);
+          };
+          return (
+            <Stack gap="sm">
+              <Group>
+                <Badge color={color} size="md">{label}</Badge>
+                <Text size="xs" c="dimmed">
+                  Round {call.round} · {_fmtN(call.latency_ms)}ms · output {_fmtN(call.output_chars)} симв
+                </Text>
+              </Group>
+              <Text size="xs" fw={600} c="dimmed">Arguments</Text>
+              <Code block style={{ fontSize: 12, whiteSpace: 'pre-wrap', maxHeight: 250, overflow: 'auto' }}>
+                {execution ? formatArgs(execution.args) : (call.args_preview || '—') + ' (preview)'}
+              </Code>
+              <Text size="xs" fw={600} c="dimmed">Result</Text>
+              {execution
+                ? <ToolResultContent value={execution.result} />
+                : <Code block style={{ fontSize: 12 }}>{'(полный текст недоступен; есть только output_chars=' + _fmtN(call.output_chars) + ')'}</Code>}
+            </Stack>
+          );
+        })()}
+      </Modal>
+
+      {/* Tool-in-payload detail modal (from PromptStructureView click) */}
+      <Modal
+        opened={!!openPayloadTool}
+        onClose={() => setOpenPayloadTool(null)}
+        title={openPayloadTool ? `Tool в payload: ${openPayloadTool.name}` : ''}
+        size="xl"
+        scrollAreaComponent={ScrollArea.Autosize}
+      >
+        {openPayloadTool && (() => {
+          const t = openPayloadTool;
+          const b = _payloadSourceBadge(t.source, t.similarity);
+
+          // Per-source explanation block — what "why this tool got here" means.
+          let whyBlock: React.ReactNode = null;
+          if (t.source === 'semantic') {
+            whyBlock = (
+              <Card withBorder padding="xs" bg="var(--mantine-color-green-light)">
+                <Text size="xs" fw={600} mb={4}>Почему semantic выбрал именно его</Text>
+                <Text size="xs" c="dimmed" mb={4}>
+                  Запрос пользователя эмбеддится и сравнивается через cosine similarity с эмбеддингом
+                  каждого tool (name + description + parameter descriptions + теги + примеры). Берутся
+                  top-18 по близости (`TOOL_SEMANTIC_TOPK`), затем bucket режется до бюджета модели
+                  (~8 для qwen). <b>Floor отсечения по similarity у tools нет</b> — попадание зависит
+                  только от ранга в top-18 и места в бюджете.
+                </Text>
+                <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', columnGap: 8, rowGap: 4 }}>
+                  <Text size="xs" c="dimmed">similarity:</Text>
+                  <Text size="xs" ff="monospace" fw={600}>
+                    {t.similarity != null ? t.similarity.toFixed(3) : '—'}
+                    {t.similarity != null && (
+                      <Text component="span" c="dimmed" ml={6}>
+                        ({t.similarity >= 0.7 ? 'сильный матч'
+                          : t.similarity >= 0.5 ? 'средний'
+                          : t.similarity >= 0.4 ? 'слабый'
+                          : 'очень слабый — но попал по top-K'})
+                      </Text>
+                    )}
+                  </Text>
+                  <Text size="xs" c="dimmed">user query:</Text>
+                  <Text size="xs" ff="monospace" style={{ wordBreak: 'break-word' }}>
+                    {debugUserQuery || '—'}
+                  </Text>
+                </div>
+                <Text size="xs" c="dimmed" mt={4}>
+                  Сопоставление шло по плотному embedding'у (см. description ниже) — keywords как
+                  таковых нет.
+                </Text>
+              </Card>
+            );
+          } else if (t.source === 'pinned') {
+            whyBlock = (
+              <Card withBorder padding="xs" bg="var(--mantine-color-grape-light)">
+                <Text size="xs" fw={600} mb={4}>Pinned</Text>
+                <Text size="xs" c="dimmed">
+                  Закреплён админом в Tools-табе (is_pinned=true) — всегда в payload, не конкурирует с semantic за бюджет.
+                </Text>
+              </Card>
+            );
+          } else if (t.source === 'builtin') {
+            whyBlock = (
+              <Card withBorder padding="xs" bg="var(--mantine-color-cyan-light)">
+                <Text size="xs" fw={600} mb={4}>Builtin</Text>
+                <Text size="xs" c="dimmed">
+                  Системный tool из builtin_registry (memory/artifacts/RAG/time). Живёт в коде, всегда добавляется поверх бюджета.
+                </Text>
+              </Card>
+            );
+          } else if (t.source.startsWith('route:')) {
+            whyBlock = (
+              <Card withBorder padding="xs" bg="var(--mantine-color-orange-light)">
+                <Text size="xs" fw={600} mb={4}>Route: {t.source.slice(6)}</Text>
+                <Text size="xs" c="dimmed">
+                  Запрос совпал с доменным tool-route — выбран фиксированный набор tools под этот сценарий, без semantic.
+                </Text>
+              </Card>
+            );
+          } else if (t.source === 'keyword') {
+            whyBlock = (
+              <Card withBorder padding="xs" bg="var(--mantine-color-yellow-light)">
+                <Text size="xs" fw={600} mb={4}>Keyword fallback</Text>
+                <Text size="xs" c="dimmed">
+                  Embeddings tools не оказалось / semantic не сработал. Выбор по ключевым словам description ↔ user query.
+                </Text>
+                {debugUserQuery && (
+                  <Text size="xs" ff="monospace" mt={4}>user query: {debugUserQuery}</Text>
+                )}
+              </Card>
+            );
+          } else if (t.source === 'llm-pick') {
+            whyBlock = (
+              <Card withBorder padding="xs" bg="var(--mantine-color-lime-light)">
+                <Text size="xs" fw={600} mb={4}>LLM-pick (последний fallback)</Text>
+                <Text size="xs" c="dimmed">
+                  Ни semantic, ни keyword не дали результата. Отдельный LLM-запрос выбрал tools по списку name+description.
+                </Text>
+              </Card>
+            );
+          } else if (t.source === 'non-embedded-fallback') {
+            whyBlock = (
+              <Card withBorder padding="xs">
+                <Text size="xs" fw={600} mb={4}>Без embedding</Text>
+                <Text size="xs" c="dimmed">
+                  У tool нет embedding (не успели проиндексировать?). Добавлен сверху semantic-выборки, чтобы не «терять» tools тихо.
+                </Text>
+              </Card>
+            );
+          } else if (t.source === 'attachment') {
+            whyBlock = (
+              <Card withBorder padding="xs" bg="var(--mantine-color-violet-light)">
+                <Text size="xs" fw={600} mb={4}>Attachment search</Text>
+                <Text size="xs" c="dimmed">
+                  Tool для поиска по конкретному вложению чата. Авто-создан на основании файлов прикреплённых к чату.
+                </Text>
+              </Card>
+            );
+          }
+
+          return (
+            <Stack gap="sm">
+              <Group>
+                <Badge color={b.color} size="md">{b.label}</Badge>
+                <Text size="xs" c="dimmed">{b.tip}</Text>
+              </Group>
+              <Group>
+                <Text size="xs" c="dimmed">
+                  description: {_fmtN(t.description_chars)} симв · parameters: {_fmtN(t.parameters_chars)} симв
+                </Text>
+              </Group>
+              {whyBlock}
+              <Text size="xs" fw={600} c="dimmed">Description (как видит модель)</Text>
+              <Code block style={{ fontSize: 12, whiteSpace: 'pre-wrap', maxHeight: 250, overflow: 'auto' }}>
+                {t.description || '—'}
+              </Code>
+              <Text size="xs" fw={600} c="dimmed">Parameters schema</Text>
+              <Code block style={{ fontSize: 12, whiteSpace: 'pre-wrap', maxHeight: 350, overflow: 'auto' }}>
+                {JSON.stringify(t.parameters, null, 2)}
+              </Code>
+            </Stack>
+          );
+        })()}
+      </Modal>
     </ScrollArea>
   );
 }

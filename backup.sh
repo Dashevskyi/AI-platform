@@ -33,9 +33,12 @@ tar czf "${BACKUP_DIR}/frontend.tar.gz" \
 echo "$(du -sh "${BACKUP_DIR}/frontend.tar.gz" | cut -f1)"
 
 echo -n "Root files... "
+# .env намеренно НЕ бэкапится: он содержит SECRET_KEY/ENCRYPTION_KEY, а рядом
+# в database.sql.gz лежат зашифрованные этим ключом credentials — вместе это
+# готовый комплект для компрометации. Храните копию .env отдельно (менеджер паролей).
 tar czf "${BACKUP_DIR}/root-files.tar.gz" \
   -C "${PROJECT_ROOT}" \
-  .env .env.example README.md backup.sh restore.sh
+  .env.example README.md backup.sh restore.sh
 echo "$(du -sh "${BACKUP_DIR}/root-files.tar.gz" | cut -f1)"
 
 echo -n "Database... "

@@ -150,18 +150,37 @@ def _resolve_thinking_kwargs(
     mode: str | None,
     user_content: str,
     has_tools: bool,
+    voice_mode: bool = False,
 ) -> dict | None:
     """Build extra_body for vLLM chat_template_kwargs.enable_thinking.
     Only models that honor this flag (Qwen3, DeepSeek-R1) react;
-    others (Qwen2.5, Llama, Mistral) silently ignore it."""
+    others (Qwen2.5, Llama, Mistral) silently ignore it.
+
+    `mode` ∈ {on, off, auto}.
+      off  → never reason.
+      on   → always reason.
+      auto → reason ONLY on the FINAL (no-tools) round. On tool-routing
+             rounds (has_tools=True) reasoning gets switched off because
+             the model otherwise loops trying to "figure out" the tool
+             schema in plain text instead of just emitting tool_calls.
+             Also forced off on short queries (<100 chars) regardless of
+             whether tools are present — those rarely need reasoning.
+
+    `voice_mode` → always forces off, regardless of `mode`. The reasoning
+      warmup adds ~5 s to TTFT which is unacceptable for real-time TTS."""
+    # Voice pipeline: any thinking latency is user-perceptible — force off.
+    if voice_mode:
+        return {"chat_template_kwargs": {"enable_thinking": False}}
     m = (mode or "on").lower()
     if m == "off":
         return {"chat_template_kwargs": {"enable_thinking": False}}
     if m == "auto":
         is_short = len((user_content or "").strip()) < 100
-        if is_short and not has_tools:
+        # Tool-routing rounds: kill reasoning to avoid Qwen3-thinking loops
+        # trying to imagine schema in prose. Short queries: don't need it.
+        if has_tools or is_short:
             return {"chat_template_kwargs": {"enable_thinking": False}}
-    # "on" or auto-needs-thinking → no override (model's default behavior)
+    # "on", or "auto" on a final no-tools long-form round → use model default.
     return None
 
 from sqlalchemy import select
@@ -188,12 +207,23 @@ from app.services.tools.executor import execute_tool
 from app.services.kb.embedder import search_kb_chunks
 from app.services.llm.model_resolver import resolve_model
 from app.services.llm.context_compressor import RECENT_MESSAGES_FULL, trim_tool_definitions
+from app.services.llm.system_blocks import STATIC_SYSTEM_BLOCKS
 from app.services.throttle import get_or_create_throttle, ThrottleRejected
 from app.models.tenant import Tenant
 
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_ROUNDS = 6  # prevent infinite tool-call loops
+DEFAULT_MAX_TOOL_ROUNDS = 6  # prevent infinite tool-call loops; per-tenant override in shell_config.max_tool_rounds
+
+
+def _resolve_max_tool_rounds(config) -> int:
+    """Per-tenant override of the tool-loop cap, clamped to [1, 20]."""
+    raw = getattr(config, "max_tool_rounds", None)
+    try:
+        value = int(raw) if raw is not None else DEFAULT_MAX_TOOL_ROUNDS
+    except (TypeError, ValueError):
+        value = DEFAULT_MAX_TOOL_ROUNDS
+    return max(1, min(20, value))
 # Anti-lazy auto-nudge — was needed for Qwen3 thinking-mode quirk. For DeepSeek and
 # Qwen2.5 (no <think> block) it can actually cause runaway: model with no clear
 # next action ends with content ("сделано"), regex matches "сделано/проверю/etc",
@@ -230,6 +260,7 @@ async def chat_completion(
     api_key_id: str | None = None,
     on_event=None,
     merged_message_ids: list[str] | None = None,
+    voice_mode: bool = False,
 ) -> dict:
     """Public entrypoint: applies tenant throttle then runs pipeline."""
     tenant = None
@@ -252,11 +283,11 @@ async def chat_completion(
         async with throttle.slot():
             return await _chat_completion_inner(
                 tenant_id, chat_id, user_content, db, user_message_id, api_key_id, on_event,
-                merged_message_ids,
+                merged_message_ids, voice_mode=voice_mode,
             )
     return await _chat_completion_inner(
         tenant_id, chat_id, user_content, db, user_message_id, api_key_id, on_event,
-        merged_message_ids,
+        merged_message_ids, voice_mode=voice_mode,
     )
 
 
@@ -269,6 +300,7 @@ async def _chat_completion_inner(
     api_key_id: str | None = None,
     on_event=None,
     merged_message_ids: list[str] | None = None,
+    voice_mode: bool = False,
 ) -> dict:
     """
     Full LLM pipeline with tool execution support:
@@ -277,12 +309,30 @@ async def _chat_completion_inner(
     3. Load memory/KB/tools
     4. Build messages array
     5. Call provider
-    6. If tool_calls → execute tools → feed results back → call provider again (up to MAX_TOOL_ROUNDS)
+    6. If tool_calls → execute tools → feed results back → call provider again (up to max_tool_rounds)
     7. Save LLM request log
     8. Auto-summary
     9. Return response
     """
     correlation_id = str(uuid.uuid4())
+
+    # Per-turn debug trace — accumulated through the pipeline, written to
+    # LLMRequestLog.debug at the end. Temporary instrumentation for the
+    # 100-chat offline analysis.
+    debug_trace: dict = {
+        "tenant_id": str(tenant_id),
+        "chat_id": str(chat_id) if chat_id else None,
+        "user_content_chars": len(user_content or ""),
+        # Capped copy of the user query — used by the tool-modal in admin UI
+        # to explain WHY a semantic-selected tool ranked where it did (the
+        # cosine match was query↔description embedding).
+        "user_query": (user_content or "")[:600],
+        "grounding": None,
+        "context": {},
+        "tool_calls": [],
+        "rounds": None,
+        "blocks_present": [],
+    }
 
     async def _emit(event_type: str, payload: dict) -> None:
         if on_event is None:
@@ -302,6 +352,104 @@ async def _chat_completion_inner(
     ).scalar_one_or_none()
     if not config:
         raise ValueError("Shell config not found for tenant")
+
+    # 1a. Tier 0 routing — try the deterministic shortcut FIRST. If the query
+    # is unambiguous (high-confidence single tool + required entities present
+    # in text + tool has a tier0_template configured) we call the tool
+    # directly and render its output via template, skipping the LLM entirely.
+    # ~100-300ms vs 1-2s. If anything is uncertain → returns None and we
+    # fall through to the full pipeline below.
+    if getattr(config, "tier0_enabled", False):
+        try:
+            from app.services.llm.tier0_router import try_tier0
+            tier0_result = await try_tier0(
+                user_query=user_content or "",
+                tenant_id=str(tenant_id),
+                db=db,
+                embedding_model=getattr(config, "embedding_model_name", None),
+                min_tool_score=float(getattr(config, "tier0_min_tool_score", 0.80) or 0.80),
+                max_score_gap=float(getattr(config, "tier0_max_score_gap", 0.15) or 0.15),
+            )
+        except Exception:
+            logger.exception("[tier0] router crashed — falling back to LLM (non-fatal)")
+            tier0_result = None
+        if tier0_result is not None:
+            await _emit("tier0_hit", {
+                "tool": tier0_result.tool_name,
+                "confidence": tier0_result.confidence,
+                "latency_ms": tier0_result.latency_ms,
+            })
+            await _emit("done", {
+                "content": tier0_result.content,
+                "reasoning": None,
+                "total_tokens": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "tool_calls_count": 1,
+                "latency_ms": tier0_result.latency_ms,
+                "model_name": "tier0",
+            })
+            # Lightweight log row so Tier 0 traffic is visible in stats (it
+            # skips the LLM, so it would otherwise leave no trace). $0 / 0 tokens.
+            db.add(LLMRequestLog(
+                tenant_id=tenant_id,
+                chat_id=chat_id,
+                api_key_id=uuid.UUID(str(api_key_id)) if api_key_id else None,
+                message_id=uuid.UUID(str(user_message_id)) if user_message_id else None,
+                correlation_id=correlation_id,
+                provider_type="tier0",
+                model_name="tier0",
+                served_by="tier0_template",
+                status="success",
+                latency_ms=tier0_result.latency_ms,
+                time_to_first_token_ms=tier0_result.latency_ms,
+                prompt_tokens=0,
+                completion_tokens=0,
+                total_tokens=0,
+                estimated_cost=0.0,
+                tool_calls_count=1,
+                finish_reason="tier0",
+                debug=(
+                    {"tier0": {
+                        "tool": tier0_result.tool_name,
+                        "confidence": tier0_result.confidence,
+                        "second_score": tier0_result.second_score,
+                    }}
+                    if getattr(config, "debug_enabled", True) else None
+                ),
+            ))
+            # Auto-title: provider is not loaded on the Tier 0 fast path,
+            # so pass None — the function falls back to the user query text.
+            await _auto_summary_background(
+                None, config, chat_id, user_content, tier0_result.content,
+            )
+            return {
+                "content": tier0_result.content,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "latency_ms": tier0_result.latency_ms,
+                "time_to_first_token_ms": tier0_result.latency_ms,
+                "finish_reason": "tier0",
+                "correlation_id": correlation_id,
+                "provider_type": "tier0",
+                "model_name": "tier0",
+                "tool_calls": [],
+                "tool_calls_count": 1,
+                "reasoning": None,
+                "response_summary": tier0_result.content[:200],
+                "tool_result_summary": None,
+                "attachment_summary": None,
+                "context_card": None,
+                "history_exclude": False,
+                "context_warning": None,
+                "tier0": {
+                    "tool": tier0_result.tool_name,
+                    "confidence": tier0_result.confidence,
+                    "second_score": tier0_result.second_score,
+                    "entities": tier0_result.extracted_entities,
+                },
+            }
 
     # 2. Load recent messages (exclude error messages)
     msg_q = (
@@ -391,12 +539,101 @@ async def _chat_completion_inner(
     resolved = await resolve_model(tenant_id, user_content, db, config)
     provider = resolved.provider
     model_name = resolved.model_name
+
+    # PII safeguard: if the tenant has opted in AND the user query contains
+    # strict-format PII (phone / MAC / IP), forbid the AutoRouter from ever
+    # escalating to the heavy/cloud model for this turn. The local model
+    # may be weaker, but the data stays inside our network. See model_resolver
+    # AutoRouter.pick() — `pii_locked` short-circuits all escalation paths.
+    if getattr(config, "pii_routing_enabled", False):
+        try:
+            from app.services.preprocessing.entities import extract_entities
+            _pii = extract_entities(user_content or "")
+            if _pii.has_any():
+                router = getattr(resolved, "auto_router", None)
+                if router is not None:
+                    matched_kinds = [k for k, v in _pii.as_dict().items() if v]
+                    router.pii_locked = True
+                    router.pii_lock_reason = f"PII in user query: {', '.join(matched_kinds)}"
+                    logger.info(
+                        "[%s] PII routing: locked to light model (%s)",
+                        correlation_id, router.pii_lock_reason,
+                    )
+                    debug_trace["pii_lock"] = {
+                        "active": True,
+                        "reason": router.pii_lock_reason,
+                        "entities": _pii.as_dict(),
+                    }
+                    await _emit("pii_lock", {
+                        "reason": router.pii_lock_reason,
+                        "entities": _pii.as_dict(),
+                    })
+        except Exception:
+            logger.exception("[%s] PII routing check failed (non-fatal)", correlation_id)
     effective_temperature = _clamp_temperature(config.temperature)
+    # Pre-clamped low temperature applied ONLY when the round has tools in
+    # its payload. Computed once here, picked at each call site based on
+    # whether tool_defs is set for that round.
+    tool_routing_temperature = _clamp_temperature(
+        getattr(config, "tool_routing_temperature", 0.3) or 0.3
+    )
+
+    def _temp_for(td) -> float:
+        """Choose effective temperature for one LLM call based on whether
+        tools are in the payload. No-tools rounds keep the user-chosen creative
+        temperature; tool rounds drop to the deterministic floor."""
+        return tool_routing_temperature if td else effective_temperature
+
+    def _estimate_round_tokens(msgs: list[dict], tool_defs_arg: list[dict] | None) -> int:
+        """Approx prompt size at the moment of an LLM call. Used by the
+        auto-router to decide whether to escalate to the heavy model."""
+        parts: list[str] = []
+        for m in msgs:
+            parts.append(_message_content_text(m.get("content", "")))
+            tcs = m.get("tool_calls") or []
+            if tcs:
+                try:
+                    parts.append(json.dumps(tcs, ensure_ascii=False))
+                except Exception:
+                    pass
+        body = "\n".join(parts)
+        tools_text = json.dumps(tool_defs_arg, ensure_ascii=False) if tool_defs_arg else ""
+        return _ct(body) + _ct(tools_text)
+
+    async def _route_for_round(round_num: int) -> None:
+        """If we're in auto mode, ask the router whether to swap models for
+        this round. Mutates `provider`/`model_name` via the resolved holder
+        AND the nonlocal locals below."""
+        nonlocal provider, model_name
+        router = getattr(resolved, "auto_router", None)
+        if router is None:
+            return
+        before_name = model_name
+        estimate = _estimate_round_tokens(messages, tool_defs)
+        chosen, reason = await router.pick(estimate)
+        if chosen.model_name != before_name:
+            logger.info(
+                "[%s] auto-router round %d: %s -> %s (%s, est=%d tok)",
+                correlation_id, round_num, before_name, chosen.model_name, reason, estimate,
+            )
+            await _emit("model_switch", {
+                "round": round_num,
+                "from": before_name,
+                "to": chosen.model_name,
+                "reason": reason,
+                "estimated_prompt_tokens": estimate,
+            })
+        provider = chosen.provider
+        model_name = chosen.model_name
+
     logger.debug(f"[{correlation_id}] Model resolved: {model_name} (source={resolved.source}, provider={resolved.provider_type})")
 
     # 5. KB — semantic search via embeddings (skip if no KB documents exist)
+    # kb_inject_auto=False → on-demand mode: skip pre-search entirely;
+    # the LLM will call search_kb() tool when it actually needs KB context.
     kb_chunks: list = []
-    if config.knowledge_base_enabled and config.embedding_model_name:
+    _kb_inject_auto = getattr(config, "kb_inject_auto", True)
+    if _kb_inject_auto and config.knowledge_base_enabled and config.embedding_model_name:
         # Quick check: do any KB chunks exist for this tenant?
         kb_exists = (await db.execute(
             select(sa_func.count()).select_from(
@@ -449,7 +686,6 @@ async def _chat_completion_inner(
         previous_chat_attachments = chat_attachments
 
     needs_tools = _query_needs_tools(user_content, chat_attachments)
-    tool_route = _detect_tool_route(user_content)
     # Resolve API-key tool access early — empty allowed_tool_ids means key has no tool access
     allowed_tool_ids = await _load_allowed_tool_ids(db, tenant_id, api_key_id)
     key_blocks_tools = allowed_tool_ids is not None and len(allowed_tool_ids) == 0
@@ -486,6 +722,7 @@ async def _chat_completion_inner(
             embedding_model=config.embedding_model_name,
             db=db,
             tenant_id=str(tenant_id),
+            semantic_floor=float(getattr(config, "tool_semantic_floor", 0.5) or 0.5),
         )
         tool_config_map = {
             t.config_json["function"]["name"]: t.config_json
@@ -498,8 +735,11 @@ async def _chat_completion_inner(
         # Lives in code (app/services/tools/builtin_registry.py), not in
         # tenant_tools. Always added on top of whatever tenant tools the
         # semantic selector chose; new tenants get them automatically.
+        # Per-tenant description overrides are loaded from builtin_tool_overrides.
         from app.services.tools.builtin_registry import builtin_tool_config_map
-        for _bt_name, _bt_cfg in builtin_tool_config_map().items():
+        from app.services.tools.builtin_overrides import load_overrides_for_tenant
+        _builtin_overrides = await load_overrides_for_tenant(db, tenant_id)
+        for _bt_name, _bt_cfg in builtin_tool_config_map(_builtin_overrides).items():
             # Per-request copy — runtime context is injected below and we
             # don't want to mutate the registry's singleton dicts.
             tool_config_map[_bt_name] = dict(_bt_cfg)
@@ -511,13 +751,9 @@ async def _chat_completion_inner(
                 "tenant_id": str(tenant_id),
                 "chat_id": str(chat_id),
                 "api_key_id": str(api_key_id) if api_key_id else None,
+                "timezone": (getattr(config, "timezone", None) or None),
+                "user_message_id": str(user_message_id) if user_message_id else None,
             }
-
-        # For strongly tool-driven PON workflows, reduce non-essential context
-        # so local models focus on current entities instead of old turns.
-        if tool_route == TOOL_ROUTE_PON:
-            memory_entries = [m for m in memory_entries if getattr(m, "is_pinned", False)]
-            kb_chunks = []
 
         if chat_attachments:
             from app.services.attachments.tool import build_attachment_tool_def
@@ -544,7 +780,7 @@ async def _chat_completion_inner(
                 all_allowed_tools_for_tenant[n] = t.config_json
         # Builtin tools — system retrieval/memory/artifacts. Always callable.
         from app.services.tools.builtin_registry import builtin_tool_config_map
-        for _bt_name, _bt_cfg in builtin_tool_config_map().items():
+        for _bt_name, _bt_cfg in builtin_tool_config_map(_builtin_overrides).items():
             all_allowed_tools_for_tenant[_bt_name] = dict(_bt_cfg)
     allowed_tool_names = (
         set(tool_config_map.keys())
@@ -557,6 +793,7 @@ async def _chat_completion_inner(
             "tenant_id": str(tenant_id),
             "chat_id": str(chat_id),
             "api_key_id": str(api_key_id) if api_key_id else None,
+            "timezone": (getattr(config, "timezone", None) or None),
         }
 
     # 7. Build messages
@@ -574,82 +811,74 @@ async def _chat_completion_inner(
     # тестовой выборке запросов. См. соответствующий tokens_* в Logs Tab.
     # ============================================================================
     system_parts: list[str] = []
+    # Per-block labels parallel to system_parts — used by prompt_layout to
+    # show admins which piece came from which source ("BLOCK-MEMORY-A",
+    # "ontology_prompt", "HARDCODED-2"), instead of one opaque megablob.
+    system_block_labels: list[str] = []
+
+    def _sys(label: str, content: str) -> None:
+        if not content:
+            return
+        system_parts.append(content)
+        system_block_labels.append(label)
+
     # Language pin — first system part so the lock is the very first thing the
     # model sees. Tenant chooses the language in shell config (default 'ru').
     from app.services.llm.language import build_language_pin_text
-    system_parts.append(build_language_pin_text(getattr(config, "response_language", "ru")))
+    _sys("Language pin", build_language_pin_text(getattr(config, "response_language", "ru")))
+
+    # === [HARDCODED-0] current date/time — computed here, injected LAST ===
+    # KV-cache optimisation: date/time changes every minute — putting it first
+    # invalidates the cache for ALL subsequent static blocks on every request.
+    # We compute _now here (available to downstream code) but defer _sys() to
+    # just before the history section so the long static prefix (rules, tools,
+    # KB, memory) stays perfectly cacheable. See injection point below.
+    _hc0_date_text: str | None = None
+    try:
+        from datetime import datetime
+        _now = None
+        _tz_label = "local"
+        _cfg_tz = (getattr(config, "timezone", None) or "").strip()
+        if _cfg_tz:
+            try:
+                from zoneinfo import ZoneInfo
+                _now = datetime.now(ZoneInfo(_cfg_tz))
+                _tz_label = _cfg_tz
+            except Exception:
+                logger.warning("[%s] bad tenant timezone %r — falling back to server local", correlation_id, _cfg_tz)
+        if _now is None:
+            _now = datetime.now().astimezone()
+            _tz_label = str(_now.tzinfo) if _now.tzinfo else "local"
+        _hc0_date_text = (
+            f"## Текущая дата и время\n"
+            f"Сейчас: **{_now.strftime('%Y-%m-%d %H:%M')}** "
+            f"({_now.strftime('%A')}, {_tz_label}).\n"
+            f"Используй для арифметики дат («завтра», «через N дней», "
+            f"«в этом месяце»)."
+        )
+    except Exception:
+        logger.exception("[pipeline] failed to compute current date (non-fatal)")
+
     if config.system_prompt:
-        system_parts.append(config.system_prompt)
+        _sys("Tenant system_prompt", config.system_prompt)
     if getattr(config, "ontology_prompt", None) and config.ontology_prompt.strip():
-        system_parts.append(config.ontology_prompt.strip())
+        _sys("Tenant ontology_prompt", config.ontology_prompt.strip())
     if config.rules_text:
-        system_parts.append(f"Rules:\n{config.rules_text}")
+        _sys("Tenant rules_text", f"Rules:\n{config.rules_text}")
 
     if False:  # === [HARDCODED-1] language hint ===
-        system_parts.append(
+        _sys(
+            "HARDCODED-1 language hint",
             "Отвечай на том же языке, на котором обращается пользователь "
             "(русский → русский, украинский → украинский, английский → английский). "
             "Технические термины (IP, MAC, DHCP, VLAN, BGP) оставляй как есть."
         )
 
-    if True:  # === [HARDCODED-2] anti-hallucination ===
-        system_parts.append(
-            "## Источники истины\n"
-            "Конкретные значения (IP, MAC, числа, имена, идентификаторы, версии, цены, "
-            "коды ошибок, фрагменты кода) бери ТОЛЬКО из явных источников:\n"
-            "- результат вызова tool в этом ответе;\n"
-            "- блок «Активные артефакты» в текущем сообщении (artifacts.content);\n"
-            "- блок «Knowledge Base» в system;\n"
-            "- блок «Закреплённая память»;\n"
-            "- содержимое прикреплённого к этому сообщению файла.\n\n"
-            "Если значения нет ни в одном из этих источников — НЕ выдумывай. "
-            "Скажи прямо: «у меня нет данных», «не вижу этого в источниках», "
-            "«нужно вызвать tool/посмотреть документ». Допустимо предложить "
-            "способ узнать (какой tool вызвать, какой документ открыть).\n\n"
-            "Резюме в Recent conversation НЕ источник конкретных значений — оно "
-            "содержит только тему обмена. За конкретикой иди в артефакт / память / "
-            "KB / get_message."
-        )
-
-    if True:  # === [HARDCODED-3] anti-lazy — "не описывай, делай" ===
-        system_parts.append(
-            "## Действие вместо описания\n"
-            "Если для ответа нужен факт из системы — СРАЗУ вызывай tool, без "
-            "предисловий «сейчас проверю / выполню / запрошу». Описание "
-            "намерения без сопровождающего tool_call = пустой ответ.\n"
-            "После неудачного результата tool (ошибка/пусто) — не пиши «попробую "
-            "другой способ», а сразу делай следующий вызов. Цепочка 2-3 tool_calls "
-            "подряд — норма, если задача требует."
-        )
-
-    if True:  # === [HARDCODED-4] markdown tables for structured data ===
-        system_parts.append(
-            "## Формат ответа\n"
-            "Однотипные записи и сравнения — компактной markdown-таблицей "
-            "(колонки через `|`), не сплошным текстом. CSV не используй "
-            "в ответах чата — он только для экспорта."
-        )
-
-    if True:  # === [HARDCODED-5] tool context economy ===
-        system_parts.append(
-            "## Экономия контекста при вызове tools\n"
-            "Для tools которые могут вернуть много (логи, leases, history, дерево "
-            "топологии, события DHCP, заявки) — обязательно `limit` (20-50) "
-            "и/или фильтр (адрес/клиент/дата/severity). «Все логи» / «всё "
-            "дерево» без причины — нет.\n"
-            "Между раундами старые tool-результаты автоматически сжимаются: "
-            "полностью сохраняются только значения, которые ты упомянул в "
-            "ответе или последующих вызовах. Если полный результат снова "
-            "нужен — повтори tool с теми же аргументами."
-        )
-
-    if True:  # === [HARDCODED-6] tool routing hint ===
-        # Active only when a domain route is detected (e.g. PON keywords in
-        # the user query) — emits a stepwise hint telling the model the
-        # correct call order for that domain's tools.
-        route_hint = _tool_route_system_hint(tool_route, allowed_tool_names)
-        if route_hint:
-            system_parts.append("## " + route_hint)
+    # === [HARDCODED-2,3,4,8,7] static, tenant-agnostic instruction blocks ===
+    # Moved to app/services/llm/system_blocks.py (separates prompt content from
+    # orchestration). Order preserved; always appended (formerly `if True`).
+    for _label, _text in STATIC_SYSTEM_BLOCKS:
+        _sys(_label, _text)
 
     # Collect long_term memory items from API key and its group (scoped to chats with this key)
     api_key_memory_items: list[str] = []
@@ -679,9 +908,10 @@ async def _chat_completion_inner(
         # Inject as its own system block — these are explicit tenant configs
         # for the active API key / group, not LLM-saved memory.
         if api_key_memory_items:
-            system_parts.append(
+            _sys(
+                "BLOCK-MEMORY-A api key + group",
                 "## Память API-ключа\n"
-                + "\n".join(f"- {item}" for item in api_key_memory_items)
+                + "\n".join(f"- {item}" for item in api_key_memory_items),
             )
 
     _memory_block_text: str | None = None
@@ -702,15 +932,16 @@ async def _chat_completion_inner(
                 + "\n".join(mem_lines)
                 + "\n\nДля поиска по остальной памяти — вызови tool `recall_memory(query=...)`."
             )
-            system_parts.append(_memory_block_text)
+            _sys("BLOCK-MEMORY-B pinned facts", _memory_block_text)
 
-    if True:  # === [BLOCK-KB] knowledge base excerpts ===
+    if _kb_inject_auto:  # === [BLOCK-KB] knowledge base excerpts ===
         # Semantic top-K KB chunks for the current user message. These are
         # background domain knowledge — not the user's artifacts. Stays in
         # `system` (not user-message) because it's reference material, not
         # something we expect the model to edit or treat as the subject.
-        # Empty/low-quality result → nothing emitted; modèle can fall back to
+        # Empty/low-quality result → nothing emitted; model can fall back to
         # the `search_kb` tool for a wider query.
+        # kb_inject_auto=False → skip entirely; model calls search_kb on demand.
         if kb_chunks:
             kb_parts = []
             for c in kb_chunks:
@@ -727,7 +958,7 @@ async def _chat_completion_inner(
                 + "\n\nЭто справочные материалы. Если нужного нет — вызови `search_kb(query=...)` "
                 + "с другой формулировкой."
             )
-            system_parts.append(_kb_block_text)
+            _sys("BLOCK-KB excerpts", _kb_block_text)
 
     if True:  # === [BLOCK-ATTACHMENTS] previously-attached files in this chat ===
         # Files attached to OLDER messages — background context. Files attached
@@ -746,7 +977,7 @@ async def _chat_completion_inner(
                     "это контекст. Для поиска внутри используй search_attachment_*):\n"
                 )
             _attachments_block_text = header + "\n".join(att_lines)
-            system_parts.append(_attachments_block_text)
+            _sys("BLOCK-ATTACHMENTS prior files", _attachments_block_text)
 
     # === [BLOCK-ACTIVE-ARTIFACTS] — auto-grounding ===
     # Pull the artifacts the user's question is most likely about (semantic
@@ -774,8 +1005,22 @@ async def _chat_completion_inner(
                 len(active_artifacts),
                 ", ".join(f"{a.kind}:{str(a.id)[:8]}" for a in active_artifacts),
             )
+        debug_trace["grounding"] = {
+            "count": len(active_artifacts or []),
+            "picks": [
+                {
+                    "id": str(a.id),
+                    "kind": a.kind,
+                    "label": (getattr(a, "label", None) or "")[:80],
+                    "similarity": float(getattr(a, "_grounding_score", 0.0) or 0.0) or None,
+                    "source": getattr(a, "_grounding_source", None),
+                }
+                for a in (active_artifacts or [])
+            ],
+        }
     except Exception:
         logger.exception("[pipeline] artifact auto-grounding failed (non-fatal)")
+        debug_trace["grounding"] = {"error": "grounding_failed"}
 
     # === [BLOCK-HISTORY-RESUMES] — agentic memory ===
     # Inject the last N pair-resumes (user-question summary + assistant-response summary)
@@ -785,27 +1030,56 @@ async def _chat_completion_inner(
     try:
         n_pairs = max(0, int(getattr(config, "max_context_messages", 0) or 0))
         if n_pairs > 0:
+            # Pull the last N user messages REGARDLESS of whether their resume
+            # has been generated yet. The resume_query filter we used to have
+            # here caused turn-2-of-a-fresh-chat to lose all history (the
+            # background resume task hadn't finished). For pairs without a
+            # resume we fall back to the trimmed full content — concrete values
+            # may appear here but it's still THIS chat's recent turns, which
+            # is the most trustworthy local source we have.
             recent_user_q = (
                 select(Message)
                 .where(
                     Message.tenant_id == tenant_id,
                     Message.chat_id == chat_id,
                     Message.role == "user",
-                    Message.resume_query.is_not(None),
                 )
                 .order_by(Message.created_at.desc())
                 .limit(n_pairs + 1)  # +1 to potentially drop current user msg if it slipped in
             )
             user_rows = list(reversed((await db.execute(recent_user_q)).scalars().all()))
-            # Exclude the current user message if present (resume for it isn't relevant —
-            # the model already sees the full text in the user turn).
+            # Exclude the current user message if present (its content is
+            # appended explicitly to the prompt below).
             if user_message_id:
                 cur_id_s = str(user_message_id)
                 user_rows = [u for u in user_rows if str(u.id) != cur_id_s]
             user_rows = user_rows[-n_pairs:]
 
+            # Char caps for the FULL-content fallback. Tight enough to keep
+            # token bloat bounded even when many pairs are un-resumed.
+            FULL_USER_CAP = 400
+            FULL_ASSISTANT_CAP = 700
+
+            def _trim(text: str | None, cap: int) -> str:
+                t = (text or "").strip()
+                if not t:
+                    return ""
+                t = t.replace("\r", "")
+                if len(t) > cap:
+                    return t[:cap].rstrip() + " …"
+                return t
+
+            # The LAST K pairs are always rendered in full (raw) form regardless
+            # of whether a resume exists. This is critical for short follow-ups
+            # like "да", "ок", "продолжай" — the resume strips the question the
+            # assistant just asked, so without full content the model has no
+            # idea what's being confirmed.
+            ALWAYS_RAW_LAST_K = 1
+            raw_threshold_idx = max(0, len(user_rows) - ALWAYS_RAW_LAST_K)
+
             resume_lines: list[str] = []
-            for u in user_rows:
+            has_full_content = False
+            for i, u in enumerate(user_rows):
                 asst = (await db.execute(
                     select(Message).where(
                         Message.chat_id == chat_id,
@@ -813,12 +1087,37 @@ async def _chat_completion_inner(
                         Message.created_at >= u.created_at,
                     ).order_by(Message.created_at.asc()).limit(1)
                 )).scalar_one_or_none()
-                resp_resume = (asst.resume_response if asst else None) or "(нет резюме ответа)"
-                q_resume = (u.resume_query or "").strip() or "(нет резюме)"
                 # Anchor the id on the assistant message when present — that's the
                 # row that owns artifacts, and the row the model fetches via get_message.
                 anchor_id = str(asst.id) if asst else str(u.id)
-                resume_lines.append(f"- [{anchor_id}] Q: {q_resume} → A: {resp_resume}")
+                u_resume = (u.resume_query or "").strip()
+                a_resume = (asst.resume_response if asst else None) or ""
+                a_resume = a_resume.strip()
+
+                force_raw = (i >= raw_threshold_idx)
+
+                # Anchor id is the assistant message id — explicit msg: prefix
+                # so the model never confuses it with an artifact_id (which
+                # appears later as `(artifact_id=...)`). Maps cleanly to
+                # get_message(id) in the footer.
+                anchor_token = f"msg:{anchor_id}"
+                if u_resume and a_resume and not force_raw:
+                    # Sanitized form — older turn with both resumes generated.
+                    resume_lines.append(f"- [{anchor_token}] Q: {u_resume} → A: {a_resume}")
+                else:
+                    # Raw form: full trimmed content. Used for the last K pairs
+                    # always, and for any pair whose resume isn't ready yet.
+                    # Marks the entry as "raw" so the model knows concrete
+                    # values are quotable here.
+                    has_full_content = True
+                    q_full = _trim(u.content, FULL_USER_CAP)
+                    a_full = _trim(asst.content if asst else None, FULL_ASSISTANT_CAP)
+                    tag = "последний обмен, полный текст" if force_raw else "raw, без резюме"
+                    resume_lines.append(
+                        f"- [{anchor_token}] ({tag})\n"
+                        f"  Q: {q_full or '(пусто)'}\n"
+                        f"  A: {a_full or '(нет ответа)'}"
+                    )
                 # 📎 markers: one line per artifact attached to the assistant reply.
                 # The JSONB now stores refs to rows in `artifacts` — include the
                 # artifact_id so the model can fetch it via get_artifact(id).
@@ -834,18 +1133,46 @@ async def _chat_completion_inner(
                     else:
                         resume_lines.append(f"  📎 [{kind}] {label}")
             if resume_lines:
-                system_parts.append(
-                    "## Recent conversation (резюме последних обменов)\n"
+                # ID mapping (важно — у модели часто путаются эти два tool'а):
+                #   [msg:<uuid>]            → get_message(id="<uuid>")
+                #   (artifact_id=<uuid>)    → get_artifact(id="<uuid>")
+                id_mapping = (
+                    "\n\nID и tool'ы:\n"
+                    "- `[msg:<uuid>]` в шапке обмена → `get_message(id=\"<uuid>\")` "
+                    "(полный текст вопроса+ответа, плюс ссылки на артефакты).\n"
+                    "- `(artifact_id=<uuid>)` после маркера 📎 → "
+                    "`get_artifact(id=\"<uuid>\")` (досл. содержимое артефакта).\n"
+                    "- `find_artifacts(kind=..., query=...)` — если артефакт не упомянут.\n"
+                    "Не путай: msg-id ≠ artifact-id. Если зовёшь не тот tool — получишь not-found."
+                )
+                footer = (
+                    "\n\nПомечены `(raw, без резюме)` или `(последний обмен, полный текст)` — "
+                    "свежие обмены, резюме ещё не сгенерилось; их полный текст — надёжный "
+                    "источник конкретики (это сказано только что в этом чате).\n"
+                    "Остальные строки — резюме без конкретных значений (IP, числа, имена) "
+                    "специально, чтобы исключить искажения. За конкретикой по ним:"
+                    + id_mapping
+                ) if has_full_content else (
+                    "\n\nРезюме не содержат конкретных значений (IP, числа, имена) — это специально, "
+                    "чтобы исключить искажения. Конкретику бери из:\n"
+                    "- блока «Активные артефакты» (если есть)."
+                    + id_mapping
+                )
+                _sys(
+                    "HISTORY-RESUMES recent exchanges",
+                    "## Recent conversation (последние обмены)\n"
                     + "\n".join(resume_lines)
-                    + "\n\nРезюме не содержат конкретных значений (IP, числа, имена) — это специально, "
-                    + "чтобы исключить искажения. Конкретику бери ТОЛЬКО из:\n"
-                    + "- блока «Активные артефакты» (если есть),\n"
-                    + "- вызова `get_artifact(artifact_id)` для маркера 📎 из списка выше,\n"
-                    + "- `find_artifacts(kind=..., query=...)` если артефакт не упомянут,\n"
-                    + "- `recall_chat` / `get_message(id)` для контекста самого обмена."
+                    + footer,
                 )
     except Exception:
         logger.exception("[pipeline] failed to assemble HISTORY-RESUMES block")
+
+    # === [HARDCODED-0] date/time injection point ===
+    # Injected HERE (after all static blocks) for KV-cache efficiency:
+    # everything above is tenant-static and can be cached across requests.
+    # Only the date + history + query below are dynamic.
+    if _hc0_date_text:
+        _sys("HARDCODED-0 current date/time", _hc0_date_text)
 
     messages: list[dict] = []
     if system_parts:
@@ -946,8 +1273,140 @@ async def _chat_completion_inner(
     # Builtin tools — system toolset (memory/artifacts/RAG). Always exposed
     # to the model regardless of semantic budget; lives in code, not DB.
     if tools_enabled:
-        from app.services.tools.builtin_registry import builtin_tools_for_payload
-        all_tool_defs = builtin_tools_for_payload() + all_tool_defs
+        from app.services.tools.builtin_registry import builtin_tools_for_payload, BUILTIN_TOOL_NAMES
+        # _builtin_overrides is populated above when tools_enabled is true.
+        all_tool_defs = builtin_tools_for_payload(_builtin_overrides) + all_tool_defs
+
+    # Capture per-tool selection metadata for debug-trace BEFORE trimming so
+    # we can show in UI "why this tool is here" (pinned/builtin/semantic+score).
+    try:
+        debug_payload: list[dict] = []
+        tools_by_name = {
+            ((t.config_json or {}).get("function") or {}).get("name"): t
+            for t in (tools or [])
+            if t.config_json
+        }
+        for td in (all_tool_defs or []):
+            fn = (td or {}).get("function") or {}
+            name = fn.get("name")
+            if not name:
+                continue
+            desc = fn.get("description") or ""
+            params = fn.get("parameters") or {}
+            source = "unknown"
+            similarity = None
+            t_obj = tools_by_name.get(name)
+            if tools_enabled and name in BUILTIN_TOOL_NAMES:
+                source = "builtin"
+            elif name and name.startswith("search_attachment_"):
+                source = "attachment"
+            elif t_obj is not None:
+                source = getattr(t_obj, "_selection_source", "selected")
+                _ss = getattr(t_obj, "_semantic_score", None)
+                if isinstance(_ss, (int, float)):
+                    similarity = round(float(_ss), 3)
+            debug_payload.append({
+                "name": name,
+                "source": source,
+                "similarity": similarity,
+                "description_chars": len(desc),
+                "parameters_chars": len(json.dumps(params, ensure_ascii=False)) if params else 0,
+                "description": desc[:1200],
+                "parameters": params,
+            })
+        debug_trace["tools_payload"] = debug_payload
+    except Exception:
+        logger.exception("[pipeline] failed to build tools_payload debug snapshot")
+
+    # Snapshot the FULL catalog of every tool the tenant could call this
+    # request — used by builtin `describe_tool(name)` regardless of whether
+    # lazy-catalog actually demoted anything. Captured BEFORE the lazy
+    # split below (which rebinds all_tool_defs to just the full subset).
+    if tools_enabled and all_tool_defs:
+        _full_catalog_by_name = {
+            (td.get("function") or {}).get("name"): td
+            for td in all_tool_defs
+            if (td.get("function") or {}).get("name")
+        }
+        for _name, _cfg in tool_config_map.items():
+            ctx = _cfg.get("_context")
+            if isinstance(ctx, dict):
+                ctx["full_tool_catalog"] = _full_catalog_by_name
+        for _name, _cfg in all_allowed_tools_for_tenant.items():
+            ctx = _cfg.get("_context")
+            if isinstance(ctx, dict):
+                ctx["full_tool_catalog"] = _full_catalog_by_name
+
+    # Lazy tool catalog: keep the top-K tools by semantic score in `tools=[...]`
+    # with their full schema, and demote the rest to a compact system-block
+    # listing (name + 1-line + tags). The compact tools are still callable —
+    # pipeline auto-adds their schema to the payload on the round AFTER the
+    # model first invokes them, and the `describe_tool(name)` builtin lets
+    # the model inspect them up-front. Builtin / pinned / attachment-search
+    # tools NEVER get demoted (they're system-essential and small enough).
+    lazy_topk = int(getattr(config, "lazy_tool_catalog_topk", 0) or 0)
+    if all_tool_defs and tools_enabled and lazy_topk > 0:
+        from app.services.tools.builtin_registry import BUILTIN_TOOL_NAMES as _BTN
+        # Score each TenantTool we picked (semantic/keyword/pinned). Builtin
+        # and attachment-* are protected (never compact). Pinned: from
+        # `_selection_source = pinned` we know admin marked them important.
+        protected_names: set[str] = set()
+        scored_names: list[tuple[float, str]] = []
+        for t in (tools or []):
+            cfg_fn = (t.config_json or {}).get("function") or {}
+            n = cfg_fn.get("name")
+            if not n:
+                continue
+            src = getattr(t, "_selection_source", "") or ""
+            if src == "pinned":
+                protected_names.add(n)
+                continue
+            sc = getattr(t, "_semantic_score", None)
+            scored_names.append((float(sc) if isinstance(sc, (int, float)) else 0.0, n))
+        scored_names.sort(reverse=True)
+        full_names: set[str] = {n for _, n in scored_names[:lazy_topk]} | protected_names
+
+        full_defs: list[dict] = []
+        compact_defs: list[dict] = []
+        for td in all_tool_defs:
+            n = (td.get("function") or {}).get("name")
+            if not n:
+                continue
+            # Builtins and attachment search always full — small, system-critical.
+            if n in _BTN or n.startswith("search_attachment_"):
+                full_defs.append(td)
+                continue
+            if n in full_names:
+                full_defs.append(td)
+            else:
+                compact_defs.append(td)
+
+        if compact_defs:
+            # Render compact catalog as an additional system message AFTER
+            # messages[0]. The main system block is already built by this
+            # point, so we can't extend system_parts — but a second `role:
+            # system` message gets attended to the same way.
+            lines = ["## Доп. tools (compact — полная schema по `describe_tool(name)` или прямому вызову по имени)"]
+            for td in compact_defs:
+                fn = td.get("function") or {}
+                nm = fn.get("name") or ""
+                d = (fn.get("description") or "").splitlines()[0].strip()
+                if len(d) > 140:
+                    d = d[:140].rstrip() + "…"
+                lines.append(f"- `{nm}` — {d}")
+            # Insert AFTER the main system block but BEFORE the user message.
+            # messages[0] is system. messages[-1] is the user. Insert at index 1.
+            compact_block = {"role": "system", "content": "\n".join(lines)}
+            insert_at = 1 if messages and messages[0].get("role") == "system" else 0
+            messages.insert(insert_at, compact_block)
+            logger.info(
+                "[%s] lazy-catalog: %d full + %d compact (topk=%d)",
+                correlation_id, len(full_defs), len(compact_defs), lazy_topk,
+            )
+        # Catalog is already injected above (before the split) so describe_tool
+        # works regardless of whether anything got demoted to compact.
+        # Replace all_tool_defs with the trimmed-by-lazy version for trim_tool_definitions below.
+        all_tool_defs = full_defs
 
     if all_tool_defs and tools_enabled:
         tool_defs = trim_tool_definitions(all_tool_defs)
@@ -993,6 +1452,52 @@ async def _chat_completion_inner(
     # tool exec). Exposed via provider_call_done SSE + saved into assistant
     # message metadata for later inspection in admin Logs tab.
     round_breakdown: list[dict] = []
+    # Tasks created by capture_tool_result_as_artifact in this request,
+    # keyed by round → list[(tool_name, awaitable Task)]. Awaited before
+    # writing the LLMRequestLog so debug.rounds[].artifacts_captured can
+    # carry the freshly-minted artifact_id back to the UI.
+    _capture_tasks_by_round: dict[int, list[tuple[str, "asyncio.Task"]]] = {}
+
+    def _snapshot_messages(msgs: list[dict]) -> list[dict]:
+        """Compact per-message summary (role, chars, est_tokens, brief).
+        Used by debug-trace so the UI can show what was sent into each round."""
+        out: list[dict] = []
+        for m in msgs:
+            role = m.get("role", "?")
+            raw = m.get("content")
+            if isinstance(raw, list):
+                # vision messages: list of parts
+                text = "\n".join(
+                    p.get("text") or f"<{p.get('type', 'part')}>" for p in raw if isinstance(p, dict)
+                )
+            else:
+                text = str(raw or "")
+            brief = text[:160].replace("\n", " ⏎ ")
+            if len(text) > 160:
+                brief += " …"
+            entry: dict = {
+                "role": role,
+                "chars": len(text),
+                "est_tokens": _ct(text),
+                "brief": brief,
+            }
+            # Surface tool_call names if present on an assistant turn.
+            tcs = m.get("tool_calls")
+            if isinstance(tcs, list) and tcs:
+                names: list[str] = []
+                for tc in tcs:
+                    fn = (tc or {}).get("function") or {}
+                    n = fn.get("name") if isinstance(fn, dict) else None
+                    if isinstance(n, str):
+                        names.append(n)
+                if names:
+                    entry["tool_calls"] = names
+            if role == "tool":
+                tcid = m.get("tool_call_id")
+                if tcid:
+                    entry["tool_call_id"] = str(tcid)[:50]
+            out.append(entry)
+        return out
 
     start = time.time()
     resp = None
@@ -1019,14 +1524,15 @@ async def _chat_completion_inner(
     chunk_cb = _on_chunk if on_event is not None else None
 
     try:
-        # Initial LLM call
+        # Initial LLM call — let the auto-router pick light/heavy first
+        await _route_for_round(0)
         await _emit("provider_call_start", {"round": 0, "model": model_name})
         provider_t0 = time.time()
         current_round_ref["round"] = 0
         resp = await provider.chat_completion(
             messages=messages,
             model=model_name,
-            temperature=effective_temperature,
+            temperature=_temp_for(tool_defs),
             max_tokens=config.max_tokens,
             tools=tool_defs,
             on_chunk=chunk_cb,
@@ -1034,6 +1540,7 @@ async def _chat_completion_inner(
                 getattr(config, "enable_thinking", "on"),
                 user_content,
                 bool(tool_defs),
+                voice_mode=voice_mode,
             ),
         )
         _round0_latency_ms = int((time.time() - provider_t0) * 1000)
@@ -1046,6 +1553,9 @@ async def _chat_completion_inner(
             "latency_ms": _round0_latency_ms,
             "has_tool_calls": bool(resp.tool_calls),
             "tool_calls_count": len(resp.tool_calls or []) if resp.tool_calls else 0,
+            "messages_snapshot": _snapshot_messages(messages),
+            "response_content_chars": len(resp.content or ""),
+            "response_reasoning_chars": len(getattr(resp, "reasoning", "") or ""),
         })
         await _emit("provider_call_done", {
             "round": 0,
@@ -1064,7 +1574,8 @@ async def _chat_completion_inner(
 
         # Tool execution loop
         round_num = 0
-        while resp.tool_calls and round_num < MAX_TOOL_ROUNDS:
+        max_tool_rounds = _resolve_max_tool_rounds(config)
+        while resp.tool_calls and round_num < max_tool_rounds:
             round_num += 1
             tool_calls_total += len(resp.tool_calls)
 
@@ -1138,13 +1649,22 @@ async def _chat_completion_inner(
                     tool_ok = result.success
                     tool_output = result.output if result.success else f"Ошибка: {result.error}"
 
+                _tc_latency_ms = int((time.time() - tool_t0) * 1000)
                 await _emit("tool_call_done", {
                     "name": func_name,
                     "round": round_num,
                     "ok": tool_ok,
-                    "latency_ms": int((time.time() - tool_t0) * 1000),
+                    "latency_ms": _tc_latency_ms,
                     "output_chars": len(tool_output or ""),
                     "output_tokens": _ct(tool_output or ""),
+                })
+                debug_trace["tool_calls"].append({
+                    "round": round_num,
+                    "name": func_name,
+                    "args_preview": json.dumps(func_args, ensure_ascii=False)[:300],
+                    "ok": tool_ok,
+                    "latency_ms": _tc_latency_ms,
+                    "output_chars": len(tool_output or ""),
                 })
                 logger.debug(f"[{correlation_id}] Tool result ({len(tool_output)} chars): {tool_output[:200]}")
                 tool_outputs_current_request.append({"tool": func_name, "output": tool_output})
@@ -1156,7 +1676,7 @@ async def _chat_completion_inner(
                 if tool_ok:
                     try:
                         from app.services.artifacts.tool_result_capture import capture_tool_result_as_artifact
-                        asyncio.create_task(capture_tool_result_as_artifact(
+                        _capture_task = asyncio.create_task(capture_tool_result_as_artifact(
                             tenant_id=tenant_id,
                             chat_id=chat_id,
                             user_message_id=uuid.UUID(str(user_message_id)) if user_message_id else None,
@@ -1164,6 +1684,10 @@ async def _chat_completion_inner(
                             arguments=func_args,
                             output=tool_output or "",
                         ))
+                        # Bucket by ROUND of the tool execution (round_num).
+                        # debug.rounds[round_num].artifacts_captured will list
+                        # everything that became an Artifact this turn.
+                        _capture_tasks_by_round.setdefault(round_num, []).append((func_name, _capture_task))
                     except Exception:
                         logger.exception("[%s] tool-result capture scheduling failed (non-fatal)", correlation_id)
 
@@ -1190,7 +1714,7 @@ async def _chat_completion_inner(
             resp = await provider.chat_completion(
                 messages=messages,
                 model=model_name,
-                temperature=effective_temperature,
+                temperature=_temp_for(tool_defs),
                 max_tokens=config.max_tokens,
                 tools=tool_defs,
                 on_chunk=chunk_cb,
@@ -1210,6 +1734,9 @@ async def _chat_completion_inner(
                 "latency_ms": _rN_latency_ms,
                 "has_tool_calls": bool(resp.tool_calls),
                 "tool_calls_count": len(resp.tool_calls or []) if resp.tool_calls else 0,
+                "messages_snapshot": _snapshot_messages(messages),
+                "response_content_chars": len(resp.content or ""),
+                "response_reasoning_chars": len(getattr(resp, "reasoning", "") or ""),
             })
             await _emit("provider_call_done", {
                 "round": round_num,
@@ -1236,7 +1763,7 @@ async def _chat_completion_inner(
             and not resp.tool_calls
             and tool_defs
             and _is_lazy_response(resp.content or "")
-            and round_num < MAX_TOOL_ROUNDS
+            and round_num < _resolve_max_tool_rounds(config)
         ):
             logger.info(
                 f"[{correlation_id}] anti-lazy nudge: model wrote lazy intent without tool_call, content={(resp.content or '')[:120]!r}"
@@ -1259,7 +1786,7 @@ async def _chat_completion_inner(
             resp = await provider.chat_completion(
                 messages=messages,
                 model=model_name,
-                temperature=effective_temperature,
+                temperature=_temp_for(tool_defs),
                 max_tokens=config.max_tokens,
                 tools=tool_defs,
                 on_chunk=chunk_cb,
@@ -1284,7 +1811,7 @@ async def _chat_completion_inner(
             if resp.completion_tokens:
                 total_completion_tokens += resp.completion_tokens
             # If the model NOW returned tool_calls — re-enter the tool loop for them.
-            while resp.tool_calls and round_num < MAX_TOOL_ROUNDS:
+            while resp.tool_calls and round_num < _resolve_max_tool_rounds(config):
                 round_num += 1
                 tool_calls_total += len(resp.tool_calls)
                 messages.append(provider.format_assistant_turn(resp))
@@ -1328,7 +1855,7 @@ async def _chat_completion_inner(
                     if tool_ok:
                         try:
                             from app.services.artifacts.tool_result_capture import capture_tool_result_as_artifact
-                            asyncio.create_task(capture_tool_result_as_artifact(
+                            _capture_task = asyncio.create_task(capture_tool_result_as_artifact(
                                 tenant_id=tenant_id,
                                 chat_id=chat_id,
                                 user_message_id=uuid.UUID(str(user_message_id)) if user_message_id else None,
@@ -1336,6 +1863,7 @@ async def _chat_completion_inner(
                                 arguments=func_args,
                                 output=tool_output or "",
                             ))
+                            _capture_tasks_by_round.setdefault(round_num, []).append((func_name, _capture_task))
                         except Exception:
                             logger.exception("[%s] tool-result capture scheduling failed (non-fatal)", correlation_id)
                     messages.append(provider.format_tool_result_turn(
@@ -1347,13 +1875,16 @@ async def _chat_completion_inner(
                 )
                 total_prompt_tokens += summary_prompt_tokens
                 total_completion_tokens += summary_completion_tokens
+                # Re-route per round: now that more tool-results are in,
+                # context may have crossed the size threshold.
+                await _route_for_round(round_num)
                 await _emit("provider_call_start", {"round": round_num, "model": model_name})
                 provider_t0 = time.time()
                 current_round_ref["round"] = round_num
                 resp = await provider.chat_completion(
                     messages=messages,
                     model=model_name,
-                    temperature=effective_temperature,
+                    temperature=_temp_for(tool_defs),
                     max_tokens=config.max_tokens,
                     tools=tool_defs,
                     on_chunk=chunk_cb,
@@ -1377,18 +1908,19 @@ async def _chat_completion_inner(
                 if resp.completion_tokens:
                     total_completion_tokens += resp.completion_tokens
 
-        # If we exhausted MAX_TOOL_ROUNDS while the model still wanted more
-        # tools (and produced no useful content), force one more LLM call
+        # If we exhausted the tool-rounds cap while the model still wanted
+        # more tools (and produced no useful content), force one more LLM call
         # WITHOUT tools — instructing it to summarize what it has so the user
         # gets at least a partial answer instead of a blank assistant message.
+        _cap = _resolve_max_tool_rounds(config)
         if (
             resp
             and resp.tool_calls
-            and round_num >= MAX_TOOL_ROUNDS
+            and round_num >= _cap
             and not (resp.content or "").strip()
         ):
             logger.info(
-                f"[{correlation_id}] Tool rounds exhausted ({MAX_TOOL_ROUNDS}); "
+                f"[{correlation_id}] Tool rounds exhausted ({_cap}); "
                 f"forcing summary call without tools"
             )
             # Add the unfinished assistant turn so history is consistent,
@@ -1493,22 +2025,28 @@ async def _chat_completion_inner(
         elif m["role"] in ("user", "assistant"):
             history_content += _content_to_text(m.get("content", "")) + " "
 
-    system_prompt_chars = len(config.system_prompt or "")
-    rules_chars = len(config.rules_text or "")
-    memory_chars = sum(len(m.content or "") for m in memory_entries)
-    kb_chars = sum(len(c.content or "") for c in kb_chunks)
-    history_chars = len(history_content)
-    tools_chars = len(json.dumps(tool_defs)) if tool_defs else 0
+    system_prompt_text = config.system_prompt or ""
+    rules_text = config.rules_text or ""
+    memory_text = "".join(m.content or "" for m in memory_entries)
+    kb_text = "".join(c.content or "" for c in kb_chunks)
+    tools_text = json.dumps(tool_defs) if tool_defs else ""
 
-    # Approximate token counts (1 token ≈ 3.5 chars for multilingual text)
-    TOKEN_RATIO = 3.5
+    system_prompt_chars = len(system_prompt_text)
+    rules_chars = len(rules_text)
+    memory_chars = len(memory_text)
+    kb_chars = len(kb_text)
+    history_chars = len(history_content)
+    tools_chars = len(tools_text)
+
+    # Token counts via tiktoken (cl100k_base). Telemetry only — exact prompt
+    # tokens come from the provider in usage.prompt_tokens.
     context_breakdown = {
-        "system_prompt": {"chars": system_prompt_chars, "est_tokens": int(system_prompt_chars / TOKEN_RATIO)},
-        "rules": {"chars": rules_chars, "est_tokens": int(rules_chars / TOKEN_RATIO)},
-        "memory": {"chars": memory_chars, "entries": len(memory_entries), "est_tokens": int(memory_chars / TOKEN_RATIO)},
-        "kb": {"chars": kb_chars, "chunks": len(kb_chunks), "est_tokens": int(kb_chars / TOKEN_RATIO)},
-        "history": {"chars": history_chars, "messages": len([m for m in messages if m["role"] != "system"]), "est_tokens": int(history_chars / TOKEN_RATIO)},
-        "tools": {"chars": tools_chars, "count": len(tool_defs) if tool_defs else 0, "est_tokens": int(tools_chars / TOKEN_RATIO)},
+        "system_prompt": {"chars": system_prompt_chars, "est_tokens": _ct(system_prompt_text)},
+        "rules": {"chars": rules_chars, "est_tokens": _ct(rules_text)},
+        "memory": {"chars": memory_chars, "entries": len(memory_entries), "est_tokens": _ct(memory_text)},
+        "kb": {"chars": kb_chars, "chunks": len(kb_chunks), "est_tokens": _ct(kb_text)},
+        "history": {"chars": history_chars, "messages": len([m for m in messages if m["role"] != "system"]), "est_tokens": _ct(history_content)},
+        "tools": {"chars": tools_chars, "count": len(tool_defs) if tool_defs else 0, "est_tokens": _ct(tools_text)},
     }
     total_est_tokens = sum(v["est_tokens"] for v in context_breakdown.values())
     context_breakdown["total_est_tokens"] = total_est_tokens
@@ -1528,7 +2066,13 @@ async def _chat_completion_inner(
         "tools_count": len(tool_defs) if tool_defs else 0,
         "tool_rounds": tool_calls_total,
         "context_breakdown": context_breakdown,
-        "prompt_layout": _build_prompt_layout(messages, tool_defs, tool_mode=needs_tools),
+        "prompt_layout": _build_prompt_layout(
+            messages,
+            tool_defs,
+            tool_mode=needs_tools,
+            system_block_labels=system_block_labels,
+            system_block_contents=system_parts,
+        ),
     }
     norm_resp: dict = {"content_length": len(resp.content) if resp else 0}
     if tool_calls_total > 0:
@@ -1595,6 +2139,66 @@ async def _chat_completion_inner(
         except (ValueError, TypeError):
             message_uuid = None
 
+    # Await artifact-capture tasks so we can attribute the new artifact_ids
+    # back to their round in debug.rounds[].artifacts_captured. Tasks were
+    # fired as background; we briefly wait (with a tight cap so we don't
+    # block the response if some hang). Embedder failures inside capture
+    # already log and return None — we just collect the ids.
+    if _capture_tasks_by_round:
+        try:
+            for r_num, items in _capture_tasks_by_round.items():
+                tasks = [t for _, t in items]
+                done = await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True),
+                    timeout=5.0,
+                )
+                arts: list[dict] = []
+                for (t_name, _t), result in zip(items, done):
+                    aid: str | None = None
+                    if not isinstance(result, Exception) and result is not None:
+                        aid = str(result)
+                    arts.append({"tool_name": t_name, "artifact_id": aid})
+                for r_entry in round_breakdown:
+                    if r_entry.get("round") == r_num:
+                        r_entry["artifacts_captured"] = arts
+                        break
+        except asyncio.TimeoutError:
+            logger.warning("[%s] artifact-capture tasks timed out (5s); debug.artifacts_captured may be incomplete", correlation_id)
+        except Exception:
+            logger.exception("[%s] failed to collect artifact-capture results (non-fatal)", correlation_id)
+
+    # Finalize debug trace before persisting.
+    debug_trace["rounds"] = round_breakdown
+    debug_trace["context"] = {
+        "messages_count": len(messages),
+        "memory_count": len(memory_entries),
+        "kb_chunks_count": len(kb_chunks),
+        "tools_count": len(tools),
+        "tool_names": [t.get("function", {}).get("name") for t in (tool_defs or []) if t.get("function")],
+    }
+    debug_trace["blocks_present"] = [
+        name for name, present in (
+            ("ACTIVE-ARTIFACTS", bool(active_artifacts_block_text)),
+            ("MEMORY", bool(memory_entries)),
+            ("KB", bool(kb_chunks)),
+            ("ATTACHMENTS", bool(locals().get("_attachments_block_text"))),
+        ) if present
+    ]
+    debug_trace["config_snapshot"] = {
+        "model_name": model_name,
+        "provider_type": resolved.provider_type,
+        "embedding_model": getattr(config, "embedding_model_name", None),
+        "response_language": getattr(config, "response_language", None),
+        "max_context_messages": getattr(config, "max_context_messages", None),
+    }
+    debug_trace["final"] = {
+        "status": status,
+        "finish_reason": resp.finish_reason if resp else None,
+        "content_chars": len(resp.content or "") if resp else 0,
+        "reasoning_chars": len(getattr(resp, "reasoning", "") or "") if resp else 0,
+        "latency_ms": latency,
+    }
+
     log = LLMRequestLog(
         tenant_id=tenant_id,
         chat_id=chat_id,
@@ -1603,6 +2207,7 @@ async def _chat_completion_inner(
         correlation_id=correlation_id,
         provider_type=resolved.provider_type,
         model_name=model_name,
+        served_by="llm",
         raw_request=raw_req,
         raw_response=raw_resp,
         normalized_request=norm_req,
@@ -1628,6 +2233,10 @@ async def _chat_completion_inner(
         tokens_kb=_tokens_kb or None,
         tokens_history=_tokens_history or None,
         tokens_user=_tokens_user or None,
+        # Per-tenant switch: when off, we skip persisting the (potentially
+        # large) debug snapshot. The trace was still assembled in memory
+        # because pipeline branches rely on it for streaming events.
+        debug=(debug_trace if getattr(config, "debug_enabled", True) else None),
     )
     db.add(log)
 
@@ -1683,7 +2292,51 @@ async def _chat_completion_inner(
                 fallback_model_name=summary_model,
             )
 
-    # 11. Return response
+    # 11. Compute context-pressure warning.
+    # Two signals:
+    #   (a) peak prompt_tokens of any round vs model.max_context_tokens — if
+    #       ≥85% we're filling the model's window and risk truncation/error.
+    #   (b) we're capped by max_context_messages and there's much more history
+    #       than we sent — model can't see older context, may give worse answers.
+    context_warning: dict | None = None
+    try:
+        max_ctx = resolved.max_context_tokens or 0
+        peak_prompt = max((r.get("prompt_tokens", 0) for r in round_breakdown), default=0)
+        if max_ctx and peak_prompt:
+            ratio = peak_prompt / max_ctx
+            if ratio >= 0.85:
+                context_warning = {
+                    "kind": "near_model_limit",
+                    "ratio": round(ratio, 3),
+                    "prompt_tokens": peak_prompt,
+                    "max_context_tokens": max_ctx,
+                    "message": (
+                        f"Промпт занял {peak_prompt:,} токенов из {max_ctx:,} "
+                        f"({int(ratio*100)}%) — близко к лимиту окна модели. "
+                        "Сократи историю или переключись на модель с большим контекстом."
+                    ).replace(",", " "),
+                }
+        if context_warning is None:
+            cap = int(getattr(config, "max_context_messages", 0) or 0)
+            if cap and total_messages_count > cap * 2:
+                context_warning = {
+                    "kind": "history_truncated",
+                    "cap": cap,
+                    "total": total_messages_count,
+                    "message": (
+                        f"Из {total_messages_count} сообщений чата в контекст "
+                        f"отправлены только последние {cap}. Старые повороты "
+                        "не видны модели — для деталей зови recall_chat / get_message."
+                    ),
+                }
+    except Exception:
+        logger.exception("[pipeline] context warning compute failed (non-fatal)")
+
+    if context_warning:
+        await _emit("context_warning", context_warning)
+        debug_trace["context_warning"] = context_warning
+
+    # 12. Return response
     final_payload = {
         "content": resp.content,
         "prompt_tokens": total_prompt_tokens or resp.prompt_tokens,
@@ -1703,6 +2356,7 @@ async def _chat_completion_inner(
         "attachment_summary": attachment_summary,
         "context_card": context_card,
         "history_exclude": history_exclude,
+        "context_warning": context_warning,
     }
     await _emit("done", {
         "content": resp.content,
@@ -1812,7 +2466,12 @@ async def _auto_summary_background(
     *,
     fallback_model_name: str | None = None,
 ):
-    """Background task: auto-generate chat title without blocking the response."""
+    """Auto-generate chat title from first turn.
+
+    provider may be None (e.g. Tier 0 path where no LLM was loaded).
+    Falls back to using the first line of user_content as the title when
+    the LLM summarise call fails or provider is unavailable.
+    """
     try:
         from app.core.database import async_session
         from app.models.chat import Chat
@@ -1820,14 +2479,24 @@ async def _auto_summary_background(
             chat = (await db.execute(select(Chat).where(Chat.id == chat_id))).scalar_one_or_none()
             if not chat or (chat.title and chat.description):
                 return
-            summary_model = _pick_summary_model_name(config, fallback_model_name)
-            language_hint = _detect_title_language(user_content)
-            summary = await provider.summarize(
-                f"User message:\n{user_content}\n\nAssistant response:\n{assistant_content}",
-                summary_model,
-                language_hint=language_hint,
-            )
-            summary = summary[:200]
+            summary: str | None = None
+            if provider is not None:
+                try:
+                    summary_model = _pick_summary_model_name(config, fallback_model_name)
+                    language_hint = _detect_title_language(user_content)
+                    summary = await provider.summarize(
+                        f"User message:\n{user_content}\n\nAssistant response:\n{assistant_content}",
+                        summary_model,
+                        language_hint=language_hint,
+                    )
+                    summary = (summary or "").strip()[:200]
+                except Exception:
+                    logger.debug("LLM summarize failed, falling back to user content", exc_info=True)
+            if not summary:
+                # Fallback: use the first line of the user message, truncated.
+                summary = (user_content or "").strip().split('\n')[0][:100].strip()
+            if not summary:
+                return
             if not chat.title:
                 chat.title = summary
             if not chat.description:
@@ -1837,22 +2506,21 @@ async def _auto_summary_background(
         logger.debug("Background auto-summary failed", exc_info=True)
 
 
-MEMORY_EXTRACTION_PROMPT = """Проанализируй диалог и извлеки ТОЛЬКО факты, которые НЕЛЬЗЯ восстановить через инструменты (поиск клиентов / адресов / оборудования) и которые будут полезны для БУДУЩИХ диалогов.
+MEMORY_EXTRACTION_PROMPT = """Проанализируй диалог и извлеки ТОЛЬКО факты, которые НЕЛЬЗЯ восстановить через инструменты (tools) и которые будут полезны для БУДУЩИХ диалогов.
 
 Верни ТОЛЬКО JSON-массив фактов. Каждый факт — объект:
-- "fact": краткая формулировка (1 предложение, на русском)
+- "fact": краткая формулировка (1 предложение, на языке диалога)
 - "type": "long_term" (постоянная характеристика) или "episodic" (контекст текущей сессии)
 
 ИЗВЛЕКАЙ:
-- Предпочтения пользователя в работе (как любит получать ответы, какие команды чаще использует).
-- Принятые решения и выводы по инфраструктуре, которые НЕ записаны в БД (например: «свич X решено заменить через неделю», «магистраль на улице Y перегружена»).
-- Имя/роль самого пользователя если он его сообщил («Меня зовут Артём, я админ сети»).
-- Названия проектов / зон ответственности пользователя.
+- Предпочтения пользователя: как любит получать ответы, формат вывода, стиль общения.
+- Решения и выводы, которые НЕ хранятся в БД (например: «объект X решено перенести», «задача Y приостановлена до пятницы»).
+- Имя / роль пользователя, если он его сообщил («Меня зовут Иван, я администратор»).
+- Названия проектов, зон ответственности или рабочих областей пользователя.
 
 НЕ ИЗВЛЕКАЙ:
-- Данные клиентов: ФИО, телефон, адрес, договор, тариф, услуга, MAC, IP — это всё в БД, доступно через tools.
-- Параметры конкретного оборудования (id свича, IP, vendor) — берётся через tools.
-- Результаты диагностики (порт N в forwarding, ONU online) — meaningless вне контекста.
+- Конкретные данные, которые живут в БД и доступны через tools: идентификаторы, адреса, номера, статусы, параметры объектов.
+- Результаты разовых запросов / диагностики — они устаревают и бессмысленны вне контекста.
 - Промежуточные шаги диалога, цитаты из ответов модели, обрывки tool-вывода.
 - Общеизвестную информацию.
 
@@ -1866,18 +2534,12 @@ JSON:"""
 
 # Heuristics to drop low-value extracted facts that slipped through the prompt.
 _MEMORY_BLOCK_PATTERNS = [
-    r"клиент(а|у)?\s",
-    r"\bФИО\b",
-    r"номер\s+(договор|телефон)",
     r"\bMAC\b",
     r"IP\s*[-:]?\s*\d",
     r"\bport\b|\bпорт\s*\d",
-    r"\bONU\b",
-    r"тариф",
-    r"услуг(а|и)",
+    r"в\s+статусе\s+(forward|down|up|online|offline)",
     r"подключен\s+через",
-    r"в\s+статусе\s+(forward|down|up)",
-    r"оборудовани(е|и)",
+    r"\bid\s*[:=]\s*\d",
 ]
 import re as _re
 _MEMORY_BLOCK_RE = _re.compile("|".join(_MEMORY_BLOCK_PATTERNS), _re.IGNORECASE)
@@ -2238,7 +2900,21 @@ def _message_content_text(content) -> str:
     return ""
 
 
-def _build_prompt_layout(messages: list[dict], tool_defs: list[dict] | None, *, tool_mode: bool) -> dict:
+def _build_prompt_layout(
+    messages: list[dict],
+    tool_defs: list[dict] | None,
+    *,
+    tool_mode: bool,
+    system_block_labels: list[str] | None = None,
+    system_block_contents: list[str] | None = None,
+) -> dict:
+    # Find the last user message — that's the "current request", even when
+    # system tails (language reminder, etc) get appended after it.
+    last_user_idx = -1
+    for i, m in enumerate(messages):
+        if m.get("role") == "user":
+            last_user_idx = i
+
     sections: list[dict] = []
     for idx, msg in enumerate(messages):
         role = msg.get("role")
@@ -2254,7 +2930,7 @@ def _build_prompt_layout(messages: list[dict], tool_defs: list[dict] | None, *, 
         elif role == "system":
             kind = "history_reference"
             title = "История как справка"
-        elif role == "user" and idx == len(messages) - 1:
+        elif role == "user" and idx == last_user_idx:
             kind = "current_request"
             title = "Текущий запрос"
         elif role == "assistant":
@@ -2274,6 +2950,23 @@ def _build_prompt_layout(messages: list[dict], tool_defs: list[dict] | None, *, 
             section["content"] = compact
         sections.append(section)
 
+    # The first system message is a concatenation of independent blocks
+    # (language pin, ontology, HARDCODED-*, BLOCK-MEMORY-*, BLOCK-KB, ...).
+    # Expose them as a sibling array so the UI can render each block as
+    # its own card with a "where this came from" label, instead of one
+    # opaque megablob.
+    system_blocks: list[dict] = []
+    if system_block_labels and system_block_contents and len(system_block_labels) == len(system_block_contents):
+        for label, content in zip(system_block_labels, system_block_contents):
+            text = content or ""
+            compact = _compact_text(text, max_chars=1600)
+            system_blocks.append({
+                "label": label,
+                "chars": len(text),
+                "est_tokens": _ct(text),
+                "content": compact if compact else text[:1600],
+            })
+
     tool_names: list[str] = []
     if tool_defs:
         for tool in tool_defs:
@@ -2286,6 +2979,7 @@ def _build_prompt_layout(messages: list[dict], tool_defs: list[dict] | None, *, 
     return {
         "mode": "tool_partitioned" if tool_mode else "chat_transcript",
         "sections": sections,
+        "system_blocks": system_blocks,
         "tools": {
             "count": len(tool_names),
             "names": tool_names[:40],
@@ -2562,7 +3256,6 @@ TOOL_KEYWORD_THRESHOLD = 80   # use keyword matching up to this; semantic above
 TOOL_SEMANTIC_TOPK = 18       # how many tools to pull from semantic search
 LOCAL_QWEN_TOOL_BUDGET = 8
 DEFAULT_TOOL_BUDGET = 12
-TOOL_ROUTE_PON = "pon_address_workflow"
 
 
 def _tool_budget_for_model(model_name: str | None) -> int:
@@ -2570,52 +3263,6 @@ def _tool_budget_for_model(model_name: str | None) -> int:
     if "qwen2.5" in lowered or "qwen2_5" in lowered:
         return LOCAL_QWEN_TOOL_BUDGET
     return DEFAULT_TOOL_BUDGET
-
-
-def _detect_tool_route(user_message: str) -> str | None:
-    text = (user_message or "").lower()
-    if not text:
-        return None
-    pon_keywords = (
-        "pon", "gpon", "epon", "xpon",
-        "делител", "сплиттер", "splitter",
-        "хвост", "свободн", "бюджет", "dbm", "сигнал", "olt", "onu",
-    )
-    if any(token in text for token in pon_keywords):
-        return TOOL_ROUTE_PON
-    return None
-
-
-def _route_tool_names(route_name: str | None) -> list[str]:
-    if route_name == TOOL_ROUTE_PON:
-        return [
-            "pon_search",
-            "pon_tree",
-            "pon_path",
-            "pon_olts",
-            "search_addresses",
-            "pon_nearby",
-            "geocode_address",
-        ]
-    return []
-
-
-def _tool_route_system_hint(route_name: str | None, available_tool_names: set[str]) -> str | None:
-    if route_name != TOOL_ROUTE_PON:
-        return None
-    has_pon_search = "pon_search" in available_tool_names
-    has_pon_tree = "pon_tree" in available_tool_names
-    has_pon_path = "pon_path" in available_tool_names
-    ordered_steps: list[str] = []
-    if has_pon_search:
-        ordered_steps.append("1. СНАЧАЛА ищи объект по адресу/комментарию через pon_search.")
-    if has_pon_tree:
-        ordered_steps.append("2. Если найден делитель/сплиттер/OLT/клиент с ancestors — используй pon_tree для проверки хвостов, клиентов и сигнала.")
-    if has_pon_path:
-        ordered_steps.append("3. Если нужен путь до OLT или уточнение родителя — используй pon_path.")
-    ordered_steps.append("4. Не используй geocode_address или pon_nearby, пока pon_search не вернул пусто или неоднозначно.")
-    ordered_steps.append("5. Не меняй адрес пользователя на соседний адрес из истории без нового tool-результата.")
-    return "PON workflow:\n" + "\n".join(ordered_steps)
 
 
 _TOPIC_TOKEN_RE = re.compile(r"[A-Za-zА-Яа-яЁёІіЇїЄєҐґ0-9][A-Za-zА-Яа-яЁёІіЇїЄєҐґ0-9\.-]{2,}")
@@ -2645,11 +3292,6 @@ def _should_carry_tool_history(current_user_content: str, prior_user_content: st
     prior = (prior_user_content or "").strip()
     if not current or not prior:
         return False
-
-    current_route = _detect_tool_route(current)
-    prior_route = _detect_tool_route(prior)
-    if current_route or prior_route:
-        return current_route is not None and current_route == prior_route
 
     current_distinctive = _extract_distinctive_tokens(current)
     prior_distinctive = _extract_distinctive_tokens(prior)
@@ -2715,6 +3357,7 @@ async def _select_relevant_tools(
     embedding_model: str | None = None,
     db = None,
     tenant_id: str | None = None,
+    semantic_floor: float = 0.5,
 ) -> list:
     """
     Select relevant tools for the user message:
@@ -2735,33 +3378,30 @@ async def _select_relevant_tools(
         return []
 
     budget = min(MAX_TOOLS_PER_REQUEST, _tool_budget_for_model(model_name))
-    route_name = _detect_tool_route(user_message)
 
-    # Tier 1 — small set, send everything only when the budget allows it and
-    # there is no domain route that needs to narrow the tool space.
-    if len(all_tools) <= budget and route_name is None:
+    # Tier 1 — small set, send everything when the budget allows it.
+    if len(all_tools) <= budget:
         return all_tools
 
     pinned = [t for t in all_tools if getattr(t, "is_pinned", False)]
     pinned_ids = {t.id for t in pinned}
     rest = [t for t in all_tools if t.id not in pinned_ids]
+    # Tag pinned tools with their selection source — used by debug-trace.
+    for t in pinned:
+        t._selection_source = "pinned"
 
     selected: list = []
     selection_method = ""
 
-    route_tool_names = _route_tool_names(route_name)
-    if route_tool_names:
-        route_map = {
-            ((t.config_json or {}).get("function") or {}).get("name", t.name): t
-            for t in rest
-        }
-        selected = [route_map[name] for name in route_tool_names if name in route_map]
-        selection_method = f"route:{route_name}"
-
-    # Tier 2 — semantic search when embeddings available (default for >MAX)
+    # Tier 2 — semantic search when embeddings available. Domain workflows
+    # (e.g. PON: pon_search → pon_tree) belong in tenant.ontology_prompt as
+    # plain instructions, not as a hardcoded route here — keeping selection
+    # purely semantic keeps the pipeline tenant-agnostic.
     embeddable = [t for t in rest if getattr(t, "embedding", None) is not None]
     has_enough_embeddings = embedding_model and db is not None and tenant_id and len(embeddable) >= len(rest) // 2
-    if not selected and has_enough_embeddings:
+    semantic_selected: list = []
+    non_embedded_fallback: list = []
+    if has_enough_embeddings:
         try:
             from app.services.tools.embedder import search_tools
             semantic_results = await search_tools(
@@ -2772,18 +3412,52 @@ async def _select_relevant_tools(
                 top_k=TOOL_SEMANTIC_TOPK,
             )
             if semantic_results:
-                # Include semantic hits PLUS any non-embedded tools (don't silently drop them)
-                semantic_ids = {t.id for t in semantic_results}
-                non_embedded = [t for t in rest if getattr(t, "embedding", None) is None and t.id not in semantic_ids]
-                selected = [*semantic_results, *non_embedded]
-                selection_method = "semantic"
+                # Apply per-tenant similarity floor — tools below it are noisy
+                # "kinda matches" that crowd the prompt without adding signal.
+                # Non-embedded tools bypass this floor (we can't score them).
+                semantic_filtered = [
+                    t for t in semantic_results
+                    if (getattr(t, "_semantic_score", None) or 0.0) >= float(semantic_floor or 0.0)
+                ]
+                semantic_ids = {t.id for t in semantic_filtered}
+                non_embedded_fallback = [t for t in rest if getattr(t, "embedding", None) is None and t.id not in semantic_ids]
+                for t in semantic_filtered:
+                    t._selection_source = "semantic"
+                    # _semantic_score already set by search_tools
+                for t in non_embedded_fallback:
+                    t._selection_source = "non-embedded-fallback"
+                semantic_selected = semantic_filtered
+                if len(semantic_filtered) < len(semantic_results):
+                    logger.info(
+                        "[tool-select] semantic floor %.2f cut %d/%d tools (kept %d)",
+                        semantic_floor, len(semantic_results) - len(semantic_filtered),
+                        len(semantic_results), len(semantic_filtered),
+                    )
         except Exception:
             logger.exception("semantic tool selection failed; falling back to keyword")
+
+    # Merge semantic + non-embedded fallback — dedup by tool id.
+    if semantic_selected or non_embedded_fallback:
+        seen_merge: set = set()
+        for src in (semantic_selected, non_embedded_fallback):
+            for t in src:
+                if t.id in seen_merge:
+                    continue
+                seen_merge.add(t.id)
+                selected.append(t)
+        parts = []
+        if semantic_selected:
+            parts.append("semantic")
+        if not parts and non_embedded_fallback:
+            parts.append("non-embedded-fallback")
+        selection_method = "+".join(parts)
 
     # Tier 3 — keyword fallback (also used for small tenants without embeddings)
     if not selected and len(rest) <= TOOL_KEYWORD_THRESHOLD:
         try:
             selected = _keyword_match_tools(rest, user_message)
+            for t in selected:
+                t._selection_source = "keyword"
             selection_method = "keyword"
         except Exception:
             logger.exception("keyword tool selection failed")
@@ -2792,6 +3466,8 @@ async def _select_relevant_tools(
     if not selected:
         try:
             selected = await _llm_select_tools(rest, user_message, provider, model_name)
+            for t in selected:
+                t._selection_source = "llm-pick"
             selection_method = "llm-pick"
         except Exception:
             selected = []
@@ -2799,7 +3475,7 @@ async def _select_relevant_tools(
 
     # Pinned tools are "system-essentials" (memory/artifacts/RAG helpers).
     # They go in ABOVE the budget — budget only constrains the non-pinned
-    # semantic/route/keyword selection. Otherwise pinned starves out the
+    # semantic/keyword selection. Otherwise pinned starves out the
     # actually-relevant tools for the user query (observed: 7 pinned filled
     # the 8-slot Qwen budget and squeezed out `ping` for a network query).
     seen_ids: set = set()
@@ -2983,6 +3659,42 @@ def _augment_public_tool_definition(function_def: dict, tool_config: dict) -> No
     handler = str(runtime.get("handler") or "").strip().lower()
     if handler == "search_records":
         _augment_search_records_tool_definition(function_def, runtime)
+
+    # Generic — works for any tool that declares which fields are selectable.
+    selectable = runtime.get("selectable_fields")
+    if isinstance(selectable, list) and selectable:
+        _augment_selectable_fields_tool_definition(function_def, selectable)
+
+
+def _augment_selectable_fields_tool_definition(function_def: dict, selectable_fields: list) -> None:
+    """Inject a `fields` parameter into the tool schema so the LLM knows it
+    can ask for only specific output columns. Executor post-filters the
+    response to match.
+
+    Skip if the tool already has a `fields` property (admin defined their
+    own — don't clobber).
+    """
+    params = function_def.get("parameters")
+    if not isinstance(params, dict):
+        return
+    props = params.get("properties")
+    if not isinstance(props, dict):
+        return
+    if "fields" in props:
+        return  # admin-defined; respect it
+    clean = [str(f).strip() for f in selectable_fields if isinstance(f, str) and str(f).strip()]
+    if not clean:
+        return
+    props["fields"] = {
+        "type": "array",
+        "items": {"type": "string", "enum": clean},
+        "description": (
+            "Опционально: список нужных полей результата. По умолчанию возвращаются ВСЕ. "
+            "Указывай, когда тебе нужны только несколько колонок — это уменьшит размер "
+            f"ответа в разы. Допустимые поля: {', '.join(clean[:20])}"
+            + (", ..." if len(clean) > 20 else "")
+        ),
+    }
 
 
 def _augment_search_records_tool_definition(function_def: dict, runtime: dict) -> None:

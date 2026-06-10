@@ -1,9 +1,13 @@
 """
 KB document processing: chunking, embedding, URL scraping, file parsing.
 """
+import asyncio
+import ipaddress
 import logging
 import re
+import socket
 import uuid
+from urllib.parse import urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -82,12 +86,43 @@ def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
 
 # --- Content extraction ---
 
+async def _assert_public_http_url(url: str) -> None:
+    """SSRF guard: KB URLs are tenant-admin input, so they must not reach
+    loopback/LAN/link-local addresses (ERP API, Ollama, metadata services)."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"Недопустимая схема URL: {parsed.scheme or 'нет'}")
+    host = parsed.hostname
+    if not host:
+        raise ValueError("URL не содержит хоста")
+    loop = asyncio.get_running_loop()
+    try:
+        infos = await asyncio.wait_for(
+            loop.run_in_executor(None, socket.getaddrinfo, host, None), timeout=5.0
+        )
+    except (socket.gaierror, asyncio.TimeoutError):
+        raise ValueError(f"Не удалось разрешить хост: {host}")
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if not ip.is_global:
+            raise ValueError(f"URL указывает на внутренний адрес ({ip}) — загрузка запрещена")
+
+
 async def fetch_url_content(url: str) -> str:
     """Fetch and extract text content from a URL."""
-    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-        response = await client.get(url, headers={
-            "User-Agent": "Mozilla/5.0 (compatible; KBBot/1.0)",
-        })
+    # Redirects are followed manually so every hop passes the SSRF guard.
+    await _assert_public_http_url(url)
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
+        current_url = url
+        for _ in range(5):
+            response = await client.get(current_url, headers={
+                "User-Agent": "Mozilla/5.0 (compatible; KBBot/1.0)",
+            })
+            if response.is_redirect:
+                current_url = str(response.next_request.url)
+                await _assert_public_http_url(current_url)
+                continue
+            break
         response.raise_for_status()
         html = response.text
 

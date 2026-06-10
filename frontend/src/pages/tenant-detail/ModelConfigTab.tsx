@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import {
   ActionIcon,
   Alert,
@@ -6,10 +6,13 @@ import {
   Button,
   Card,
   Center,
+  Fieldset,
   Group,
   Loader,
   Modal,
+  NumberInput,
   PasswordInput,
+  SegmentedControl,
   Select,
   SimpleGrid,
   Slider,
@@ -19,8 +22,16 @@ import {
   Text,
   TextInput,
   Title,
+  Tooltip,
 } from '@mantine/core';
-import { IconAlertCircle, IconDeviceFloppy, IconEdit, IconPlus, IconTrash } from '@tabler/icons-react';
+import {
+  IconAlertCircle,
+  IconDeviceFloppy,
+  IconEdit,
+  IconHelpCircle,
+  IconPlus,
+  IconTrash,
+} from '@tabler/icons-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { notifications } from '@mantine/notifications';
 import { customModelsApi, modelConfigApi, modelsApi } from '../../shared/api/endpoints';
@@ -41,6 +52,19 @@ const PROVIDER_OPTIONS_MODEL = [
 type ModelConfigTabProps = {
   tenantId: string;
 };
+
+function Hint({ children, hint }: { children: ReactNode; hint: ReactNode }) {
+  return (
+    <Group gap={4} wrap="nowrap" align="center">
+      <Text component="span" size="sm" fw={500}>{children}</Text>
+      <Tooltip label={hint} multiline w={360} withArrow position="right" openDelay={150}>
+        <ActionIcon size="xs" variant="subtle" color="gray" tabIndex={-1} aria-label="Подсказка">
+          <IconHelpCircle size={14} />
+        </ActionIcon>
+      </Tooltip>
+    </Group>
+  );
+}
 
 export function ModelConfigTab({ tenantId }: ModelConfigTabProps) {
   const queryClient = useQueryClient();
@@ -68,6 +92,8 @@ export function ModelConfigTab({ tenantId }: ModelConfigTabProps) {
   const [autoLightCustomId, setAutoLightCustomId] = useState<string | null>(null);
   const [autoHeavyCustomId, setAutoHeavyCustomId] = useState<string | null>(null);
   const [threshold, setThreshold] = useState(0.5);
+  const [sizeThreshold, setSizeThreshold] = useState(24000);
+  const [useClassifier, setUseClassifier] = useState(false);
   const [dirty, setDirty] = useState(false);
 
   const [customModalOpen, setCustomModalOpen] = useState(false);
@@ -91,6 +117,8 @@ export function ModelConfigTab({ tenantId }: ModelConfigTabProps) {
       setAutoLightCustomId(config.auto_light_custom_model_id);
       setAutoHeavyCustomId(config.auto_heavy_custom_model_id);
       setThreshold(config.complexity_threshold);
+      setSizeThreshold(config.auto_size_threshold ?? 24000);
+      setUseClassifier(config.use_complexity_classifier ?? false);
       setDirty(false);
     }
   }, [config]);
@@ -100,11 +128,7 @@ export function ModelConfigTab({ tenantId }: ModelConfigTabProps) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['tenants', tenantId, 'model-config'] });
       setDirty(false);
-      notifications.show({
-        title: 'Сохранено',
-        message: 'Конфигурация модели обновлена',
-        color: 'green',
-      });
+      notifications.show({ title: 'Сохранено', message: 'Конфигурация модели обновлена', color: 'green' });
     },
     onError: () => {
       notifications.show({ title: 'Ошибка', message: 'Не удалось сохранить', color: 'red' });
@@ -151,6 +175,8 @@ export function ModelConfigTab({ tenantId }: ModelConfigTabProps) {
       auto_light_custom_model_id: autoLightCustomId,
       auto_heavy_custom_model_id: autoHeavyCustomId,
       complexity_threshold: threshold,
+      auto_size_threshold: sizeThreshold,
+      use_complexity_classifier: useClassifier,
     });
   };
 
@@ -200,13 +226,13 @@ export function ModelConfigTab({ tenantId }: ModelConfigTabProps) {
 
   const catalogOptions = (catalogModels || []).map((model: LLMModelBrief) => ({
     value: model.id,
-    label: `${model.name} (${model.model_id}) [${model.tier}]`,
+    label: `${model.name} [${model.tier}]`,
   }));
 
   const customModels = customModelsData?.items || [];
   const customOptions = customModels.map((model: TenantCustomModel) => ({
     value: model.id,
-    label: `${model.name} (${model.model_id}) [приватная]`,
+    label: `${model.name} [приватная]`,
   }));
 
   const markDirty = () => setDirty(true);
@@ -215,166 +241,169 @@ export function ModelConfigTab({ tenantId }: ModelConfigTabProps) {
     return <Center py="md"><Loader /></Center>;
   }
 
+  const ModelPicker = ({
+    color,
+    catalogValue,
+    customValue,
+    onCatalog,
+    onCustom,
+    hint,
+    title,
+  }: {
+    color: string;
+    catalogValue: string | null;
+    customValue: string | null;
+    onCatalog: (v: string | null) => void;
+    onCustom: (v: string | null) => void;
+    hint: string;
+    title: string;
+  }) => (
+    <Fieldset
+      legend={
+        <Group gap={6} wrap="nowrap">
+          <Badge color={color} variant="filled" size="sm">{title}</Badge>
+          <Tooltip label={hint} multiline w={320} withArrow position="right">
+            <ActionIcon size="xs" variant="subtle" color="gray"><IconHelpCircle size={14} /></ActionIcon>
+          </Tooltip>
+        </Group>
+      }
+    >
+      <SimpleGrid cols={{ base: 1, md: 2 }} spacing="sm">
+        <Select
+          label="Из каталога"
+          placeholder="—"
+          data={catalogOptions}
+          value={catalogValue}
+          onChange={(v) => { onCatalog(v); onCustom(null); markDirty(); }}
+          clearable
+          searchable
+          size="sm"
+        />
+        <Select
+          label="Или приватная"
+          placeholder="—"
+          data={customOptions}
+          value={customValue}
+          onChange={(v) => { onCustom(v); onCatalog(null); markDirty(); }}
+          clearable
+          searchable
+          size="sm"
+        />
+      </SimpleGrid>
+    </Fieldset>
+  );
+
   return (
     <>
-      <Stack gap="lg">
-        <Card withBorder padding="lg" maw={800}>
+      <Stack gap="lg" maw={1100}>
+        <Card withBorder padding="lg">
           <Stack gap="md">
-            <Title order={4}>Выбор модели</Title>
-            <Text size="sm" c="dimmed">
-              Выберите режим работы: конкретная модель или автоматический выбор на основе сложности запроса.
-            </Text>
+            <Group justify="space-between" align="flex-end">
+              <div>
+                <Title order={4}>Выбор модели</Title>
+                <Text size="xs" c="dimmed">Manual — фиксированная модель. Auto — классификатор complexity (0-1) выбирает light/heavy.</Text>
+              </div>
+              <SegmentedControl
+                value={mode}
+                onChange={(v) => { setMode(v); markDirty(); }}
+                data={[
+                  { value: 'manual', label: 'Manual' },
+                  { value: 'auto', label: 'Auto' },
+                ]}
+                size="sm"
+              />
+            </Group>
 
             {dirty && (
-              <Alert icon={<IconAlertCircle size={16} />} color="yellow" variant="light">
-                У вас есть несохранённые изменения.
+              <Alert icon={<IconAlertCircle size={14} />} color="yellow" variant="light" py={6}>
+                Несохранённые изменения.
               </Alert>
             )}
 
-            <Select
-              label="Режим выбора модели"
-              data={[
-                { value: 'manual', label: 'Вручную — одна конкретная модель' },
-                { value: 'auto', label: 'Автоматически — по сложности запроса' },
-              ]}
-              value={mode}
-              onChange={(value) => {
-                setMode(value || 'manual');
-                markDirty();
-              }}
-              allowDeselect={false}
-            />
-
             {mode === 'manual' && (
-              <Stack gap="sm">
-                <Text size="sm" fw={500}>Выберите модель из каталога:</Text>
-                <Select
-                  label="Модель из каталога"
-                  placeholder="Выберите модель..."
-                  data={catalogOptions}
-                  value={manualModelId}
-                  onChange={(value) => {
-                    setManualModelId(value);
-                    setManualCustomModelId(null);
-                    markDirty();
-                  }}
-                  clearable
-                  searchable
-                />
-                <Text size="xs" c="dimmed" ta="center">— или приватная модель —</Text>
-                <Select
-                  label="Приватная модель"
-                  placeholder="Выберите модель..."
-                  data={customOptions}
-                  value={manualCustomModelId}
-                  onChange={(value) => {
-                    setManualCustomModelId(value);
-                    setManualModelId(null);
-                    markDirty();
-                  }}
-                  clearable
-                  searchable
-                />
-              </Stack>
+              <ModelPicker
+                color="blue"
+                title="Модель"
+                hint="Все запросы тенанта идут в эту модель."
+                catalogValue={manualModelId}
+                customValue={manualCustomModelId}
+                onCatalog={setManualModelId}
+                onCustom={setManualCustomModelId}
+              />
             )}
 
             {mode === 'auto' && (
               <Stack gap="md">
-                <Text size="sm" c="dimmed">
-                  Система классифицирует сложность запроса (0-1).
-                  Если ниже порога — используется лёгкая модель, иначе — мощная.
-                </Text>
-
-                <Card withBorder padding="sm">
-                  <Text size="sm" fw={500} mb="xs" c="green">Лёгкая модель (простые запросы)</Text>
-                  <Stack gap="xs">
-                    <Select
-                      label="Из каталога"
-                      placeholder="Выберите..."
-                      data={catalogOptions}
-                      value={autoLightModelId}
-                      onChange={(value) => {
-                        setAutoLightModelId(value);
-                        setAutoLightCustomId(null);
-                        markDirty();
-                      }}
-                      clearable
-                      searchable
-                    />
-                    <Select
-                      label="Или приватная"
-                      placeholder="Выберите..."
-                      data={customOptions}
-                      value={autoLightCustomId}
-                      onChange={(value) => {
-                        setAutoLightCustomId(value);
-                        setAutoLightModelId(null);
-                        markDirty();
-                      }}
-                      clearable
-                      searchable
-                    />
-                  </Stack>
-                </Card>
-
-                <Card withBorder padding="sm">
-                  <Text size="sm" fw={500} mb="xs" c="violet">Мощная модель (сложные запросы)</Text>
-                  <Stack gap="xs">
-                    <Select
-                      label="Из каталога"
-                      placeholder="Выберите..."
-                      data={catalogOptions}
-                      value={autoHeavyModelId}
-                      onChange={(value) => {
-                        setAutoHeavyModelId(value);
-                        setAutoHeavyCustomId(null);
-                        markDirty();
-                      }}
-                      clearable
-                      searchable
-                    />
-                    <Select
-                      label="Или приватная"
-                      placeholder="Выберите..."
-                      data={customOptions}
-                      value={autoHeavyCustomId}
-                      onChange={(value) => {
-                        setAutoHeavyCustomId(value);
-                        setAutoHeavyModelId(null);
-                        markDirty();
-                      }}
-                      clearable
-                      searchable
-                    />
-                  </Stack>
-                </Card>
-
-                <div>
-                  <Text size="sm" fw={500} mb={2}>
-                    Порог сложности: {threshold.toFixed(2)}
-                  </Text>
-                  <Text size="xs" c="dimmed" mb="xs">
-                    Запросы с complexity &lt; {threshold.toFixed(2)} → лёгкая модель, остальные → мощная
-                  </Text>
-                  <Slider
-                    min={0}
-                    max={1}
-                    step={0.05}
-                    value={threshold}
-                    onChange={(value) => {
-                      setThreshold(value);
-                      markDirty();
-                    }}
-                    marks={[
-                      { value: 0, label: '0' },
-                      { value: 0.25, label: '0.25' },
-                      { value: 0.5, label: '0.5' },
-                      { value: 0.75, label: '0.75' },
-                      { value: 1, label: '1' },
-                    ]}
-                    mb="xl"
+                <SimpleGrid cols={{ base: 1, lg: 2 }} spacing="md">
+                  <ModelPicker
+                    color="green"
+                    title="Light"
+                    hint="Простые запросы (greeting, арифметика, короткие факты). Также используется классификатором complexity."
+                    catalogValue={autoLightModelId}
+                    customValue={autoLightCustomId}
+                    onCatalog={setAutoLightModelId}
+                    onCustom={setAutoLightCustomId}
                   />
-                </div>
+                  <ModelPicker
+                    color="violet"
+                    title="Heavy"
+                    hint="Сложные запросы (multi-step reasoning, кодогенерация, большие выборки)."
+                    catalogValue={autoHeavyModelId}
+                    customValue={autoHeavyCustomId}
+                    onCatalog={setAutoHeavyModelId}
+                    onCustom={setAutoHeavyCustomId}
+                  />
+                </SimpleGrid>
+
+                <Fieldset legend="Роутинг light → heavy">
+                  <Stack gap="sm">
+                    <NumberInput
+                      label={
+                        <Hint hint="Перед каждым раундом оценивается размер prompt'а (tiktoken). Если выше порога — переключаемся на heavy и не возвращаемся обратно в этом запросе. 0 = выключить size-routing.">
+                          Порог размера контекста, токены
+                        </Hint>
+                      }
+                      value={sizeThreshold}
+                      onChange={(v) => { setSizeThreshold(typeof v === 'number' ? v : 0); markDirty(); }}
+                      min={0}
+                      max={120000}
+                      step={1000}
+                      w={260}
+                    />
+                    <Switch
+                      label={
+                        <Hint hint="Legacy: классификатор сложности — отдельный LLM-вызов light-моделью оценивает запрос (0-1) и при ≥ порога эскалирует в heavy. Менее предсказуем чем size-routing. Off по умолчанию.">
+                          Использовать classifier сложности (legacy)
+                        </Hint>
+                      }
+                      checked={useClassifier}
+                      onChange={(e) => { setUseClassifier(e.currentTarget.checked); markDirty(); }}
+                    />
+                    {useClassifier && (
+                      <div>
+                        <Hint hint="Запросы со score < threshold → light, остальные → heavy. Используется только если classifier включён.">
+                          Порог сложности: {threshold.toFixed(2)}
+                        </Hint>
+                        <Slider
+                          min={0}
+                          max={1}
+                          step={0.05}
+                          value={threshold}
+                          onChange={(v) => { setThreshold(v); markDirty(); }}
+                          marks={[
+                            { value: 0, label: '0' },
+                            { value: 0.25, label: '.25' },
+                            { value: 0.5, label: '.5' },
+                            { value: 0.75, label: '.75' },
+                            { value: 1, label: '1' },
+                          ]}
+                          mt={6}
+                          mb="lg"
+                        />
+                      </div>
+                    )}
+                  </Stack>
+                </Fieldset>
               </Stack>
             )}
 
@@ -391,24 +420,22 @@ export function ModelConfigTab({ tenantId }: ModelConfigTabProps) {
           </Stack>
         </Card>
 
-        <Card withBorder padding="lg" maw={800}>
-          <Stack gap="md">
+        <Card withBorder padding="lg">
+          <Stack gap="sm">
             <Group justify="space-between">
               <div>
-                <Title order={4}>Приватные модели тенанта</Title>
-                <Text size="sm" c="dimmed">
-                  Модели, добавленные этим тенантом. Видны только ему.
-                </Text>
+                <Title order={5}>Приватные модели тенанта</Title>
+                <Text size="xs" c="dimmed">Видны только этому тенанту. Используются как альтернативы каталогу.</Text>
               </div>
-              <Button leftSection={<IconPlus size={16} />} size="sm" onClick={openCreateCustom}>
+              <Button leftSection={<IconPlus size={14} />} size="xs" onClick={openCreateCustom}>
                 Добавить
               </Button>
             </Group>
 
             {!customModels.length ? (
-              <Text c="dimmed" ta="center" py="md">Приватных моделей нет.</Text>
+              <Text c="dimmed" ta="center" py="md" size="sm">Приватных моделей нет.</Text>
             ) : (
-              <Table striped>
+              <Table striped highlightOnHover>
                 <Table.Thead>
                   <Table.Tr>
                     <Table.Th>Название</Table.Th>
@@ -416,23 +443,23 @@ export function ModelConfigTab({ tenantId }: ModelConfigTabProps) {
                     <Table.Th>Model ID</Table.Th>
                     <Table.Th>Уровень</Table.Th>
                     <Table.Th>Статус</Table.Th>
-                    <Table.Th>Действия</Table.Th>
+                    <Table.Th />
                   </Table.Tr>
                 </Table.Thead>
                 <Table.Tbody>
                   {customModels.map((model: TenantCustomModel) => (
                     <Table.Tr key={model.id} style={{ cursor: 'pointer' }} onClick={() => openEditCustom(model)}>
                       <Table.Td><Text size="sm" fw={500}>{model.name}</Text></Table.Td>
-                      <Table.Td><Badge variant="light" size="sm">{model.provider_type}</Badge></Table.Td>
-                      <Table.Td><Text size="sm" ff="monospace">{model.model_id}</Text></Table.Td>
-                      <Table.Td><Badge size="sm">{model.tier}</Badge></Table.Td>
+                      <Table.Td><Badge variant="light" size="xs">{model.provider_type}</Badge></Table.Td>
+                      <Table.Td><Text size="xs" ff="monospace">{model.model_id}</Text></Table.Td>
+                      <Table.Td><Badge size="xs">{model.tier}</Badge></Table.Td>
                       <Table.Td>
-                        <Badge color={model.is_active ? 'green' : 'gray'} size="sm">
+                        <Badge color={model.is_active ? 'green' : 'gray'} size="xs">
                           {model.is_active ? 'Активна' : 'Выкл'}
                         </Badge>
                       </Table.Td>
                       <Table.Td>
-                        <Group gap={4}>
+                        <Group gap={2} justify="flex-end">
                           <ActionIcon variant="subtle" color="blue" size="sm" onClick={(e) => { e.stopPropagation(); openEditCustom(model); }}>
                             <IconEdit size={14} />
                           </ActionIcon>
@@ -474,7 +501,7 @@ export function ModelConfigTab({ tenantId }: ModelConfigTabProps) {
             onChange={(e) => setCmName(e.currentTarget.value)}
             required
           />
-          <SimpleGrid cols={2}>
+          <SimpleGrid cols={2} spacing="sm">
             <Select
               label="Провайдер"
               data={PROVIDER_OPTIONS_MODEL}
@@ -507,13 +534,15 @@ export function ModelConfigTab({ tenantId }: ModelConfigTabProps) {
             onChange={(e) => setCmApiKey(e.currentTarget.value)}
           />
           <TextInput
-            label="Model ID"
-            placeholder={cmProvider === 'ollama' ? 'qwen2.5:14b' : 'gpt-4o'}
-            description={
-              cmProvider === 'ollama'
-                ? 'Для Ollama нужен точный tag модели из `ollama list`, например `qwen2.5:14b`.'
-                : 'Точное имя модели у провайдера, например `gpt-4o` или `deepseek-chat`.'
+            label={
+              <Hint hint={cmProvider === 'ollama'
+                ? 'Точный tag модели из `ollama list`, например `qwen2.5:14b`.'
+                : 'Точное имя модели у провайдера, например `gpt-4o` или `deepseek-chat`.'}
+              >
+                Model ID
+              </Hint>
             }
+            placeholder={cmProvider === 'ollama' ? 'qwen2.5:14b' : 'gpt-4o'}
             value={cmModelId}
             onChange={(e) => setCmModelId(e.currentTarget.value)}
             required

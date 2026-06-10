@@ -1,22 +1,40 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import {
+  ActionIcon,
   Alert,
+  Badge,
   Button,
   Card,
   Center,
+  Code,
+  Divider,
+  Fieldset,
   Group,
   Loader,
   NumberInput,
   PasswordInput,
+  ScrollArea,
   Select,
+  SimpleGrid,
   Slider,
   Stack,
   Switch,
+  Tabs,
   Text,
   TextInput,
   Textarea,
+  Tooltip,
 } from '@mantine/core';
-import { IconAlertCircle, IconDeviceFloppy, IconPlugConnected } from '@tabler/icons-react';
+import {
+  IconAlertCircle,
+  IconDeviceFloppy,
+  IconHelpCircle,
+  IconMicrophone,
+  IconPlugConnected,
+  IconRefresh,
+  IconRobot,
+  IconVolume,
+} from '@tabler/icons-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { notifications } from '@mantine/notifications';
 import { shellApi } from '../../shared/api/endpoints';
@@ -25,6 +43,397 @@ import type { ShellConfigUpdate } from '../../shared/api/types';
 type ShellSettingsTabProps = {
   tenantId: string;
 };
+
+function Hint({ children, hint }: { children: ReactNode; hint: ReactNode }) {
+  return (
+    <Group gap={4} wrap="nowrap" align="center">
+      <Text component="span" size="sm" fw={500}>{children}</Text>
+      <Tooltip label={hint} multiline w={360} withArrow position="right" openDelay={150}>
+        <ActionIcon size="xs" variant="subtle" color="gray" tabIndex={-1} aria-label="Подсказка">
+          <IconHelpCircle size={14} />
+        </ActionIcon>
+      </Tooltip>
+    </Group>
+  );
+}
+
+// ── STT vocab source sub-component ──────────────────────────────────────────
+type VocabResult = { terms_count: number; sample: string[]; cached_at: number };
+
+function STTVocabSection({
+  tenantId,
+  form,
+  config,
+  updateField,
+}: {
+  tenantId: string;
+  form: ShellConfigUpdate;
+  config: import('../../shared/api/types').ShellConfig | undefined;
+  updateField: <K extends keyof ShellConfigUpdate>(key: K, value: ShellConfigUpdate[K]) => void;
+}) {
+  const [vocabDsn, setVocabDsn] = useState('');
+  const [vocabResult, setVocabResult] = useState<VocabResult | null>(null);
+
+  const srcType = (form.stt_vocab_source as Record<string, unknown> | undefined)?.type as string | undefined;
+  const srcQuery = (form.stt_vocab_source as Record<string, unknown> | undefined)?.query as string | undefined;
+
+  const rebuildMutation = useMutation({
+    mutationFn: () => shellApi.rebuildSttVocab(tenantId),
+    onSuccess: (data) => {
+      setVocabResult(data);
+      notifications.show({
+        title: 'Словарь загружен',
+        message: `${data.terms_count} терминов`,
+        color: 'green',
+      });
+    },
+    onError: (err: unknown) => {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || 'Ошибка загрузки';
+      notifications.show({ title: 'Ошибка', message: msg, color: 'red' });
+    },
+  });
+
+  const updateSource = (patch: Record<string, unknown>) => {
+    const current = (form.stt_vocab_source as Record<string, unknown>) ?? {};
+    updateField('stt_vocab_source', { ...current, ...patch });
+  };
+
+  return (
+    <Stack gap="md">
+      <Fieldset
+        legend={<Group gap={6}><Text fw={500}>Параметры Whisper</Text><Text size="xs" c="dimmed">— декодер + beam search</Text></Group>}
+        variant="filled"
+      >
+        <Stack gap="sm">
+          <Textarea
+            label={
+              <Hint hint="Затравочный текст для Whisper-декодера (~200 токенов). Модель «видит» его как начало транскрипта — вписывай ключевые ISP-термины: GPON, VLAN, свич. Не надо улиц — их лучше настроить через источник словаря ниже.">
+                Initial prompt (затравка декодера)
+              </Hint>
+            }
+            placeholder="свич, свиче, свичі, VLAN, GPON, ONT, OLT, сплиттер, абонент"
+            value={form.stt_initial_prompt ?? ''}
+            onChange={(e) => updateField('stt_initial_prompt', e.currentTarget.value || undefined)}
+            autosize minRows={2} maxRows={4}
+          />
+          <TextInput
+            label={
+              <Hint hint="Пробел-разделённые слова, вероятность которых усиливается при beam search (параметр hotwords faster-whisper). Обычно дублирует ключевые термины из initial_prompt.">
+                Hotwords (beam search boost)
+              </Hint>
+            }
+            placeholder="свич свиче VLAN GPON ONT"
+            value={form.stt_hotwords ?? ''}
+            onChange={(e) => updateField('stt_hotwords', e.currentTarget.value || undefined)}
+          />
+        </Stack>
+      </Fieldset>
+
+      <Fieldset
+        legend={<Group gap={6}><Text fw={500}>Источник словаря</Text><Text size="xs" c="dimmed">— пост-обработка транскрипта</Text></Group>}
+        variant="filled"
+      >
+        <Stack gap="sm">
+          {/* Vocab source type */}
+          <Select
+            label={
+              <Hint hint="Откуда брать список терминов для fuzzy-коррекции транскрипта после Whisper. sql — прямой запрос к MySQL/Postgres. http — GET JSON endpoint. Пусто — пост-обработка отключена.">
+                Тип источника
+              </Hint>
+            }
+            data={[
+              { value: '', label: 'Отключено' },
+              { value: 'sql', label: 'SQL (MySQL / Postgres)' },
+              { value: 'http', label: 'HTTP JSON endpoint' },
+            ]}
+            value={srcType ?? ''}
+            onChange={(val) => {
+              if (!val) {
+                updateField('stt_vocab_source', undefined);
+              } else {
+                updateSource({ type: val });
+              }
+            }}
+            allowDeselect={false}
+            w={260}
+          />
+
+          {srcType === 'sql' && (
+            <Stack gap="xs">
+              <PasswordInput
+                label={
+                  <Hint hint="DSN подключения к БД. Примеры: mysql://root:pass@172.10.100.13/billing  или  postgresql://user:pass@host/db. Шифруется при сохранении. Текущее значение: показывается замаскированным.">
+                    Connection string (DSN)
+                  </Hint>
+                }
+                placeholder="mysql://user:pass@host/dbname"
+                description={config?.stt_vocab_source_dsn_masked
+                  ? `Сохранено: ${config.stt_vocab_source_dsn_masked}`
+                  : 'Не задано'}
+                value={vocabDsn}
+                onChange={(e) => {
+                  setVocabDsn(e.currentTarget.value);
+                  if (e.currentTarget.value) {
+                    updateField('stt_vocab_source_dsn', e.currentTarget.value);
+                  }
+                }}
+              />
+              <Textarea
+                label={
+                  <Hint hint="SQL-запрос, возвращающий один столбец строк. Каждая строка — один термин словаря. Примеры: улицы, фамилии, названия тарифов.">
+                    SQL-запрос
+                  </Hint>
+                }
+                placeholder={'SELECT DISTINCT address_street\nFROM subscribers\nWHERE address_street != \'\'\nORDER BY address_street'}
+                value={srcQuery ?? ''}
+                onChange={(e) => updateSource({ query: e.currentTarget.value })}
+                autosize minRows={3} maxRows={8}
+                styles={{ input: { fontFamily: 'monospace', fontSize: 12 } }}
+              />
+            </Stack>
+          )}
+
+          {srcType === 'http' && (
+            <Stack gap="xs">
+              <TextInput
+                label={<Hint hint="URL, возвращающий JSON. Запрос GET без авторизации.">URL</Hint>}
+                placeholder="https://api.example.com/streets"
+                value={((form.stt_vocab_source as Record<string, unknown>)?.url as string) ?? ''}
+                onChange={(e) => updateSource({ url: e.currentTarget.value })}
+              />
+              <TextInput
+                label={<Hint hint='Dot-path для извлечения массива из JSON. Пример: ".data.streets" или ".items". Оставьте пустым если ответ — массив строк напрямую.'>JSON path</Hint>}
+                placeholder=".streets"
+                value={((form.stt_vocab_source as Record<string, unknown>)?.jq as string) ?? ''}
+                onChange={(e) => updateSource({ jq: e.currentTarget.value })}
+              />
+            </Stack>
+          )}
+
+          {srcType && (
+            <Group align="flex-end" gap="sm">
+              <NumberInput
+                label={
+                  <Hint hint="Минимальный процент схожести (0-100) для замены слова. 88 — консервативно (избегает ложных замен). Снизь до 80 если пропускает очевидные опечатки, подними до 92 если заменяет лишнее.">
+                    Fuzzy threshold
+                  </Hint>
+                }
+                min={60} max={100} step={1}
+                value={form.stt_fuzzy_threshold ?? 88}
+                onChange={(v) => updateField('stt_fuzzy_threshold', typeof v === 'number' ? v : 88)}
+                w={160}
+              />
+              <Button
+                variant="light"
+                leftSection={<IconRefresh size={14} />}
+                loading={rebuildMutation.isPending}
+                onClick={() => rebuildMutation.mutate()}
+              >
+                Загрузить / обновить словарь
+              </Button>
+            </Group>
+          )}
+
+          {/* Vocab test result */}
+          {vocabResult && (
+            <Alert color="green" variant="light" py="xs">
+              <Group gap="xs" mb={4}>
+                <Badge color="green" variant="filled" size="sm">{vocabResult.terms_count} терминов</Badge>
+                <Text size="xs" c="dimmed">
+                  Кэш: {new Date(vocabResult.cached_at * 1000).toLocaleTimeString()}
+                </Text>
+              </Group>
+              <Text size="xs" c="dimmed" mb={4}>Первые 20:</Text>
+              <ScrollArea h={60}>
+                <Code block style={{ fontSize: 11, lineHeight: 1.4 }}>
+                  {vocabResult.sample.join(', ')}
+                </Code>
+              </ScrollArea>
+            </Alert>
+          )}
+        </Stack>
+      </Fieldset>
+    </Stack>
+  );
+}
+
+// ── TTS configuration sub-component ─────────────────────────────────────────
+function TTSSection({
+  form,
+  config,
+  updateField,
+}: {
+  form: ShellConfigUpdate;
+  config: import('../../shared/api/types').ShellConfig | undefined;
+  updateField: <K extends keyof ShellConfigUpdate>(key: K, value: ShellConfigUpdate[K]) => void;
+}) {
+  const [ttsApiKey, setTtsApiKey] = useState('');
+  const provider = form.tts_provider ?? 'system';
+
+  return (
+    <Stack gap="md">
+      <Alert icon={<IconAlertCircle size={14} />} color="blue" variant="light" py={6}>
+        Выбери провайдера TTS. <strong>Системный</strong> — использует настройки платформы из <code>.env</code>.
+        <strong> ElevenLabs</strong> — облачный, высокое качество (~300 ms). <strong>Fish Speech</strong> — локальный, бесплатно.
+      </Alert>
+
+      <Fieldset legend="Провайдер голоса" variant="filled">
+        <Stack gap="sm">
+          <Select
+            label={
+              <Hint hint="system — берёт настройки из глобального .env сервера (ElevenLabs или Fish Speech). elevenlabs — используй свой API-ключ ElevenLabs. fish_speech — локальный Fish Speech сервер.">
+                Провайдер TTS
+              </Hint>
+            }
+            data={[
+              { value: 'system', label: '🖥 Системный (по умолчанию платформы)' },
+              { value: 'silero', label: '⚡ Silero v4 (локальный, быстрый)' },
+              { value: 'elevenlabs', label: '☁️ ElevenLabs (свой ключ)' },
+              { value: 'fish_speech', label: '🐟 Fish Speech (локальный)' },
+            ]}
+            value={provider}
+            onChange={(val) => updateField('tts_provider', val || 'system')}
+            allowDeselect={false}
+            w={340}
+          />
+
+          {provider === 'system' && (
+            <Alert color="gray" variant="light" py={6}>
+              Используются системные настройки платформы. Если в <code>.env</code> установлен <code>ELEVENLABS_API_KEY</code> — работает ElevenLabs, иначе — Silero v4 (локальный, быстрый).
+            </Alert>
+          )}
+        </Stack>
+      </Fieldset>
+
+      {provider === 'elevenlabs' && (
+        <Fieldset legend="ElevenLabs" variant="filled">
+          <Stack gap="sm">
+            <SimpleGrid cols={{ base: 1, md: 2 }} spacing="sm">
+              <PasswordInput
+                label={
+                  <Hint hint="API-ключ ElevenLabs. Шифруется при сохранении. Найти: elevenlabs.io → My Account → API Key.">
+                    API Key
+                  </Hint>
+                }
+                placeholder="sk_..."
+                description={config?.tts_api_key_masked
+                  ? `Сохранено: ${config.tts_api_key_masked}`
+                  : 'Не задано'}
+                value={ttsApiKey}
+                onChange={(e) => {
+                  setTtsApiKey(e.currentTarget.value);
+                  if (e.currentTarget.value) {
+                    updateField('tts_api_key', e.currentTarget.value);
+                  }
+                }}
+              />
+              <TextInput
+                label={
+                  <Hint hint="ID голоса ElevenLabs. Найти: elevenlabs.io → Voice Library. Пример: 2JdEiiOR5pv532Ssmi90.">
+                    Voice ID
+                  </Hint>
+                }
+                placeholder="2JdEiiOR5pv532Ssmi90"
+                value={form.tts_voice_id ?? ''}
+                onChange={(e) => updateField('tts_voice_id', e.currentTarget.value || undefined)}
+              />
+            </SimpleGrid>
+            <SimpleGrid cols={{ base: 1, md: 2 }} spacing="sm">
+              <TextInput
+                label={
+                  <Hint hint="Модель ElevenLabs. Рекомендуется eleven_turbo_v2_5 (низкая задержка, хорошее качество ru/uk). Альтернативы: eleven_multilingual_v2, eleven_flash_v2_5.">
+                    Модель
+                  </Hint>
+                }
+                placeholder="eleven_turbo_v2_5"
+                value={form.tts_model ?? ''}
+                onChange={(e) => updateField('tts_model', e.currentTarget.value || undefined)}
+              />
+              <NumberInput
+                label={
+                  <Hint hint="Скорость речи. 1.0 = нормальная. Диапазон 0.5–2.0. ElevenLabs поддерживает через voice_settings.speed (где доступно).">
+                    Скорость речи
+                  </Hint>
+                }
+                placeholder="1.0"
+                min={0.5} max={2.0} step={0.1} decimalScale={1}
+                value={form.tts_speed ?? undefined}
+                onChange={(v) => updateField('tts_speed', typeof v === 'number' ? v : undefined)}
+              />
+            </SimpleGrid>
+          </Stack>
+        </Fieldset>
+      )}
+
+      {provider === 'silero' && (
+        <Fieldset legend="Silero TTS v4" variant="filled">
+          <Stack gap="sm">
+            <Alert color="green" variant="light" py={6}>
+              Silero v4 — локальный GPU-синтез. Очень быстро: ~0.1–1.5 с на любой текст.
+              Два языка: <strong>ru</strong> (xenia, baya, aidar, kseniya, eugene) и <strong>ua</strong> (mykyta, olena, lada, dobrynyla).
+              Язык определяется автоматически по тексту.
+            </Alert>
+            <SimpleGrid cols={{ base: 1, md: 2 }} spacing="sm">
+              <TextInput
+                label={
+                  <Hint hint="Базовый URL Silero сервера. Пусто — используется системный адрес из .env (SILERO_TTS_URL). Пример: http://172.10.100.9:8004">
+                    URL сервера (необязательно)
+                  </Hint>
+                }
+                placeholder="http://172.10.100.9:8004"
+                value={form.tts_fish_url ?? ''}
+                onChange={(e) => updateField('tts_fish_url', e.currentTarget.value || undefined)}
+              />
+              <TextInput
+                label={
+                  <Hint hint="Имя диктора. Для ru: xenia (женский, нейтральный), baya, aidar, kseniya, eugene. Для ua: mykyta (мужской), olena, lada, dobrynyla. Пусто = системный default (xenia/mykyta).">
+                    Голос (speaker)
+                  </Hint>
+                }
+                placeholder="xenia"
+                value={form.tts_voice_id ?? ''}
+                onChange={(e) => updateField('tts_voice_id', e.currentTarget.value || undefined)}
+              />
+            </SimpleGrid>
+          </Stack>
+        </Fieldset>
+      )}
+
+      {provider === 'fish_speech' && (
+        <Fieldset legend="Fish Speech" variant="filled">
+          <Stack gap="sm">
+            <Alert color="yellow" variant="light" py={6}>
+              Fish Speech — локальный GPU-синтез. Задержка ~2 с + 0.1 с/символ. Для коротких фраз (~10–15 слов) приемлемо, для длинных ответов — медленно.
+            </Alert>
+            <SimpleGrid cols={{ base: 1, md: 2 }} spacing="sm">
+              <TextInput
+                label={
+                  <Hint hint="Базовый URL Fish Speech сервера. Пусто — используется системный адрес из .env (TTS_URL). Пример: http://172.10.100.9:8002">
+                    URL сервера (необязательно)
+                  </Hint>
+                }
+                placeholder="http://172.10.100.9:8002"
+                value={form.tts_fish_url ?? ''}
+                onChange={(e) => updateField('tts_fish_url', e.currentTarget.value || undefined)}
+              />
+              <NumberInput
+                label={
+                  <Hint hint="Скорость речи. 1.0 = нормальная. Fish Speech поддерживает через параметр speed в API.">
+                    Скорость речи
+                  </Hint>
+                }
+                placeholder="1.0"
+                min={0.5} max={2.0} step={0.1} decimalScale={1}
+                value={form.tts_speed ?? undefined}
+                onChange={(v) => updateField('tts_speed', typeof v === 'number' ? v : undefined)}
+              />
+            </SimpleGrid>
+          </Stack>
+        </Fieldset>
+      )}
+    </Stack>
+  );
+}
 
 export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
   const queryClient = useQueryClient();
@@ -51,31 +460,44 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
         context_mode: config.context_mode,
         memory_enabled: config.memory_enabled,
         knowledge_base_enabled: config.knowledge_base_enabled,
+        kb_inject_auto: config.kb_inject_auto ?? true,
         embedding_model_name: config.embedding_model_name ?? undefined,
         vision_model_name: config.vision_model_name ?? undefined,
         kb_max_chunks: config.kb_max_chunks,
         enable_thinking: config.enable_thinking || 'on',
         response_language: config.response_language || 'ru',
+        debug_enabled: config.debug_enabled,
+        timezone: config.timezone ?? undefined,
+        tool_semantic_floor: config.tool_semantic_floor,
+        tool_routing_temperature: config.tool_routing_temperature,
+        lazy_tool_catalog_topk: config.lazy_tool_catalog_topk,
+        max_tool_rounds: config.max_tool_rounds,
+        tier0_enabled: config.tier0_enabled,
+        tier0_min_tool_score: config.tier0_min_tool_score,
+        tier0_max_score_gap: config.tier0_max_score_gap,
+        pii_routing_enabled: config.pii_routing_enabled,
+        stt_initial_prompt: config.stt_initial_prompt ?? undefined,
+        stt_hotwords: config.stt_hotwords ?? undefined,
+        stt_vocab_source: config.stt_vocab_source ?? undefined,
+        stt_fuzzy_threshold: config.stt_fuzzy_threshold ?? 88,
+        tts_provider: config.tts_provider ?? 'system',
+        tts_voice_id: config.tts_voice_id ?? undefined,
+        tts_model: config.tts_model ?? undefined,
+        tts_speed: config.tts_speed ?? undefined,
+        tts_fish_url: config.tts_fish_url ?? undefined,
       });
       setDirty(false);
     }
   }, [config]);
 
   useEffect(() => {
-    if (!dirty) {
-      return;
-    }
-    const handler = (e: BeforeUnloadEvent) => {
-      e.preventDefault();
-    };
+    if (!dirty) return;
+    const handler = (e: BeforeUnloadEvent) => e.preventDefault();
     window.addEventListener('beforeunload', handler);
     return () => window.removeEventListener('beforeunload', handler);
   }, [dirty]);
 
-  const updateField = <K extends keyof ShellConfigUpdate>(
-    key: K,
-    value: ShellConfigUpdate[K],
-  ) => {
+  const updateField = <K extends keyof ShellConfigUpdate>(key: K, value: ShellConfigUpdate[K]) => {
     setForm((prev) => ({ ...prev, [key]: value }));
     setDirty(true);
   };
@@ -85,16 +507,11 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['tenants', tenantId, 'shell'] });
       setDirty(false);
-      notifications.show({
-        title: 'Сохранено',
-        message: 'Настройки оболочки обновлены',
-        color: 'green',
-      });
+      notifications.show({ title: 'Сохранено', message: 'Настройки оболочки обновлены', color: 'green' });
     },
     onError: (err: unknown) => {
       const message =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
-        'Не удалось сохранить';
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || 'Не удалось сохранить';
       notifications.show({ title: 'Ошибка', message, color: 'red' });
     },
   });
@@ -109,24 +526,16 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
       });
     },
     onError: () => {
-      notifications.show({
-        title: 'Ошибка',
-        message: 'Тест соединения не удался',
-        color: 'red',
-      });
+      notifications.show({ title: 'Ошибка', message: 'Тест соединения не удался', color: 'red' });
     },
   });
 
   if (isLoading) {
-    return (
-      <Center py="md">
-        <Loader />
-      </Center>
-    );
+    return <Center py="md"><Loader /></Center>;
   }
 
   return (
-    <Card withBorder padding="lg" maw={800}>
+    <Card withBorder padding="lg" maw={1100}>
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -135,208 +544,424 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
       >
         <Stack gap="md">
           {dirty && (
-            <Alert icon={<IconAlertCircle size={16} />} color="yellow" variant="light">
+            <Alert icon={<IconAlertCircle size={16} />} color="yellow" variant="light" py="xs">
               У вас есть несохранённые изменения.
             </Alert>
           )}
 
-          <Select
-            label="Тип провайдера"
-            description="Ollama — локальные модели, OpenAI Compatible — любой OpenAI-совместимый API, DeepSeek — API DeepSeek"
-            data={[
-              { value: 'ollama', label: 'Ollama (локальный)' },
-              { value: 'openai_compatible', label: 'OpenAI Compatible' },
-              { value: 'deepseek_compatible', label: 'DeepSeek Compatible' },
-            ]}
-            value={form.provider_type || ''}
-            onChange={(val) => updateField('provider_type', val || '')}
-          />
+          <Tabs defaultValue="llm">
+            <Tabs.List mb="md">
+              <Tabs.Tab value="llm" leftSection={<IconRobot size={16} />}>LLM</Tabs.Tab>
+              <Tabs.Tab value="stt" leftSection={<IconMicrophone size={16} />}>STT</Tabs.Tab>
+              <Tabs.Tab value="tts" leftSection={<IconVolume size={16} />}>TTS</Tabs.Tab>
+            </Tabs.List>
 
-          <TextInput
-            label="Базовый URL провайдера"
-            description="Для Ollama: http://localhost:11434, для DeepSeek: https://api.deepseek.com"
-            placeholder="http://localhost:11434"
-            value={form.provider_base_url || ''}
-            onChange={(e) => updateField('provider_base_url', e.currentTarget.value)}
-          />
+            {/* ── LLM tab ──────────────────────────────────────────────────── */}
+            <Tabs.Panel value="llm">
+              <Stack gap="md">
 
-          <PasswordInput
-            label="API ключ провайдера"
-            description="Ключ аутентификации у провайдера. Для локального Ollama не требуется"
-            placeholder="sk-..."
-            value={form.provider_api_key || ''}
-            onChange={(e) => updateField('provider_api_key', e.currentTarget.value)}
-          />
+                {/* ── Provider ─────────────────────────────────────────── */}
+                <Fieldset legend="Провайдер" variant="filled">
+                  <Stack gap="sm">
+                    <SimpleGrid cols={{ base: 1, md: 3 }} spacing="sm">
+                      <Select
+                        label={
+                          <Hint hint="Ollama — локальные модели. OpenAI Compatible — любой OpenAI-совместимый API. DeepSeek — официальное API DeepSeek.">
+                            Тип провайдера
+                          </Hint>
+                        }
+                        data={[
+                          { value: 'ollama', label: 'Ollama (локальный)' },
+                          { value: 'openai_compatible', label: 'OpenAI Compatible' },
+                          { value: 'deepseek_compatible', label: 'DeepSeek Compatible' },
+                        ]}
+                        value={form.provider_type || ''}
+                        onChange={(val) => updateField('provider_type', val || '')}
+                      />
+                      <TextInput
+                        label={
+                          <Hint hint="Ollama: http://localhost:11434. DeepSeek: https://api.deepseek.com.">
+                            Базовый URL
+                          </Hint>
+                        }
+                        placeholder="http://localhost:11434"
+                        value={form.provider_base_url || ''}
+                        onChange={(e) => updateField('provider_base_url', e.currentTarget.value)}
+                      />
+                      <PasswordInput
+                        label={
+                          <Hint hint="Ключ аутентификации у провайдера. Для локального Ollama не требуется.">
+                            API ключ
+                          </Hint>
+                        }
+                        placeholder="sk-..."
+                        value={form.provider_api_key || ''}
+                        onChange={(e) => updateField('provider_api_key', e.currentTarget.value)}
+                      />
+                    </SimpleGrid>
+                    <Alert icon={<IconAlertCircle size={14} />} color="blue" variant="light" py={6}>
+                      Основная модель чата выбирается во вкладке «Модель». Здесь — провайдер, промпты, лимиты, поведение оболочки.
+                    </Alert>
+                  </Stack>
+                </Fieldset>
 
-          <Alert icon={<IconAlertCircle size={16} />} color="blue" variant="light">
-            Основная модель для чата выбирается во вкладке «Модель». Здесь настраиваются
-            провайдер, промпты, лимиты и параметры памяти/базы знаний.
-          </Alert>
+                {/* ── Prompts ─────────────────────────────────────────── */}
+                <Fieldset legend="Промпты" variant="filled">
+                  <Stack gap="sm">
+                    <Textarea
+                      label={
+                        <Hint hint="Идентичность ассистента и общий стиль. Короткое, 1-3 предложения. Уходит в LLM первым блоком.">
+                          Системный промпт — кто ассистент
+                        </Hint>
+                      }
+                      placeholder="Ты — AI техспециалист компании X. Отвечай на языке запроса."
+                      value={form.system_prompt || ''}
+                      onChange={(e) => updateField('system_prompt', e.currentTarget.value)}
+                      autosize
+                      minRows={2}
+                      maxRows={6}
+                    />
+                    <Textarea
+                      label={
+                        <Hint hint="Структура данных, термины, mapping тема→tool. Только то, что не вынести в KB/память. Второй блок промпта.">
+                          Онтология / Domain knowledge
+                        </Hint>
+                      }
+                      placeholder={'OLT — головное PON-устройство. Splitter — пассивный делитель.\n\nТема ↔ tool:\n• клиенты — search_clients'}
+                      value={form.ontology_prompt || ''}
+                      onChange={(e) => updateField('ontology_prompt', e.currentTarget.value)}
+                      autosize
+                      minRows={3}
+                      maxRows={10}
+                    />
+                    <Textarea
+                      label={
+                        <Hint hint="Длина, формат, стилевые исключения. Третий блок промпта, с префиксом «Rules:».">
+                          Правила формата ответов
+                        </Hint>
+                      }
+                      placeholder="Отвечай короткими фразами по 4-5 предложений. Исключения — код, таблицы."
+                      value={form.rules_text || ''}
+                      onChange={(e) => updateField('rules_text', e.currentTarget.value)}
+                      autosize
+                      minRows={2}
+                      maxRows={5}
+                    />
+                  </Stack>
+                </Fieldset>
 
-          <Textarea
-            label="Системный промпт — кто ассистент"
-            description="Идентичность и общий стиль. Короткое — 1-3 предложения. Уходит в LLM первым блоком."
-            placeholder="Ты — AI техспециалист компании X. Отвечай на языке запроса, используй эмодзи где уместно."
-            value={form.system_prompt || ''}
-            onChange={(e) => updateField('system_prompt', e.currentTarget.value)}
-            autosize
-            minRows={2}
-            maxRows={8}
-          />
+                {/* ── Generation ─────────────────────────────────────── */}
+                <Fieldset legend="Генерация" variant="filled">
+                  <Stack gap="sm">
+                    <Group align="flex-end" gap="md" wrap="wrap">
+                      <div style={{ flex: '1 1 320px', minWidth: 280 }}>
+                        <Hint hint="Для support-ассистента температура ограничена сверху 0.7 — снижает галлюцинации и шум.">
+                          Температура: {(form.temperature ?? 0.3).toFixed(2)}
+                        </Hint>
+                        <Slider
+                          min={0}
+                          max={0.7}
+                          step={0.01}
+                          value={Math.min(form.temperature ?? 0.3, 0.7)}
+                          onChange={(val) => updateField('temperature', val)}
+                          marks={[
+                            { value: 0, label: '0' },
+                            { value: 0.3, label: '0.3' },
+                            { value: 0.7, label: '0.7' },
+                          ]}
+                          mt={6}
+                        />
+                      </div>
+                      <NumberInput
+                        label={<Hint hint="Сколько последних сообщений чата отправлять в LLM.">Макс. сообщений контекста</Hint>}
+                        value={form.max_context_messages ?? 20}
+                        onChange={(val) => updateField('max_context_messages', Number(val))}
+                        min={1}
+                        max={200}
+                        w={200}
+                      />
+                      <NumberInput
+                        label={<Hint hint="Максимальная длина ответа LLM в токенах.">Макс. токенов ответа</Hint>}
+                        value={form.max_tokens ?? 4096}
+                        onChange={(val) => updateField('max_tokens', Number(val))}
+                        min={1}
+                        max={128000}
+                        w={200}
+                      />
+                    </Group>
 
-          <Textarea
-            label="Онтология / Domain knowledge"
-            description="Структура данных, термины, mapping tool→аргументы. Только то, что не вынести в базу знаний/память. Уходит вторым блоком."
-            placeholder={'OLT — головное PON-устройство. От него растёт PON-дерево.\nSplitter — пассивный делитель, у него СВОЙ id (отличный от OLT).\n\nТема ↔ tool:\n• клиенты — search_clients\n• ближайшие splitters — pon_nearby'}
-            value={form.ontology_prompt || ''}
-            onChange={(e) => updateField('ontology_prompt', e.currentTarget.value)}
-            autosize
-            minRows={3}
-            maxRows={14}
-          />
+                    <SimpleGrid cols={{ base: 1, md: 3 }} spacing="sm">
+                      <Select
+                        label={
+                          <Hint hint="Что подмешивать из истории. summary_plus_recent — резюме + последние; recent_only — только хвост; summary_only — только резюме.">
+                            Режим контекста
+                          </Hint>
+                        }
+                        data={[
+                          { value: 'recent_only', label: 'Только последние сообщения' },
+                          { value: 'summary_plus_recent', label: 'Резюме + последние' },
+                          { value: 'summary_only', label: 'Только резюме' },
+                        ]}
+                        value={form.context_mode || 'summary_plus_recent'}
+                        onChange={(val) => updateField('context_mode', val || 'summary_plus_recent')}
+                        allowDeselect={false}
+                      />
+                      <Select
+                        label={
+                          <Hint hint="on — всегда «думает» (точнее, медленнее). off — сразу отвечает (быстро). auto — думает только на сложных. Влияет на Qwen3 и аналоги.">
+                            Reasoning (thinking)
+                          </Hint>
+                        }
+                        data={[
+                          { value: 'on', label: 'On — всегда' },
+                          { value: 'off', label: 'Off — никогда' },
+                          { value: 'auto', label: 'Auto — по эвристике' },
+                        ]}
+                        value={form.enable_thinking || 'on'}
+                        onChange={(val) => updateField('enable_thinking', val || 'on')}
+                        allowDeselect={false}
+                      />
+                      <Select
+                        label={
+                          <Hint hint="Жёсткая привязка языка для всех LLM-вызовов: чат, резюме, описания attachment. Без неё multilingual-модели срываются.">
+                            Язык ответов
+                          </Hint>
+                        }
+                        data={[
+                          { value: 'ru', label: 'Русский' },
+                          { value: 'uk', label: 'Українська' },
+                          { value: 'en', label: 'English' },
+                          { value: 'pl', label: 'Polski' },
+                          { value: 'de', label: 'Deutsch' },
+                          { value: 'es', label: 'Español' },
+                          { value: 'fr', label: 'Français' },
+                        ]}
+                        value={form.response_language || 'ru'}
+                        onChange={(val) => updateField('response_language', val || 'ru')}
+                        allowDeselect={false}
+                      />
+                    </SimpleGrid>
 
-          <Textarea
-            label="Правила формата ответов"
-            description="Длина, форматирование, стилевые исключения. Уходит третьим блоком, с префиксом «Rules:»."
-            placeholder="Отвечай короткими фразами по 4-5 предложений. Исключения — код, таблицы, инструкции."
-            value={form.rules_text || ''}
-            onChange={(e) => updateField('rules_text', e.currentTarget.value)}
-            autosize
-            minRows={2}
-            maxRows={6}
-          />
+                    <TextInput
+                      label={
+                        <Hint hint="IANA timezone для блока «текущая дата» в системном промпте. Например: Europe/Kyiv, UTC, Asia/Tokyo. Пусто — серверный TZ.">
+                          Timezone (IANA)
+                        </Hint>
+                      }
+                      placeholder="Europe/Kyiv"
+                      value={form.timezone ?? ''}
+                      onChange={(e) => updateField('timezone', e.currentTarget.value || undefined)}
+                      w={260}
+                    />
+                  </Stack>
+                </Fieldset>
 
-          <div>
-            <Text size="sm" fw={500} mb={2}>
-              Температура: {form.temperature?.toFixed(2) ?? '0.30'}
-            </Text>
-            <Text size="xs" c="dimmed" mb="xs">
-              Для support-ассистента температура ограничена сверху 0.7, чтобы снизить галлюцинации и шум.
-            </Text>
-            <Slider
-              min={0}
-              max={0.7}
-              step={0.01}
-              value={Math.min(form.temperature ?? 0.3, 0.7)}
-              onChange={(val) => updateField('temperature', val)}
-              marks={[
-                { value: 0, label: '0' },
-                { value: 0.3, label: '0.3' },
-                { value: 0.7, label: '0.7' },
-              ]}
-            />
-          </div>
+                {/* ── Tools / Routing ────────────────────────────────── */}
+                <Fieldset legend="Tools / роутинг" variant="filled">
+                  <SimpleGrid cols={{ base: 2, md: 4 }} spacing="sm">
+                    <NumberInput
+                      label={
+                        <Hint hint="Минимальный cosine similarity (0.0-1.0) для tool, выбранного семантикой. Ниже = выбрасывается. Default 0.5.">
+                          Semantic floor
+                        </Hint>
+                      }
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      decimalScale={2}
+                      value={form.tool_semantic_floor ?? 0.5}
+                      onChange={(v) => updateField('tool_semantic_floor', typeof v === 'number' ? v : 0.5)}
+                    />
+                    <NumberInput
+                      label={
+                        <Hint hint="Temperature на раундах LLM с tools в payload (выбор tool / аргументов). Ниже = детерминированнее. Default 0.3.">
+                          Routing temperature
+                        </Hint>
+                      }
+                      min={0}
+                      max={2}
+                      step={0.1}
+                      decimalScale={2}
+                      value={form.tool_routing_temperature ?? 0.3}
+                      onChange={(v) => updateField('tool_routing_temperature', typeof v === 'number' ? v : 0.3)}
+                    />
+                    <NumberInput
+                      label={
+                        <Hint hint="Сколько top-K tools идёт с полной schema. Остальные — компактно (имя + 1 строка), деталь через describe_tool. Default 3. 100 чтобы выключить.">
+                          Lazy catalog top-K
+                        </Hint>
+                      }
+                      min={1}
+                      max={100}
+                      step={1}
+                      value={form.lazy_tool_catalog_topk ?? 3}
+                      onChange={(v) => updateField('lazy_tool_catalog_topk', typeof v === 'number' ? v : 3)}
+                    />
+                    <NumberInput
+                      label={
+                        <Hint hint="Максимум tool-раундов в одном запросе (защита от бесконечных циклов). Default 6. Multi-stage пайплайны могут поднять до 10-12.">
+                          Max tool rounds
+                        </Hint>
+                      }
+                      min={1}
+                      max={20}
+                      step={1}
+                      value={form.max_tool_rounds ?? 6}
+                      onChange={(v) => updateField('max_tool_rounds', typeof v === 'number' ? v : 6)}
+                    />
+                  </SimpleGrid>
+                </Fieldset>
 
-          <Select
-            label="Режим контекста"
-            description="Определяет, что именно подмешивать из истории в следующий запрос к LLM."
-            data={[
-              { value: 'recent_only', label: 'Только последние сообщения' },
-              { value: 'summary_plus_recent', label: 'Резюме + последние сообщения' },
-              { value: 'summary_only', label: 'Только резюме истории' },
-            ]}
-            value={form.context_mode || 'summary_plus_recent'}
-            onChange={(val) => updateField('context_mode', val || 'summary_plus_recent')}
-            allowDeselect={false}
-          />
+                {/* ── Tier 0 routing ────────────────────────────────────── */}
+                <Fieldset legend={<Group gap={6}><Text fw={500}>⚡ Tier 0 routing</Text><Text size="xs" c="dimmed">— деterминистический шорткат без LLM</Text></Group>} variant="filled">
+                  <Stack gap="sm">
+                    <Group gap="lg">
+                      <Tooltip
+                        label="Когда включено: если запрос matches с уверенным tool (см. пороги ниже), pipeline вызывает tool напрямую и рендерит результат через template, минуя LLM. ~100-700ms вместо 1-3s."
+                        multiline w={380} withArrow
+                      >
+                        <Switch
+                          label="Включить Tier 0"
+                          checked={form.tier0_enabled ?? false}
+                          onChange={(e) => updateField('tier0_enabled', e.currentTarget.checked)}
+                        />
+                      </Tooltip>
+                    </Group>
+                    <SimpleGrid cols={{ base: 1, md: 2 }} spacing="sm">
+                      <NumberInput
+                        label={
+                          <Hint hint="Минимальный boosted-score топового tool чтобы Tier 0 считал «уверенным». Ниже = больше hit rate, но и больше false positive. Рекомендую 0.70-0.80.">
+                            Min tool score
+                          </Hint>
+                        }
+                        min={0.50} max={1.00} step={0.05} decimalScale={2}
+                        value={form.tier0_min_tool_score ?? 0.80}
+                        onChange={(v) => updateField('tier0_min_tool_score', typeof v === 'number' ? v : 0.80)}
+                      />
+                      <NumberInput
+                        label={
+                          <Hint hint="Минимальный gap между топом и 2-м кандидатом — гарантирует что нет close competitor. Чем выше, тем строже. Default 0.15.">
+                            Min gap к 2-му
+                          </Hint>
+                        }
+                        min={0.05} max={0.50} step={0.05} decimalScale={2}
+                        value={form.tier0_max_score_gap ?? 0.15}
+                        onChange={(v) => updateField('tier0_max_score_gap', typeof v === 'number' ? v : 0.15)}
+                      />
+                    </SimpleGrid>
+                  </Stack>
+                </Fieldset>
 
-          <Select
-            label="Reasoning (thinking mode)"
-            description={
-              'on — модель всегда «думает» перед ответом (точнее, медленнее). off — сразу отвечает (быстро). ' +
-              'auto — думает только на сложных запросах (короткий вопрос без тулзов = off, всё остальное = on). ' +
-              'Влияет на Qwen3 и подобные; на DeepSeek и моделях без thinking — игнорируется.'
-            }
-            data={[
-              { value: 'on', label: 'On — всегда (точнее, медленнее)' },
-              { value: 'off', label: 'Off — никогда (быстро)' },
-              { value: 'auto', label: 'Auto — по эвристике' },
-            ]}
-            value={form.enable_thinking || 'on'}
-            onChange={(val) => updateField('enable_thinking', val || 'on')}
-            allowDeselect={false}
-          />
+                {/* ── PII routing ────────────────────────────────────── */}
+                <Fieldset legend={<Group gap={6}><Text fw={500}>🛡 PII routing</Text><Text size="xs" c="dimmed">— безопасность данных</Text></Group>} variant="filled">
+                  <Tooltip
+                    label="При обнаружении PII в запросе (телефон / MAC / IP) auto-router НЕ будет escalate в cloud модель — остаётся на local навсегда для этого чата. Защищает персональные данные клиентов от выхода за пределы локальной сети."
+                    multiline w={420} withArrow
+                  >
+                    <Switch
+                      label="Запретить cloud при PII в запросе"
+                      description="Phone / MAC / IP детектятся regex'ом. Локально всё равно ответит — просто без esc к DeepSeek/Claude."
+                      checked={form.pii_routing_enabled ?? false}
+                      onChange={(e) => updateField('pii_routing_enabled', e.currentTarget.checked)}
+                    />
+                  </Tooltip>
+                </Fieldset>
 
-          <Select
-            label="Язык ответов модели"
-            description={
-              'Жёсткая привязка языка для ВСЕХ LLM-вызовов: основной чат, резюме обменов, ' +
-              'описание вложений. Multilingual-модели (Qwen, Llama) без явного пина срываются ' +
-              'на китайский на технических темах — этот select это лечит.'
-            }
-            data={[
-              { value: 'ru', label: 'Русский' },
-              { value: 'uk', label: 'Українська' },
-              { value: 'en', label: 'English' },
-              { value: 'pl', label: 'Polski' },
-              { value: 'de', label: 'Deutsch' },
-              { value: 'es', label: 'Español' },
-              { value: 'fr', label: 'Français' },
-            ]}
-            value={form.response_language || 'ru'}
-            onChange={(val) => updateField('response_language', val || 'ru')}
-            allowDeselect={false}
-          />
+                {/* ── Memory & KB ────────────────────────────────────── */}
+                <Fieldset legend="Память и KB" variant="filled">
+                  <Stack gap="sm">
+                    <Group gap="lg">
+                      <Switch
+                        label="Память включена"
+                        checked={form.memory_enabled ?? false}
+                        onChange={(e) => updateField('memory_enabled', e.currentTarget.checked)}
+                      />
+                      <Switch
+                        label="База знаний"
+                        checked={form.knowledge_base_enabled ?? false}
+                        onChange={(e) => updateField('knowledge_base_enabled', e.currentTarget.checked)}
+                      />
+                      <Tooltip
+                        label="Сохранять полный JSON debug (grounding, tool calls, rounds) в llm_request_logs.debug. Выключи, когда не ведёшь расследование."
+                        multiline
+                        w={340}
+                        withArrow
+                      >
+                        <Switch
+                          label="Debug-трейс"
+                          checked={form.debug_enabled ?? true}
+                          onChange={(e) => updateField('debug_enabled', e.currentTarget.checked)}
+                        />
+                      </Tooltip>
+                    </Group>
 
-          <Group grow>
-            <NumberInput
-              label="Макс. сообщений контекста"
-              description="Сколько последних сообщений чата отправлять в LLM"
-              value={form.max_context_messages ?? 20}
-              onChange={(val) => updateField('max_context_messages', Number(val))}
-              min={1}
-              max={200}
-            />
-            <NumberInput
-              label="Макс. токенов ответа"
-              description="Максимальная длина ответа LLM в токенах"
-              value={form.max_tokens ?? 4096}
-              onChange={(val) => updateField('max_tokens', Number(val))}
-              min={1}
-              max={128000}
-            />
-          </Group>
+                    {form.knowledge_base_enabled && (
+                      <Stack gap="sm">
+                        <SimpleGrid cols={{ base: 1, md: 2 }} spacing="sm">
+                          <TextInput
+                            label={<Hint hint="Модель для эмбеддингов (например, bge-m3, nomic-embed-text).">Модель эмбеддингов</Hint>}
+                            placeholder="bge-m3"
+                            value={form.embedding_model_name ?? ''}
+                            onChange={(e) => updateField('embedding_model_name', e.currentTarget.value || undefined)}
+                          />
+                          <NumberInput
+                            label={<Hint hint="Сколько релевантных чанков KB подмешивать в контекст (только в eager-режиме).">Макс. чанков KB</Hint>}
+                            min={1}
+                            max={50}
+                            value={form.kb_max_chunks ?? 10}
+                            onChange={(val) => updateField('kb_max_chunks', typeof val === 'number' ? val : 10)}
+                            disabled={!(form.kb_inject_auto ?? true)}
+                          />
+                        </SimpleGrid>
+                        <Tooltip
+                          label="Eager (по умолчанию): топ-K чанков KB автоматически добавляются в каждый промпт — экономит +1 раунд для KB-запросов, но тратит ~1800 токенов даже там, где KB не нужен. On-demand: KB не в промпте, модель вызывает search_kb() только когда нужно — меньший промпт, быстрее для операционных запросов."
+                          multiline
+                          w={380}
+                          withArrow
+                        >
+                          <Switch
+                            label="KB: eager-инъекция (выключить = on-demand через tool)"
+                            checked={form.kb_inject_auto ?? true}
+                            onChange={(e) => updateField('kb_inject_auto', e.currentTarget.checked)}
+                          />
+                        </Tooltip>
+                      </Stack>
+                    )}
 
-          <Group>
-            <Switch
-              label="Память включена"
-              checked={form.memory_enabled ?? false}
-              onChange={(e) => updateField('memory_enabled', e.currentTarget.checked)}
-            />
-            <Switch
-              label="База знаний включена"
-              checked={form.knowledge_base_enabled ?? false}
-              onChange={(e) => updateField('knowledge_base_enabled', e.currentTarget.checked)}
-            />
-          </Group>
+                    <TextInput
+                      label={<Hint hint="Ollama-модель для описания изображений вложений. Пусто = авто: qwen2-vl > llava > moondream.">Vision-модель</Hint>}
+                      placeholder="llava:13b"
+                      value={form.vision_model_name ?? ''}
+                      onChange={(e) => updateField('vision_model_name', e.currentTarget.value || undefined)}
+                    />
+                  </Stack>
+                </Fieldset>
 
-          {form.knowledge_base_enabled && (
-            <Group grow>
-              <TextInput
-                label="Модель эмбеддингов"
-                description="Модель для генерации эмбеддингов (например, nomic-embed-text)"
-                placeholder="nomic-embed-text"
-                value={form.embedding_model_name ?? ''}
-                onChange={(e) => updateField('embedding_model_name', e.currentTarget.value || undefined)}
+              </Stack>
+            </Tabs.Panel>
+
+            {/* ── STT tab ──────────────────────────────────────────────────── */}
+            <Tabs.Panel value="stt">
+              <STTVocabSection
+                tenantId={tenantId}
+                form={form}
+                config={config}
+                updateField={updateField}
               />
-              <NumberInput
-                label="Макс. чанков KB"
-                description="Сколько релевантных чанков подмешивать в контекст"
-                min={1}
-                max={50}
-                value={form.kb_max_chunks ?? 10}
-                onChange={(val) => updateField('kb_max_chunks', typeof val === 'number' ? val : 10)}
-              />
-            </Group>
-          )}
+            </Tabs.Panel>
 
-          <TextInput
-            label="Vision-модель (для анализа картинок)"
-            description="Ollama-модель для описания изображений вложений. Если пусто — авто-выбор: qwen2-vl > llava > moondream"
-            placeholder="llava:13b"
-            value={form.vision_model_name ?? ''}
-            onChange={(e) => updateField('vision_model_name', e.currentTarget.value || undefined)}
-          />
+            {/* ── TTS tab ──────────────────────────────────────────────────── */}
+            <Tabs.Panel value="tts">
+              <TTSSection
+                form={form}
+                config={config}
+                updateField={updateField}
+              />
+            </Tabs.Panel>
+
+          </Tabs>
+
+          <Divider />
 
           <Group justify="space-between">
             <Button

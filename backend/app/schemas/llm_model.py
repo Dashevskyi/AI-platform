@@ -46,6 +46,9 @@ class LLMModelResponse(BaseModel):
     cost_per_1k_input: float | None
     cost_per_1k_output: float | None
     is_active: bool
+    last_check_at: datetime | None = None
+    last_check_status: str | None = None
+    last_check_detail: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -118,6 +121,8 @@ class TenantModelConfigUpdate(BaseModel):
     auto_light_custom_model_id: str | None = None
     auto_heavy_custom_model_id: str | None = None
     complexity_threshold: float | None = None
+    auto_size_threshold: int | None = None
+    use_complexity_classifier: bool | None = None
 
 
 class TenantModelConfigResponse(BaseModel):
@@ -131,6 +136,8 @@ class TenantModelConfigResponse(BaseModel):
     auto_light_custom_model_id: str | None
     auto_heavy_custom_model_id: str | None
     complexity_threshold: float
+    auto_size_threshold: int = 24000
+    use_complexity_classifier: bool = False
     # Resolved display names for frontend
     manual_model_name: str | None = None
     manual_custom_model_name: str | None = None

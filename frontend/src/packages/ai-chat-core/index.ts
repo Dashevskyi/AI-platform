@@ -33,6 +33,9 @@ export type {
 export { getAiChatApi } from './api';
 export type { AiChatApi } from './api';
 
+export { useWhisperLiveSTT } from './useWhisperLiveSTT';
+export type { UseWhisperLiveOptions, UseWhisperLiveResult, WhisperLiveState, WhisperLiveSegment } from './useWhisperLiveSTT';
+
 export type {
   Chat,
   Message,

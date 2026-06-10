@@ -18,6 +18,7 @@ import {
   Divider,
   Modal,
   Table,
+  Alert,
 } from '@mantine/core';
 import {
   IconSend,
@@ -38,6 +39,8 @@ import {
   IconTool,
   IconBook,
   IconBrain,
+  IconFlag,
+  IconFlagFilled,
 } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
 import type { Message, AttachmentBrief } from '../../shared/api/types';
@@ -70,6 +73,11 @@ export type AiChatFeatures = {
   showToolResults?: boolean;
   /** Show "новый чат"/edit-title controls (chat-management UI). Default: admin=true, end-user=false. */
   showChatControls?: boolean;
+  /** Show "пометить как проблемный" flag button — debug-only. Default: admin=true, end-user=false. */
+  showFlagButton?: boolean;
+  /** Base z-index for modals rendered inside the component (rename, flag dialogs).
+   *  Increase when AiChat is embedded inside a high-z container (e.g. a modal). Default: 200. */
+  modalZIndex?: number;
 };
 
 export type AiChatProps = {
@@ -83,8 +91,12 @@ export type AiChatProps = {
    *  Bearer JWT from localStorage). 'end-user' = sanitized UI for embedded
    *  clients (uses /api/tenants/..., requires apiKey prop). */
   mode?: AiChatMode;
-  /** Tenant API key. Required when mode='end-user'; ignored in 'admin' mode. */
+  /** Tenant API key. Used when mode='end-user' and no `auth` prop is set. */
   apiKey?: string;
+  /** Explicit auth descriptor — overrides apiKey-based auth in end-user mode.
+   *  Pass e.g. `{ type: 'custom', getHeaders: () => ({ token: '…' }) }` when
+   *  the host app uses a non-standard auth header (CRM, white-label embeds). */
+  auth?: AuthMode;
   /** Per-feature overrides. Each defaults based on mode. */
   features?: AiChatFeatures;
   /** Optional callback fired after each successful message round trip. */
@@ -104,6 +116,8 @@ function defaultFeatures(mode: AiChatMode, overrides: AiChatFeatures = {}): Requ
           showFiles: true,
           showToolResults: true,
           showChatControls: true,
+          showFlagButton: true,
+          modalZIndex: 200,
         }
       : {
           showTrail: false,
@@ -112,6 +126,8 @@ function defaultFeatures(mode: AiChatMode, overrides: AiChatFeatures = {}): Requ
           showFiles: true,
           showToolResults: false,
           showChatControls: false,
+          showFlagButton: false,
+          modalZIndex: 200,
         };
   return { ...base, ...overrides };
 }
@@ -177,6 +193,7 @@ export function AiChat({
   apiBase = '',
   mode = 'admin',
   apiKey,
+  auth: authProp,
   features: featuresOverride,
   onMessageSent,
   onChatCreated,
@@ -189,6 +206,8 @@ export function AiChat({
   const [showArtifacts, setShowArtifacts] = useState(false);
   const [voiceModeOpen, setVoiceModeOpen] = useState(false);
   const [editChatId, setEditChatId] = useState<string | null>(null);
+  const [flagChatId, setFlagChatId] = useState<string | null>(null);
+  const [flagIssueText, setFlagIssueText] = useState('');
   const [editChatTitle, setEditChatTitle] = useState('');
   // Drafts the user attached to the upcoming message. Files are uploaded to the
   // server immediately (POST .../attachments/draft) and processed in background,
@@ -220,27 +239,28 @@ export function AiChat({
         auth: token ? ({ type: 'bearer' as const, token }) : undefined,
       };
     }
+    // authProp takes priority over apiKey in end-user mode.
     return {
       mode: 'end-user' as const,
       apiBase,
-      apiKey,
+      ...(authProp ? { auth: authProp } : apiKey ? { apiKey } : {}),
     };
-  }, [mode, apiKey, apiBase]);
+  }, [mode, apiKey, apiBase, authProp]);
 
   // Dedicated API client for draft attachment lifecycle (upload + poll + delete).
   const draftApi = useMemo(() => {
-    const auth: AuthMode | undefined =
+    const resolvedAuth: AuthMode | undefined =
       mode === 'admin'
         ? (connection.auth as AuthMode | undefined)
-        : (apiKey ? { type: 'apiKey', apiKey } : undefined);
+        : authProp ?? (apiKey ? { type: 'apiKey', apiKey } : undefined);
     return getAiChatApi({
       variant: mode === 'admin' ? 'admin' : 'tenant',
       apiBase,
-      auth,
+      auth: resolvedAuth,
     });
-  }, [mode, apiBase, apiKey, connection]);
+  }, [mode, apiBase, apiKey, authProp, connection]);
 
-  const { chats, create: createChatAction, rename: renameChatAction } = useAiChatList(tenantId, connection);
+  const { chats, create: createChatAction, rename: renameChatAction, flag: flagChatAction } = useAiChatList(tenantId, connection);
   const chatsData = useMemo(() => ({ items: chats }), [chats]);
 
   const { messages: serverMessages, isLoading: messagesLoading } = useAiChatMessages(
@@ -327,6 +347,27 @@ export function AiChat({
         notifications.show({ title: 'Готово', message: 'Название чата обновлено', color: 'green' });
       } catch {
         notifications.show({ title: 'Ошибка', message: 'Не удалось переименовать чат', color: 'red' });
+      }
+    },
+  };
+  const flagMutation = {
+    isPending: false,
+    mutate: async () => {
+      if (!flagChatId) return;
+      try {
+        const trimmed = flagIssueText.trim();
+        await flagChatAction(flagChatId, trimmed || null);
+        setFlagChatId(null);
+        setFlagIssueText('');
+        notifications.show({
+          title: trimmed ? 'Чат помечен' : 'Метка снята',
+          message: trimmed
+            ? 'Этот трейс попадёт в приоритет при офлайн-анализе'
+            : 'Чат больше не отмечен как проблемный',
+          color: trimmed ? 'red' : 'green',
+        });
+      } catch {
+        notifications.show({ title: 'Ошибка', message: 'Не удалось обновить метку', color: 'red' });
       }
     },
   };
@@ -641,6 +682,26 @@ export function AiChat({
                       <IconPencil size={14} />
                     </ActionIcon>
                   </Tooltip>
+                  {features.showFlagButton && (() => {
+                    const chat = chatsData?.items.find((c) => c.id === activeChatId);
+                    const isFlagged = !!chat?.flagged_issue;
+                    return (
+                      <Tooltip label={isFlagged ? `Помечен: ${chat?.flagged_issue}` : 'Пометить чат как проблемный'} multiline w={280}>
+                        <ActionIcon
+                          variant={isFlagged ? 'filled' : 'subtle'}
+                          color={isFlagged ? 'red' : 'gray'}
+                          size="xs"
+                          onClick={() => {
+                            if (!chat) return;
+                            setFlagChatId(chat.id);
+                            setFlagIssueText(chat.flagged_issue || '');
+                          }}
+                        >
+                          {isFlagged ? <IconFlagFilled size={14} /> : <IconFlag size={14} />}
+                        </ActionIcon>
+                      </Tooltip>
+                    );
+                  })()}
                   {features.showFiles && attachments && attachments.length > 0 && (
                     <Tooltip label={`${attachments.length} файл(ов) приложено`}>
                       <Badge variant="light" size="sm" leftSection={<IconPaperclip size={10} />}>
@@ -892,6 +953,7 @@ export function AiChat({
         onClose={() => setEditChatId(null)}
         title="Переименовать чат"
         size="sm"
+        zIndex={features.modalZIndex + 1}
       >
         <form onSubmit={(e) => { e.preventDefault(); renameMutation.mutate(); }}>
           <Stack gap="md">
@@ -905,6 +967,48 @@ export function AiChat({
             <Group justify="flex-end">
               <Button variant="default" onClick={() => setEditChatId(null)}>Отмена</Button>
               <Button type="submit" loading={renameMutation.isPending}>Сохранить</Button>
+            </Group>
+          </Stack>
+        </form>
+      </Modal>
+
+      {/* Flag chat as problematic — used for the 100-chat analysis */}
+      <Modal
+        opened={!!flagChatId}
+        onClose={() => { setFlagChatId(null); setFlagIssueText(''); }}
+        title="Пометить чат как проблемный"
+        size="md"
+        zIndex={features.modalZIndex + 1}
+      >
+        <form onSubmit={(e) => { e.preventDefault(); flagMutation.mutate(); }}>
+          <Stack gap="md">
+            <Text size="xs" c="dimmed">
+              Краткое описание того, где модель ушла не туда. Это попадёт в выборку
+              для офлайн-анализа вместе с полным debug-трейсом.
+            </Text>
+            <Textarea
+              label="Что пошло не так"
+              placeholder="напр. потеряла контекст после 4-го сообщения / придумала несуществующий ip / отказалась вызывать ping"
+              value={flagIssueText}
+              onChange={(e) => setFlagIssueText(e.currentTarget.value)}
+              minRows={3}
+              autoFocus
+            />
+            <Group justify="space-between">
+              <Button
+                variant="subtle"
+                color="green"
+                disabled={!flagIssueText && !chatsData?.items.find((c) => c.id === flagChatId)?.flagged_issue}
+                onClick={() => { setFlagIssueText(''); flagMutation.mutate(); }}
+              >
+                Снять метку
+              </Button>
+              <Group>
+                <Button variant="default" onClick={() => { setFlagChatId(null); setFlagIssueText(''); }}>Отмена</Button>
+                <Button type="submit" color="red" loading={flagMutation.isPending} disabled={!flagIssueText.trim()}>
+                  Пометить
+                </Button>
+              </Group>
             </Group>
           </Stack>
         </form>
@@ -1136,6 +1240,32 @@ function MessageBubble({
     }
     return null;
   })();
+  const contextWarning = (() => {
+    const meta = message.metadata_json;
+    if (meta && typeof meta === 'object') {
+      const cw = (meta as Record<string, unknown>).context_warning;
+      if (cw && typeof cw === 'object') return cw as { kind?: string; message?: string };
+    }
+    return null;
+  })();
+  // Tier-0 marker — present when the response was assembled by the
+  // deterministic shortcut (no LLM round). Shows ⚡ badge to make the
+  // bypass visible to the operator (transparency + debug signal).
+  const tier0 = (() => {
+    const meta = message.metadata_json;
+    if (meta && typeof meta === 'object') {
+      const t0 = (meta as Record<string, unknown>).tier0;
+      if (t0 && typeof t0 === 'object') {
+        return t0 as {
+          tool?: string;
+          confidence?: number;
+          second_score?: number;
+          entities?: Record<string, string[]>;
+        };
+      }
+    }
+    return null;
+  })();
   const hasTrail = !!(eventsTrail && eventsTrail.length > 0);
   const isEmptyContent = isAssistant && !message.content?.trim();
   const statsRows = isAssistant
@@ -1193,6 +1323,18 @@ function MessageBubble({
               linkColor={isUser ? 'rgba(255,255,255,0.92)' : undefined}
             />
           )}
+          {isAssistant && contextWarning?.message && (
+            <Alert
+              color={contextWarning.kind === 'near_model_limit' ? 'orange' : 'yellow'}
+              variant="light"
+              icon={<IconAlertCircle size={16} />}
+              p="xs"
+              styles={{ root: { fontSize: 12 } }}
+              mt={4}
+            >
+              {contextWarning.message}
+            </Alert>
+          )}
           <Group justify="space-between" gap="xs">
             <Text size="xs" c={isUser ? 'rgba(255,255,255,0.7)' : 'dimmed'}>
               {new Date(message.created_at).toLocaleTimeString()}
@@ -1208,6 +1350,28 @@ function MessageBubble({
                     authBearer={authBearer}
                     text={message.content || ''}
                   />
+                )}
+                {tier0 && (
+                  <Tooltip
+                    label={
+                      <Stack gap={2}>
+                        <Text size="xs">Tier 0 hit — ответ без LLM</Text>
+                        {tier0.tool && <Text size="xs" c="dimmed">tool: {tier0.tool}</Text>}
+                        {typeof tier0.confidence === 'number' && (
+                          <Text size="xs" c="dimmed">conf: {tier0.confidence.toFixed(3)}</Text>
+                        )}
+                        {tier0.entities && Object.entries(tier0.entities).filter(([, v]) => Array.isArray(v) && v.length).map(([k, v]) => (
+                          <Text key={k} size="xs" c="dimmed">{k}: {(v as string[]).join(', ')}</Text>
+                        ))}
+                      </Stack>
+                    }
+                    multiline
+                    withArrow
+                  >
+                    <Badge size="xs" color="yellow" variant="filled" leftSection="⚡">
+                      Tier 0{tier0.tool ? ` · ${tier0.tool}` : ''}
+                    </Badge>
+                  </Tooltip>
                 )}
                 {showStats && (message.total_tokens != null || message.tool_calls_count != null) && (
                   <Text size="xs" c="dimmed">

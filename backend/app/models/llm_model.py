@@ -25,5 +25,11 @@ class LLMModel(Base):
     cost_per_1k_input: Mapped[float | None] = mapped_column(Float, nullable=True)
     cost_per_1k_output: Mapped[float | None] = mapped_column(Float, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Health check: result of the last "ping" probe against this model.
+    # Possible last_check_status values:
+    #   ok | empty_content | no_completion | http_error | timeout | provider_error | not_checked
+    last_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_check_status: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    last_check_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))

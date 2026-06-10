@@ -55,6 +55,14 @@ TOOL_RESULT_KIND = "tool-result"
 # protection against off-topic pulls (e.g. "спасибо" pulling the ping
 # table) is now in the similarity floor below.
 TOOL_RESULT_VERY_RECENT_SECONDS = 300
+# Hard TTL on tool-result eligibility for AUTO-grounding (both semantic
+# and recent paths). Tool results older than this are still reachable via
+# get_artifact(id) but no longer auto-pulled — they were a snapshot of a
+# moment, and quoting a 30-minute-old ping table as if it were fresh data
+# poisons answers (see cascading-date case: an old search_tasks result with
+# a hallucinated 2023 date kept anchoring "когда воскресенье"-style
+# follow-ups even after get_current_time was called).
+TOOL_RESULT_MAX_AGE_SECONDS = 300
 # Auto-generated labels "Результат ping(ips=[13 items])" don't carry enough
 # semantic content for bge-m3 to clearly separate relevant follow-ups from
 # off-topic chatter on SHORT Russian queries — "спасибо" and "оформи в
@@ -146,8 +154,11 @@ async def resolve_active_artifacts(
     #    mismatched-dim vectors that crash the cosine-distance op.
     if qvec is not None:
         qvec_str = _vec_to_pg(qvec)
+        # Tool-result artifacts older than TOOL_RESULT_MAX_AGE_SECONDS are
+        # filtered out here — they remain reachable via get_artifact(id) but
+        # don't auto-anchor grounding. See module comment.
         sql = sa_text(
-            """
+            f"""
             SELECT
                 id, kind,
                 1 - (embedding <=> CAST(:qvec AS vector)) AS similarity
@@ -157,6 +168,10 @@ async def resolve_active_artifacts(
               AND deleted_at IS NULL
               AND embedding IS NOT NULL
               AND embedding_model = :emodel
+              AND (
+                kind != :tr_kind
+                OR created_at >= NOW() - INTERVAL '{TOOL_RESULT_MAX_AGE_SECONDS} seconds'
+              )
             ORDER BY embedding <=> CAST(:qvec AS vector)
             LIMIT :k
             """
@@ -164,6 +179,7 @@ async def resolve_active_artifacts(
         rows = (await db.execute(sql, {
             "tid": tenant_id,
             "cid": chat_id,
+            "tr_kind": TOOL_RESULT_KIND,
             "qvec": qvec_str,
             "emodel": embed_model,
             "k": max_artifacts * 2,
@@ -316,12 +332,17 @@ def format_active_artifacts_block(artifacts: list[Artifact]) -> str | None:
     """Render the system-prompt block. Stable order: as given (caller decides)."""
     if not artifacts:
         return None
+    from datetime import datetime, timezone as _tz
+    now = datetime.now(_tz.utc)
     parts: list[str] = [
         "## Активные артефакты (источник истины — не пересказ)",
         (
             "Ниже — точное содержимое артефактов, относящихся к вопросу. "
             "На вопросы про их содержимое отвечай ТОЛЬКО по этому блоку, "
-            "не по своим резюме / истории. Если ответа здесь нет — так и скажи."
+            "не по своим резюме / истории. Если ответа здесь нет — так и скажи. "
+            "Для tool-result: смотри метку «вызвано N мин назад» — если нужны "
+            "актуальные данные, а метка > 2-3 минут — вызови tool заново, "
+            "не цитируй устаревший снимок."
         ),
     ]
     budget_left = TOTAL_BLOCK_BUDGET_CHARS
@@ -335,6 +356,22 @@ def format_active_artifacts_block(artifacts: list[Artifact]) -> str | None:
         fence_lang = lang_tag if lang_tag else ""
         header = f"### 📎 [{art.kind}] {art.label}"
         header += f"  (id={art.id}, v{art.version})"
+        # Age stamp — especially load-bearing for tool-result, where staleness
+        # matters. Keep it short and human-readable.
+        if art.created_at:
+            created = art.created_at
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=_tz.utc)
+            age_sec = max(0, int((now - created).total_seconds()))
+            if age_sec < 60:
+                age_str = f"{age_sec}с назад"
+            elif age_sec < 3600:
+                age_str = f"{age_sec // 60}мин назад"
+            elif age_sec < 86400:
+                age_str = f"{age_sec // 3600}ч назад"
+            else:
+                age_str = f"{age_sec // 86400}д назад"
+            header += f"  · вызвано {age_str}"
         parts.append(header)
         parts.append(f"```{fence_lang}\n{body}\n```")
     return "\n\n".join(parts)

@@ -18,6 +18,8 @@ export type UseAiChatListResult = {
   create: () => Promise<Chat>;
   /** Rename / update title or description of an existing chat. */
   rename: (chatId: string, data: { title?: string; description?: string }) => Promise<Chat>;
+  /** Set or clear the user's "this chat went off the rails" flag. Pass null to clear. */
+  flag: (chatId: string, issue: string | null) => Promise<Chat>;
   refetch: () => Promise<unknown>;
 };
 
@@ -64,6 +66,14 @@ export function useAiChatList(
     },
   });
 
+  const flagMut = useMutation({
+    mutationFn: ({ chatId, issue }: { chatId: string; issue: string | null }) =>
+      api.update(tenantId, chatId, { flagged_issue: issue }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey });
+    },
+  });
+
   return {
     chats: data?.items || [],
     isLoading,
@@ -71,6 +81,7 @@ export function useAiChatList(
     totalCount: data?.total_count || 0,
     create: () => createMut.mutateAsync(),
     rename: (chatId, data) => renameMut.mutateAsync({ chatId, data }),
+    flag: (chatId, issue) => flagMut.mutateAsync({ chatId, issue }),
     refetch: () => refetch(),
   };
 }

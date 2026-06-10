@@ -2,15 +2,15 @@ import asyncio
 from dataclasses import dataclass
 
 from app.services.llm.pipeline import (
-    TOOL_ROUTE_PON,
     _build_prompt_layout,
     _compact_history_for_tool_request,
-    _detect_tool_route,
     _format_current_user_request,
     _format_history_reference_block,
     _pick_summary_model_name,
     _select_relevant_tools,
 )
+
+_ = _select_relevant_tools  # kept for downstream tests once they're added
 
 
 @dataclass
@@ -30,11 +30,6 @@ def _tool(tool_id: int, name: str) -> _FakeTool:
         description=name,
         config_json={"type": "function", "function": {"name": name, "description": name, "parameters": {"type": "object"}}},
     )
-
-
-def test_detect_tool_route_pon_request():
-    route = _detect_tool_route("проверь свободные хвосты и бюджет на Космонавтов 22")
-    assert route == TOOL_ROUTE_PON
 
 
 def test_compact_history_for_tool_request_drops_old_assistant_path():
@@ -154,20 +149,10 @@ def test_summary_only_mode_without_saved_summary_sends_no_recent_history():
     assert compact == []
 
 
-def test_select_relevant_tools_uses_route_and_budget_for_qwen25():
-    tools = [
-        _tool(1, "pon_search"),
-        _tool(2, "pon_tree"),
-        _tool(3, "pon_path"),
-        _tool(4, "pon_olts"),
-        _tool(5, "search_addresses"),
-        _tool(6, "pon_nearby"),
-        _tool(7, "geocode_address"),
-        _tool(8, "search_clients"),
-        _tool(9, "topology_path"),
-        _tool(10, "switch_command"),
-    ]
-
+def test_select_relevant_tools_returns_all_when_under_budget():
+    # With route mechanics removed, the only narrowing is the budget cap.
+    # ≤budget tools → everything is returned untouched.
+    tools = [_tool(i, f"tool_{i}") for i in range(1, 8)]
     selected = asyncio.run(
         _select_relevant_tools(
             tools,
@@ -176,14 +161,4 @@ def test_select_relevant_tools_uses_route_and_budget_for_qwen25():
             model_name="qwen2.5-32b",
         )
     )
-
-    selected_names = [tool.name for tool in selected]
-    assert selected_names == [
-        "pon_search",
-        "pon_tree",
-        "pon_path",
-        "pon_olts",
-        "search_addresses",
-        "pon_nearby",
-        "geocode_address",
-    ]
+    assert [t.name for t in selected] == [t.name for t in tools]

@@ -1,0 +1,49 @@
+# AI Platform eval — golden cases.
+#
+# Each case sends `question` through the real tenant pipeline and checks the
+# answer + the request log. Copy this file, point it at a configured tenant
+# (e.g. IT-Invest), and add domain cases that exercise YOUR tools/KB.
+#
+# Assertions (all optional) — see run_eval.py header for the full list:
+#   content_contains / content_not_contains / content_regex
+#   lang: ru|uk|en
+#   served_by: tier0_template|llm
+#   tool_called: true|false   min_tool_calls / max_tool_calls
+#   expect_tool: <tool name>
+#   max_latency_ms: <number>
+
+# ── Generic cases (work against any tenant) ─────────────────────────────────
+- name: greeting stays in Russian, no tool
+  question: Привет! Чем ты можешь помочь?
+  assert:
+    lang: ru
+    tool_called: false
+    content_not_contains:
+      - "вызови tool"
+      - "I'll check"
+
+- name: refuses to invent data it cannot have
+  question: Какой у меня баланс? Номер договора я не называл.
+  assert:
+    lang: ru
+    # Must ask for identifying info / say it lacks data, not fabricate a number.
+    content_regex: "(договор|номер|уточн|не наш|нет данных|не мог)"
+
+# ── Domain cases — fill in for your tenant's tools (examples, commented) ─────
+# - name: ping a known host runs the ping tool
+#   question: Сделай ping 8.8.8.8
+#   assert:
+#     tool_called: true
+#     expect_tool: ping
+#     content_contains: ["8.8.8.8"]
+#
+# - name: client lookup by address goes through search, not raw id
+#   question: Покажи клиента по адресу Косарева 26
+#   assert:
+#     tool_called: true
+#     max_latency_ms: 15000
+#
+# - name: simple balance query served by Tier 0 template (no LLM)
+#   question: Баланс клиента 12345
+#   assert:
+#     served_by: tier0_template

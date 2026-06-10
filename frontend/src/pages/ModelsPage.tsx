@@ -26,6 +26,7 @@ import {
   IconTrash,
   IconPlugConnected,
   IconEdit,
+  IconStethoscope,
 } from '@tabler/icons-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { notifications } from '@mantine/notifications';
@@ -162,6 +163,54 @@ export function ModelsPage() {
     },
   });
 
+  const healthCheckMutation = useMutation({
+    mutationFn: (id: string) => modelsApi.healthCheck(id),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ['models'] });
+      const ok = result.status === 'ok';
+      const lines = [
+        result.detail || (ok ? 'Модель ответила корректно.' : ''),
+        result.content ? `Ответ: «${result.content}»` : null,
+        result.latency_ms !== null ? `Латентность: ${result.latency_ms} мс` : null,
+        result.completion_tokens !== null ? `Токенов: ${result.completion_tokens}` : null,
+      ].filter(Boolean).join(' · ');
+      notifications.show({
+        title: ok ? 'Проверка OK' : `Проверка: ${result.status}`,
+        message: lines || result.status,
+        color: ok ? 'green' : 'red',
+        autoClose: ok ? 4000 : 10000,
+      });
+    },
+    onError: () => {
+      notifications.show({ title: 'Ошибка', message: 'Не удалось выполнить проверку', color: 'red' });
+    },
+  });
+
+  const HEALTH_COLORS: Record<string, string> = {
+    ok: 'green',
+    empty_content: 'red',
+    no_completion: 'orange',
+    http_error: 'red',
+    timeout: 'orange',
+    provider_error: 'red',
+  };
+  const HEALTH_LABELS: Record<string, string> = {
+    ok: 'OK',
+    empty_content: 'Пустой ответ',
+    no_completion: 'Нет токенов',
+    http_error: 'HTTP error',
+    timeout: 'Таймаут',
+    provider_error: 'Ошибка',
+  };
+  const formatHealth = (m: LLMModel) => {
+    if (!m.last_check_status) return null;
+    const color = HEALTH_COLORS[m.last_check_status] || 'gray';
+    const label = HEALTH_LABELS[m.last_check_status] || m.last_check_status;
+    const at = m.last_check_at ? new Date(m.last_check_at).toLocaleString('ru-RU') : null;
+    const tip = [at, m.last_check_detail].filter(Boolean).join(' — ');
+    return { color, label, tip };
+  };
+
   const handleSave = () => {
     const payload = {
       name,
@@ -219,6 +268,7 @@ export function ModelsPage() {
                     <Table.Th>Уровень</Table.Th>
                     <Table.Th>Возможности</Table.Th>
                     <Table.Th>Статус</Table.Th>
+                    <Table.Th>Проверка</Table.Th>
                     <Table.Th>Действия</Table.Th>
                   </Table.Tr>
                 </Table.Thead>
@@ -254,7 +304,29 @@ export function ModelsPage() {
                         </Badge>
                       </Table.Td>
                       <Table.Td>
+                        {(() => {
+                          const h = formatHealth(m);
+                          if (!h) return <Text size="xs" c="dimmed">—</Text>;
+                          return (
+                            <Tooltip label={h.tip || h.label} multiline w={300}>
+                              <Badge color={h.color} size="sm" variant="light">{h.label}</Badge>
+                            </Tooltip>
+                          );
+                        })()}
+                      </Table.Td>
+                      <Table.Td>
                         <Group gap={4}>
+                          <Tooltip label="Проверить модель (отправить пробный запрос)">
+                            <ActionIcon
+                              variant="subtle"
+                              color="teal"
+                              size="sm"
+                              loading={healthCheckMutation.isPending && healthCheckMutation.variables === m.id}
+                              onClick={(e) => { e.stopPropagation(); healthCheckMutation.mutate(m.id); }}
+                            >
+                              <IconStethoscope size={14} />
+                            </ActionIcon>
+                          </Tooltip>
                           <Tooltip label="Редактировать">
                             <ActionIcon variant="subtle" color="blue" size="sm" onClick={(e) => { e.stopPropagation(); openEdit(m); }}>
                               <IconEdit size={14} />

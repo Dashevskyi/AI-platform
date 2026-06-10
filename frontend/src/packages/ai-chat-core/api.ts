@@ -20,7 +20,7 @@ import type {
 export type AiChatApi = {
   list: (tenantId: string, page?: number, pageSize?: number) => Promise<PaginatedResponse<Chat>>;
   create: (tenantId: string, data?: Record<string, unknown>) => Promise<Chat>;
-  update: (tenantId: string, chatId: string, data: { title?: string; description?: string }) => Promise<Chat>;
+  update: (tenantId: string, chatId: string, data: { title?: string; description?: string; flagged_issue?: string | null }) => Promise<Chat>;
   listMessages: (tenantId: string, chatId: string, page?: number, pageSize?: number) => Promise<PaginatedResponse<Message>>;
   listAttachments: (tenantId: string, chatId: string) => Promise<AttachmentBrief[]>;
   sendMessage: (tenantId: string, chatId: string, data: MessageSend) => Promise<Message>;

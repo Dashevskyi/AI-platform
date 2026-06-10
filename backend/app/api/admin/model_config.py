@@ -55,6 +55,8 @@ async def _config_to_response(cfg: TenantModelConfig, db: AsyncSession) -> Tenan
         auto_light_custom_model_id=str(cfg.auto_light_custom_model_id) if cfg.auto_light_custom_model_id else None,
         auto_heavy_custom_model_id=str(cfg.auto_heavy_custom_model_id) if cfg.auto_heavy_custom_model_id else None,
         complexity_threshold=cfg.complexity_threshold,
+        auto_size_threshold=cfg.auto_size_threshold,
+        use_complexity_classifier=cfg.use_complexity_classifier,
         manual_model_name=await _resolve_model_name(cfg.manual_model_id, db, LLMModel),
         manual_custom_model_name=await _resolve_model_name(cfg.manual_custom_model_id, db, TenantCustomModel),
         auto_light_model_name=await _resolve_model_name(cfg.auto_light_model_id, db, LLMModel),

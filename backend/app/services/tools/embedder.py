@@ -21,30 +21,60 @@ from app.providers.factory import get_provider
 logger = logging.getLogger(__name__)
 
 
+TAG_REPEAT_IN_EMBED = 3  # how many times tags are repeated in embed-text
+
+
+def _extract_tool_tags(tool: TenantTool) -> list[str]:
+    """Read capability_tags from x_backend_config — used both by _tool_to_text
+    (for embedding) and by the literal-match bonus in search_tools."""
+    cfg = tool.config_json or {}
+    runtime = cfg.get("x_backend_config") or {}
+    tags = runtime.get("capability_tags") or []
+    if not isinstance(tags, list):
+        return []
+    return [str(t).strip() for t in tags if t and isinstance(t, str) and str(t).strip()]
+
+
 def _tool_to_text(tool: TenantTool) -> str:
-    """Build the text we embed for a tool. Includes:
-    - name
-    - description (from function.description, falls back to tool.description)
-    - parameter descriptions (covers query/property docs which often describe usage)
-    - capability_tags
-    - usage_examples — list of natural-language queries that should match this tool
-    - aliases — alternative names users might use
-    - group
-    The richer this text is, the more robust semantic top-K becomes."""
+    """Build the text we embed for a tool.
+
+    Tags are now the highest-weight signal: they're placed FIRST in the embed
+    text and REPEATED (×TAG_REPEAT_IN_EMBED) so they dominate the bag-of-words
+    distribution. The cosine direction stays the same as for free text, but the
+    magnitude in the tag-words dimension is amplified — so a query mentioning a
+    tag term gets a sharper similarity bump.
+
+    Structure (in order of attention):
+      1. Tags ×N (domain anchors — "PON, ONU, OLT, optical...")
+      2. Tool name
+      3. Description (function.description, falls back to tool.description)
+      4. Parameter descriptions
+      5. usage_examples, aliases, group
+    """
     parts: list[str] = []
-    if tool.name:
-        parts.append(f"Tool: {tool.name}")
 
     cfg = tool.config_json or {}
     runtime = cfg.get("x_backend_config") or {}
     fn = (cfg.get("function") or {}) if isinstance(cfg.get("function"), dict) else {}
 
-    # description: prefer fn.description over tool.description (admin UI keeps richer text there)
+    # === 1. Tags first, repeated. Highest-weight signal. ===
+    tags = _extract_tool_tags(tool)
+    if tags:
+        tag_line = ", ".join(tags)
+        # Repeat the line N times — increases relative tag mass in the embedding.
+        for _ in range(TAG_REPEAT_IN_EMBED):
+            parts.append(f"Domain: {tag_line}")
+
+    # === 2. Name ===
+    if tool.name:
+        parts.append(f"Tool: {tool.name}")
+
+    # === 3. Description ===
     desc = (fn.get("description") or "").strip() or (tool.description or "").strip()
     if desc:
         parts.append(desc)
 
-    # Parameter descriptions — often contain the actual user-facing wording
+    # === 4. Parameter descriptions ===
     props = (fn.get("parameters") or {}).get("properties") or {}
     param_desc_chunks: list[str] = []
     if isinstance(props, dict):
@@ -63,13 +93,7 @@ def _tool_to_text(tool: TenantTool) -> str:
     if param_desc_chunks:
         parts.append("Параметры: " + "; ".join(param_desc_chunks[:12]))
 
-    tags = runtime.get("capability_tags") or []
-    if isinstance(tags, list):
-        flat_tags = [str(t).strip() for t in tags if t and isinstance(t, str)]
-        if flat_tags:
-            parts.append("Теги: " + ", ".join(flat_tags))
-
-    # usage_examples — array of natural-language phrases that should match this tool
+    # === 5. usage_examples / aliases / group ===
     examples = runtime.get("usage_examples") or []
     if isinstance(examples, list):
         flat_ex = [str(e).strip() for e in examples if e and isinstance(e, str)]
@@ -185,8 +209,11 @@ async def search_tools(
         return []
     qv = vectors[0]
 
+    # Select both the row and the similarity score so callers can show
+    # "why this tool was picked" in the debug panel.
+    sim_expr = (1 - TenantTool.embedding.cosine_distance(qv)).label("similarity")
     stmt = (
-        select(TenantTool)
+        select(TenantTool, sim_expr)
         .where(
             TenantTool.tenant_id == uuid.UUID(str(tenant_id)),
             TenantTool.deleted_at.is_(None),
@@ -200,4 +227,48 @@ async def search_tools(
     if candidate_ids is not None:
         stmt = stmt.where(TenantTool.id.in_(list(candidate_ids)))
 
-    return list((await db.execute(stmt)).scalars().all())
+    rows = (await db.execute(stmt)).all()
+
+    # Word-level tag-bonus. For each tool tag, split into words (≥2 chars),
+    # count how many appear in the query (case-insensitive substring). Bonus
+    # for that tag = TAG_BONUS_FULL × (matched / total). So a single-word tag
+    # like "dhcp" gives full 0.10 on hit; a phrase tag "доступность хоста"
+    # gives 0.05 on partial ("проверь доступность") and 0.10 on full ("проверь
+    # доступность хоста"). Bonuses from multiple tags stack, capped at MAX.
+    import re as _re
+    TAG_BONUS_FULL = 0.10
+    TAG_BONUS_MAX = 0.20
+    q_lower = (query or "").lower()
+
+    def _tag_bonus(tag: str) -> float:
+        words = [w for w in _re.split(r"[\s,;]+", tag.lower()) if len(w) >= 2]
+        if not words:
+            return 0.0
+        matched = sum(1 for w in words if w in q_lower)
+        if matched == 0:
+            return 0.0
+        return TAG_BONUS_FULL * (matched / len(words))
+
+    scored: list[tuple[TenantTool, float]] = []
+    for tool, sim in rows:
+        cos = float(sim) if sim is not None else 0.0
+        bonus = 0.0
+        for tag in _extract_tool_tags(tool):
+            bonus += _tag_bonus(tag)
+            if bonus >= TAG_BONUS_MAX:
+                bonus = TAG_BONUS_MAX
+                break
+        final_score = min(1.0, cos + bonus)
+        # Stash the raw cos + bonus separately so the debug-trace UI can
+        # explain "0.42 cosine + 0.20 tag bonus = 0.62 effective".
+        try:
+            tool._semantic_score = final_score
+            tool._semantic_score_cosine = cos
+            tool._semantic_tag_bonus = round(bonus, 3)
+        except Exception:
+            pass
+        scored.append((tool, final_score))
+
+    # Re-rank by the bonused score (top-K of original cosine may shuffle).
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [t for t, _ in scored]

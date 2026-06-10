@@ -84,6 +84,7 @@ def _log_to_detail(log: LLMRequestLog) -> LLMLogDetailResponse:
         tokens_kb=log.tokens_kb,
         tokens_history=log.tokens_history,
         tokens_user=log.tokens_user,
+        debug=log.debug,
     )
 
 

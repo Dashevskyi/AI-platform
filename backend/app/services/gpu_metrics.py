@@ -80,16 +80,27 @@ async def _scrape(url: str, timeout: float = 3.0) -> dict[str, list[tuple[dict[s
 
 def _build_gpu_list(metrics: dict[str, list[tuple[dict[str, str], float]]]) -> list[dict[str, Any]]:
     uuids: dict[str, dict[str, Any]] = {}
+
+    # Discover GPUs from memory_total_bytes (one entry per uuid).
     for labels, _ in metrics.get("nvidia_smi_memory_total_bytes", []):
         u = labels.get("uuid")
         if u:
-            uuids[u] = {
-                "uuid": u,
-                "name": labels.get("name") or labels.get("gpu_name") or "NVIDIA GPU",
-                "idx": int(labels.get("index", "0") or 0),
-            }
+            uuids[u] = {"uuid": u, "name": "NVIDIA GPU", "idx": 0}
+
     if not uuids:
         return []
+
+    # nvidia_smi_gpu_info carries the human-readable name per uuid.
+    for labels, _ in metrics.get("nvidia_smi_gpu_info", []):
+        u = labels.get("uuid")
+        if u and u in uuids:
+            uuids[u]["name"] = labels.get("name") or labels.get("gpu_name") or "NVIDIA GPU"
+
+    # nvidia_smi_index is a gauge whose *value* is the device index.
+    for labels, value in metrics.get("nvidia_smi_index", []):
+        u = labels.get("uuid")
+        if u and u in uuids:
+            uuids[u]["idx"] = int(value)
 
     for u, row in uuids.items():
         row["memory_total_bytes"] = _first_for_uuid(metrics.get("nvidia_smi_memory_total_bytes"), u)

@@ -19,6 +19,8 @@ class LLMRequestLog(Base):
     correlation_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
     provider_type: Mapped[str] = mapped_column(String(50), nullable=False)
     model_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    # Which tier answered: 'tier0_template' (deterministic, $0) or 'llm'.
+    served_by: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     raw_request: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     raw_response: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     normalized_request: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
@@ -46,4 +48,8 @@ class LLMRequestLog(Base):
     tokens_kb: Mapped[int | None] = mapped_column(Integer, nullable=True)
     tokens_history: Mapped[int | None] = mapped_column(Integer, nullable=True)
     tokens_user: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Per-turn debug snapshot (grounding picks, tool timings, block presence,
+    # config snapshot). Temporary instrumentation for the 100-chat analysis;
+    # may be removed once the offline analysis is done.
+    debug: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

@@ -24,19 +24,43 @@ class Settings(BaseSettings):
     # Voice in chat: STT (Whisper) and TTS (openedai-speech / XTTS-v2).
     # Both are OpenAI-compatible endpoints on the GPU host.
     STT_URL: str = "http://172.10.100.9:8001/v1/audio/transcriptions"
-    STT_MODEL: str = "Systran/faster-whisper-large-v3"
+    STT_MODEL: str = "/model-turbo"
     STT_TIMEOUT_SECONDS: float = 60.0
-    TTS_URL: str = "http://172.10.100.9:8002/v1/audio/speech"
-    TTS_MODEL: str = "tts-1-hd"
+    # Fish Speech 1.5 API base URL (MsgPack, /v1/tts endpoint).
+    # Reference IDs map to voice-refs/<id>/ folders on the TTS server.
+    # ru → Russian voice clone, uk → Ukrainian voice clone.
+    TTS_URL: str = "http://172.10.100.9:8002"
+    TTS_MODEL: str = "fish-speech-1.5"
     TTS_VOICE: str = "alloy"
     TTS_TIMEOUT_SECONDS: float = 60.0
-    # Default speech speed. 1.0 = XTTS-v2's natural pace (feels slow);
-    # 1.15-1.25 sounds natural for ru/uk. Client can override per request.
+    # Default speech speed. 1.0 = natural pace; 1.15-1.25 sounds natural for ru/uk.
+    # Client can override per request.
     TTS_SPEED: float = 1.2
+    # Fish Speech 1.5 reference_id for language-specific voice cloning.
+    # These are folder names under voice-refs/ on the GPU host.
+    FISH_SPEECH_REF_RU: str = "ru"
+    FISH_SPEECH_REF_UK: str = "uk"
+    # ── Silero TTS v4 (local, GPU, very fast ~0.1-1.5s per request) ─────────────
+    # Lightweight FastAPI wrapper on top of snakers4/silero-models v4.
+    # API: POST /tts {"text","lang":"ru"|"ua","speaker","sample_rate":24000} → WAV
+    #      GET  /speakers → {"ru":[...],"ua":[...]}
+    # Default speakers chosen for ISP support contexts (neutral, clear voice).
+    SILERO_TTS_URL: str = "http://172.10.100.9:8004"
+    SILERO_SPEAKER_RU: str = "xenia"   # ru speakers: aidar/baya/kseniya/xenia/eugene
+    SILERO_SPEAKER_UA: str = "mykyta"  # ua speakers: mykyta/olena/lada/dobrynyla
+    # ── ElevenLabs TTS (optional, overrides local TTS when set) ──────────────
+    # Set ELEVENLABS_API_KEY in .env to enable. Falls back to local XTTS if empty.
+    # model: eleven_turbo_v2_5 (fastest, multilingual) or eleven_multilingual_v2
+    ELEVENLABS_API_KEY: str = ""
+    ELEVENLABS_VOICE_ID: str = "21m00Tcm4TlvDq8ikWAM"  # Rachel — multilingual ru/uk
+    ELEVENLABS_MODEL: str = "eleven_turbo_v2_5"
     # Default STT language code. Empty string = let Whisper auto-detect.
     # Fixing to "ru" significantly improves accuracy on ru/uk technical
     # content vs auto-detect. UI may override per request.
     STT_LANGUAGE: str = "ru"
+    # WhisperLive streaming STT WebSocket (collabora/whisperlive-gpu).
+    # Used as a backend proxy target for ws://.../voice/stt-stream.
+    WHISPER_LIVE_WS_URL: str = "ws://172.10.100.9:9091"
     # PDF processing — if a page has fewer than this many characters in its
     # native text layer, treat it as a scan and render → OCR via OCR_URL.
     PDF_PAGE_TEXT_LAYER_MIN_CHARS: int = 50

@@ -50,7 +50,11 @@ def test_tenant_isolation(client):
     t2 = r2.json()["id"]
 
     # Create tool for tenant A
-    client.post(f"/api/admin/tenants/{t1}/tools/", json={"name": "Tool A"})
+    r = client.post(
+        f"/api/admin/tenants/{t1}/tools/",
+        json={"name": "Tool A", "config_json": {"function": {"name": "tool_a"}}},
+    )
+    assert r.status_code in (200, 201), r.text
 
     # Tenant B should have no tools
     r = client.get(f"/api/admin/tenants/{t2}/tools/")

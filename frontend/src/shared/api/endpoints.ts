@@ -47,6 +47,7 @@ import type {
   LLMModelCreate,
   LLMModelUpdate,
   LLMModelBrief,
+  ModelHealthCheckResult,
   TenantCustomModel,
   TenantCustomModelCreate,
   TenantCustomModelUpdate,
@@ -73,8 +74,9 @@ export const authApi = {
   changePassword: async (data: { current_password: string; new_password: string }): Promise<void> => {
     await apiClient.post('/api/admin/auth/change-password', data);
   },
-  logout: () => {
-    localStorage.removeItem('auth_token');
+  logout: async (): Promise<void> => {
+    // Server bumps token_version (revokes the JWT) and clears the cookie.
+    await apiClient.post('/api/admin/auth/logout');
   },
 };
 
@@ -189,6 +191,10 @@ export const shellApi = {
     const res = await apiClient.post(`/api/admin/tenants/${tenantId}/shell/test-connection`);
     return res.data;
   },
+  rebuildSttVocab: async (tenantId: string): Promise<{ terms_count: number; sample: string[]; cached_at: number }> => {
+    const res = await apiClient.post(`/api/admin/tenants/${tenantId}/shell/rebuild-stt-vocab`);
+    return res.data;
+  },
 };
 
 // Tools
@@ -226,10 +232,53 @@ export const toolsApi = {
     const res = await apiClient.post(`/api/admin/tenants/${tenantId}/tools/test`, data);
     return res.data;
   },
+  simulate: async (tenantId: string, data: { message: string; config_json: Record<string, unknown> }): Promise<SimulateResponse> => {
+    const res = await apiClient.post(`/api/admin/tenants/${tenantId}/tools/simulate`, data);
+    return res.data;
+  },
+  semanticTest: async (tenantId: string, query: string, limit = 20): Promise<SemanticTestResponse> => {
+    const res = await apiClient.post(`/api/admin/tenants/${tenantId}/tools/semantic-test`, { query, limit });
+    return res.data;
+  },
   delete: async (tenantId: string, toolId: string): Promise<void> => {
     await apiClient.delete(`/api/admin/tenants/${tenantId}/tools/${toolId}`);
   },
 };
+
+export interface SimulateResponse {
+  tool_called: boolean;
+  tool_name: string | null;
+  tool_args: Record<string, unknown> | null;
+  tool_result: string | null;
+  tool_error: string | null;
+  llm_thinking: string | null;
+  llm_preamble: string | null;
+  llm_final_response: string;
+  model_name: string;
+  round1_tokens: number;
+  round2_tokens: number;
+  total_tokens: number;
+  latency_ms: number;
+}
+
+export interface SemanticTestRow {
+  name: string;
+  cosine: number | null;
+  tag_bonus: number;
+  final_score: number;
+  passes_floor: boolean;
+  matched_tags: string[];
+  description_preview: string;
+  tool_id: string;
+}
+
+export interface SemanticTestResponse {
+  query: string;
+  floor: number;
+  embedding_model: string | null;
+  top_k: number;
+  results: SemanticTestRow[];
+}
 
 export const dataSourcesApi = {
   list: async (tenantId: string, page = 1, pageSize = 50): Promise<PaginatedResponse<TenantDataSource>> => {
@@ -479,6 +528,62 @@ export const statsApi = {
   },
 };
 
+export interface Tier0StatsResponse {
+  enabled: boolean;
+  min_tool_score: number;
+  max_score_gap: number;
+  lookback_days: number;
+  total_assistant_messages: number;
+  tier0_hits: number;
+  hit_rate_pct: number;
+  avg_latency_ms: number | null;
+  by_tool: Array<{ tool: string; count: number; avg_ms: number | null }>;
+  recent_hits: Array<{
+    message_id: string;
+    chat_id: string | null;
+    ts: string | null;
+    tool: string | null;
+    confidence: number | null;
+    latency_ms: number | null;
+    user_query: string;
+    entities: Record<string, string[]> | null;
+    rendered_output: string;
+  }>;
+}
+
+export interface Tier0AuditCandidate {
+  tool_name: string;
+  call_count: number;
+  unique_query_count: number;
+  has_tier0: boolean;
+  priority: 'high' | 'medium' | 'low' | 'configured';
+  sample_queries: string[];
+  sample_args: string[];
+}
+
+export interface Tier0AuditResponse {
+  candidates: Tier0AuditCandidate[];
+  period_days: number;
+  min_calls: number;
+  total_rows_analyzed: number;
+}
+
+export const tier0Api = {
+  getStats: async (tenantId: string, days = 7, recentLimit = 20): Promise<Tier0StatsResponse> => {
+    const res = await apiClient.get(`/api/admin/tenants/${tenantId}/tier0/stats`, {
+      params: { days, recent_limit: recentLimit },
+    });
+    return res.data;
+  },
+
+  getAudit: async (tenantId: string, days = 30, minCalls = 3): Promise<Tier0AuditResponse> => {
+    const res = await apiClient.get(`/api/admin/tenants/${tenantId}/tier0/audit`, {
+      params: { days, min_calls: minCalls },
+    });
+    return res.data;
+  },
+};
+
 // Audit
 export const auditApi = {
   list: async (page = 1, pageSize = 20): Promise<PaginatedResponse<AuditLog>> => {
@@ -486,6 +591,34 @@ export const auditApi = {
       params: { page, page_size: pageSize },
     });
     return res.data;
+  },
+};
+
+// Built-in tools — registry lives in code; only `description` is overridable per-tenant.
+export interface BuiltinToolItem {
+  name: string;
+  default_description: string;
+  effective_description: string;
+  is_overridden: boolean;
+  overridden_at: string | null;
+  parameters: Record<string, unknown>;
+  handler: string;
+}
+
+export const builtinToolsApi = {
+  list: async (tenantId: string): Promise<BuiltinToolItem[]> => {
+    const res = await apiClient.get(`/api/admin/tenants/${tenantId}/builtin-tools/`);
+    return res.data;
+  },
+  setDescription: async (tenantId: string, toolName: string, description: string): Promise<BuiltinToolItem> => {
+    const res = await apiClient.patch(
+      `/api/admin/tenants/${tenantId}/builtin-tools/${toolName}`,
+      { description },
+    );
+    return res.data;
+  },
+  resetDescription: async (tenantId: string, toolName: string): Promise<void> => {
+    await apiClient.delete(`/api/admin/tenants/${tenantId}/builtin-tools/${toolName}`);
   },
 };
 
@@ -519,6 +652,10 @@ export const modelsApi = {
   },
   testConnection: async (data: { provider_type: string; base_url?: string; api_key?: string; model_id?: string }): Promise<TestConnectionResult> => {
     const res = await apiClient.post('/api/admin/models/test-connection', data);
+    return res.data;
+  },
+  healthCheck: async (modelId: string): Promise<ModelHealthCheckResult> => {
+    const res = await apiClient.post(`/api/admin/models/${modelId}/test`);
     return res.data;
   },
 };

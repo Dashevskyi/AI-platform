@@ -43,3 +43,4 @@ class LLMLogDetailResponse(LLMLogResponse):
     tokens_kb: int | None = None
     tokens_history: int | None = None
     tokens_user: int | None = None
+    debug: dict | None = None

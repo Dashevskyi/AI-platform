@@ -134,7 +134,7 @@ export function StatsTab({ tenantId }: { tenantId: string }) {
       </Group>
 
       {summary && (
-        <SimpleGrid cols={{ base: 2, sm: 4 }}>
+        <SimpleGrid cols={{ base: 2, sm: 3, lg: 5 }}>
           <Card withBorder p="md">
             <Text size="xs" c="dimmed" tt="uppercase" fw={700}>
               Всего токенов
@@ -164,6 +164,16 @@ export function StatsTab({ tenantId }: { tenantId: string }) {
             <Title order={3}>
               ${summary.request_count > 0 ? (summary.estimated_cost / summary.request_count).toFixed(6) : '0'}
             </Title>
+          </Card>
+          <Card withBorder p="md">
+            <Text size="xs" c="dimmed" tt="uppercase" fw={700}>
+              Tier 0 (без LLM)
+            </Text>
+            <Title order={3}>{((data?.tier0_share ?? 0) * 100).toFixed(1)}%</Title>
+            <Text size="xs" c="dimmed">
+              {(data?.tiers?.find((t) => t.served_by === 'tier0_template')?.request_count ?? 0).toLocaleString('ru-RU')}{' '}
+              детерминированных ответов
+            </Text>
           </Card>
         </SimpleGrid>
       )}

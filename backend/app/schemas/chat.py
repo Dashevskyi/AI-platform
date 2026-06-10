@@ -11,6 +11,8 @@ class ChatUpdate(BaseModel):
     title: str | None = None
     description: str | None = None
     status: str | None = None
+    # Pass an empty string or null to clear the flag; non-empty to set it.
+    flagged_issue: str | None = None
 
 
 class ChatResponse(BaseModel):
@@ -23,6 +25,8 @@ class ChatResponse(BaseModel):
     created_by: str | None
     created_at: datetime
     updated_at: datetime
+    flagged_issue: str | None = None
+    flagged_at: datetime | None = None
 
     model_config = {"from_attributes": True}
 
@@ -30,6 +34,10 @@ class ChatResponse(BaseModel):
 class MessageSend(BaseModel):
     content: str
     idempotency_key: str | None = None
+    # When True the request originates from voice input (STT). The pipeline
+    # forces enable_thinking=False to avoid the +5 s TTFT penalty from the
+    # reasoning warmup, which is unacceptable in real-time voice UX.
+    voice_mode: bool = False
 
 
 class MessageResponse(BaseModel):

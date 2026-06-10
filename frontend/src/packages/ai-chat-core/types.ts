@@ -24,6 +24,8 @@ export interface Chat {
   created_by: string | null;
   created_at: string;
   updated_at: string;
+  flagged_issue?: string | null;
+  flagged_at?: string | null;
 }
 
 export interface Message {
@@ -52,6 +54,8 @@ export interface Message {
 export interface MessageSend {
   content: string;
   idempotency_key?: string;
+  /** When true — request came from voice (STT). Backend forces enable_thinking=false. */
+  voice_mode?: boolean;
 }
 
 export interface AttachmentBrief {
@@ -115,6 +119,9 @@ export type SendArgs = {
   /** IDs of drafts already uploaded via uploadDraftAttachment + processed in background. */
   attachmentIds?: string[];
   idempotencyKey?: string;
+  /** When true the request originated from STT voice input. The backend will
+   *  force enable_thinking=false to avoid the +5 s TTFT penalty in voice UX. */
+  voiceMode?: boolean;
 };
 
 /** Common option block accepted by every hook. */

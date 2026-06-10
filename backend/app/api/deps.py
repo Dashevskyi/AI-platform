@@ -6,11 +6,15 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Cookie, Depends, Header, HTTPException, status
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+# Name of the HttpOnly cookie carrying the admin access token.
+ACCESS_TOKEN_COOKIE = "access_token"
+
 from app.core.database import get_db
+from app.core.rls import set_tenant_context
 from app.core.security import decode_access_token, hash_api_key
 from app.models.admin_user import AdminUser
 from app.models.tenant import Tenant
@@ -24,16 +28,28 @@ class TenantAuthContext:
 
 
 async def get_current_admin(
-    authorization: str = Header(..., alias="Authorization"),
+    authorization: str | None = Header(None, alias="Authorization"),
+    access_token: str | None = Cookie(None, alias=ACCESS_TOKEN_COOKIE),
     db: AsyncSession = Depends(get_db),
 ) -> AdminUser:
-    """Decode JWT from Authorization Bearer header, look up user in DB."""
-    if not authorization.startswith("Bearer "):
+    """Decode the admin JWT and look up the user.
+
+    Token is read from the HttpOnly `access_token` cookie first, falling back to
+    an `Authorization: Bearer` header (back-compat for existing sessions / API
+    clients). The token's `ver` claim must match the user's current
+    token_version, so logout / password-change can revoke older tokens.
+    """
+    token: str | None = None
+    if access_token:
+        token = access_token
+    elif authorization and authorization.startswith("Bearer "):
+        token = authorization.removeprefix("Bearer ").strip()
+
+    if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authorization header format. Expected 'Bearer <token>'.",
+            detail="Not authenticated.",
         )
-    token = authorization.removeprefix("Bearer ").strip()
     try:
         payload = decode_access_token(token)
     except Exception:
@@ -61,6 +77,14 @@ async def get_current_admin(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found or inactive.",
         )
+    if int(payload.get("ver", 0)) != int(user.token_version or 0):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has been revoked.",
+        )
+    # RLS backstop: scope a tenant_admin's queries to their tenant. Superadmin
+    # gets no context (bypass) — they legitimately operate across tenants.
+    await set_tenant_context(db, user.tenant_id if user.role == "tenant_admin" else None)
     return user
 
 
@@ -133,6 +157,10 @@ async def get_current_tenant_auth_context(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Tenant not found or inactive.",
         )
+    # RLS backstop: the tenant API is single-tenant by construction (one key →
+    # one tenant) and is the most exposed surface, so scope every subsequent
+    # query in this request to that tenant.
+    await set_tenant_context(db, tenant.id)
     return TenantAuthContext(tenant=tenant, api_key=api_key)
 
 

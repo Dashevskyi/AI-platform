@@ -29,6 +29,21 @@ logger = logging.getLogger(__name__)
 TOOL_TIMEOUT_SECONDS = 30
 PING_BATCH_TIMEOUT_SECONDS = 60
 MAX_TOOL_TIMEOUT_SECONDS = 120
+API_BATCH_CONCURRENCY = 10  # max parallel HTTP calls in a batch-expanded fetch_api_data
+
+# Shared HTTP client — connection pool is reused across tool calls instead of
+# opening a fresh TCP/TLS connection per request. Timeout is passed per request.
+_http_client: httpx.AsyncClient | None = None
+
+
+def _get_http_client() -> httpx.AsyncClient:
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(
+            follow_redirects=True,
+            limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
+        )
+    return _http_client
 
 
 @dataclass
@@ -65,6 +80,416 @@ def resolve_tool_handler(tool_name: str, tool_config: dict | None = None) -> str
     return tool_name
 
 
+def _validate_arguments_against_schema(
+    tool_name: str,
+    arguments: dict,
+    tool_config: dict | None,
+) -> str | None:
+    """Validate model-supplied `arguments` against the tool's declared JSON
+    schema (config_json.function.parameters). Returns None on success, or a
+    human-readable error string (in Russian, to be returned to the model) on
+    failure.
+
+    We don't run the schema's `required` check strictly here — many of our
+    tools have empty `required` arrays and rely on tool-side defaults. We
+    only enforce TYPE correctness, which is the actual failure mode we're
+    seeing in production (string '1-18' where integer expected).
+    """
+    if not isinstance(tool_config, dict):
+        return None
+    fn = tool_config.get("function")
+    if not isinstance(fn, dict):
+        return None
+    schema = fn.get("parameters")
+    if not isinstance(schema, dict) or not schema.get("properties"):
+        return None
+
+    # Strip:
+    #  - private fields (_context) — our infra, not part of model-facing schema
+    #  - `fields` — runtime-injected by `_augment_selectable_fields...` for
+    #    tools that opt into LLM-side column projection. Its values are
+    #    enforced by the post-filter (unknown names silently ignored), not
+    #    by the original tool schema.
+    runtime = tool_config.get("x_backend_config") if isinstance(tool_config, dict) else None
+    has_selectable = (
+        isinstance(runtime, dict)
+        and isinstance(runtime.get("selectable_fields"), list)
+        and bool(runtime["selectable_fields"])
+    )
+    payload = {
+        k: v for k, v in (arguments or {}).items()
+        if not str(k).startswith("_")
+        and not (k == "fields" and has_selectable)
+    }
+
+    try:
+        from jsonschema import Draft202012Validator, ValidationError
+    except ImportError:
+        return None  # jsonschema not installed; skip silently
+
+    # Build a relaxed schema: drop the top-level `required` (we don't enforce
+    # required-arg here — that's the tool handler's call) but keep types and
+    # nested constraints. Recursively walk and remove `required` arrays.
+    def _strip_required(node):
+        if isinstance(node, dict):
+            node.pop("required", None)
+            for v in node.values():
+                _strip_required(v)
+        elif isinstance(node, list):
+            for v in node:
+                _strip_required(v)
+
+    from copy import deepcopy
+    schema_for_validation = deepcopy(schema)
+    _strip_required(schema_for_validation)
+
+    validator = Draft202012Validator(schema_for_validation)
+    errors = sorted(validator.iter_errors(payload), key=lambda e: e.absolute_path)
+    if not errors:
+        return None
+
+    lines: list[str] = []
+    for err in errors[:5]:  # cap so we don't blow the tool-result payload
+        path = ".".join(str(p) for p in err.absolute_path) or "(root)"
+        # Human-readable type explanation
+        if err.validator == "type":
+            expected = err.validator_value
+            if isinstance(expected, list):
+                expected = " или ".join(expected)
+            got = type(err.instance).__name__
+            got_human = {"str": "string", "int": "integer", "float": "number",
+                         "bool": "boolean", "list": "array", "dict": "object",
+                         "NoneType": "null"}.get(got, got)
+            sample = repr(err.instance)[:60]
+            lines.append(
+                f"  • Параметр `{path}` ожидался {expected}, прислан {got_human} ({sample})."
+            )
+        else:
+            lines.append(f"  • Параметр `{path}`: {err.message[:200]}")
+    if len(errors) > 5:
+        lines.append(f"  • … и ещё {len(errors) - 5} ошибок.")
+
+    return (
+        f"Аргументы tool `{tool_name}` не прошли валидацию по schema:\n"
+        + "\n".join(lines)
+        + "\n\nИсправь типы аргументов и вызови tool снова. Параметры с указанным "
+        "типом должны передаваться в JSON в виде значений этого типа (integer = "
+        "число без кавычек, boolean = true/false, array = [..], не строка)."
+    )
+
+
+def _get_at_path(obj, path: str):
+    """Walk obj by dotted path. Returns (value, exists)."""
+    cur = obj
+    for part in path.split("."):
+        if isinstance(cur, dict) and part in cur:
+            cur = cur[part]
+        else:
+            return None, False
+    return cur, True
+
+
+def _set_at_path(obj, path: str, value) -> bool:
+    parts = path.split(".")
+    cur = obj
+    for part in parts[:-1]:
+        if not isinstance(cur, dict) or part not in cur:
+            return False
+        cur = cur[part]
+    if not isinstance(cur, dict):
+        return False
+    cur[parts[-1]] = value
+    return True
+
+
+def _apply_arg_formats(
+    tool_name: str,
+    arguments: dict,
+    tool_config: dict | None,
+) -> str | None:
+    """Generic per-path format pipeline (tenant-agnostic).
+
+    Tool config shape:
+        x_backend_config.arg_formats = {
+            "<dotted.path.to.leaf>": "<pipeline string>",
+            ...
+        }
+    Executor walks each path, runs `normalize_or_validate`, and mutates
+    arguments in place. Same engine the per-enum-value formats use; this
+    just decouples it from the enum context so any leaf in any nested
+    object can be normalized (filters.alias, body_params.foo, etc).
+    """
+    if not isinstance(tool_config, dict):
+        return None
+    runtime = tool_config.get("x_backend_config")
+    if not isinstance(runtime, dict):
+        return None
+    arg_formats = runtime.get("arg_formats")
+    if not isinstance(arg_formats, dict) or not arg_formats:
+        return None
+
+    from app.services.tools.format_template import normalize_or_validate
+
+    for path, pipeline in arg_formats.items():
+        if not isinstance(path, str) or not path.strip():
+            continue
+        if not isinstance(pipeline, str) or not pipeline.strip():
+            continue
+        cur, exists = _get_at_path(arguments, path)
+        if not exists or cur in (None, ""):
+            continue
+        new_value, err = normalize_or_validate(cur, pipeline)
+        if err:
+            return f"Параметр `{path}` {err}."
+        if new_value != cur and _set_at_path(arguments, path, new_value):
+            logger.info(
+                "[arg_formats] %s normalized %s: %r → %r",
+                tool_name, path, cur, new_value,
+            )
+    return None
+
+
+def _normalize_enum_formats(
+    tool_name: str,
+    arguments: dict,
+    tool_config: dict | None,
+) -> str | None:
+    """Apply format templates to query_params in-place.
+
+    Mechanism (tenant-agnostic, opt-in per tool):
+      x_backend_config.enum_values[<path_name>] = [
+        { "value": "<enum>", "requires": [...], "formats": { "<alias>": "<template>" } },
+        ...
+      ]
+    Template grammar (see format_template.py): `x`/`X` = hex digit
+    (lower/upper case in output), `9` = decimal, other chars literal.
+    A `re:<regex>` prefix opts out of templating and validates raw.
+
+    For each model-provided query_param: try to normalize it into the
+    template's shape. If the input has the right number of data chars,
+    it gets rewritten in place (e.g. `1C:EF:03:CA:79:A0` →
+    `1cef.03ca.79a0`). If normalization is impossible AND it still
+    doesn't match → return a tool error string for the model.
+    """
+    from app.services.tools.format_template import normalize_or_validate
+
+    if not isinstance(tool_config, dict):
+        return None
+    runtime = tool_config.get("x_backend_config")
+    if not isinstance(runtime, dict):
+        return None
+    enum_store = runtime.get("enum_values")
+    if not isinstance(enum_store, dict):
+        return None
+
+    path_values = arguments.get("path_values") if isinstance(arguments.get("path_values"), dict) else {}
+    query_params = arguments.get("query_params") if isinstance(arguments.get("query_params"), dict) else None
+    if query_params is None:
+        return None
+
+    for path_name, entries in enum_store.items():
+        if not isinstance(entries, list):
+            continue
+        selected = path_values.get(path_name)
+        if selected in (None, ""):
+            continue
+        entry = next((e for e in entries if isinstance(e, dict) and e.get("value") == selected), None)
+        if not entry:
+            continue
+        formats = entry.get("formats")
+        if not isinstance(formats, dict) or not formats:
+            continue
+        for alias, fmt in formats.items():
+            if not isinstance(fmt, str) or not fmt.strip():
+                continue
+            original = query_params.get(alias)
+            if original in (None, ""):
+                continue
+            new_value, err = normalize_or_validate(original, fmt)
+            if err:
+                return (
+                    f"Параметр `query_params.{alias}` для {path_name}={selected!r} "
+                    f"{err}. Передай значение, которое можно привести к формату."
+                )
+            if new_value != original:
+                query_params[alias] = new_value
+                logger.info(
+                    "[enum_formats] %s normalized query_params.%s for %s=%r: %r → %r",
+                    tool_name, alias, path_name, selected, original, new_value,
+                )
+    return None
+
+
+def _transform_json_for_result(obj, drop_fields: set[str], limit_items: int | None):
+    """Recursive transform: drop noise keys, truncate arrays.
+
+    For arrays past `limit_items`: keep the first N items and append a
+    sentinel `{"_truncated": "+M more items"}` so the model SEES the
+    omission and won't pretend it has the full list.
+    """
+    if isinstance(obj, dict):
+        cleaned = {}
+        for k, v in obj.items():
+            if k in drop_fields:
+                continue
+            cleaned[k] = _transform_json_for_result(v, drop_fields, limit_items)
+        return cleaned
+    if isinstance(obj, list):
+        truncated = 0
+        items = obj
+        if limit_items and len(obj) > limit_items:
+            truncated = len(obj) - limit_items
+            items = obj[:limit_items]
+        out = [_transform_json_for_result(it, drop_fields, limit_items) for it in items]
+        if truncated > 0:
+            out.append({"_truncated": f"+{truncated} more items omitted"})
+        return out
+    return obj
+
+
+def _filter_result_to_fields(obj, allowed: set[str]):
+    """Recursive: for any dict at any level, keep only keys in `allowed`.
+
+    Top-level non-data keys (count, items, _truncated, column_descriptions,
+    summary, etc) are ALWAYS kept — we filter only the per-item dicts, not
+    the envelope. That keeps cardinality info and pagination metadata while
+    trimming the row payload.
+    """
+    ENVELOPE_KEYS = {
+        "count", "items", "rows", "results", "data",
+        "truncated", "shown_limit", "column_descriptions",
+        "summary", "_truncated", "_summary", "severity",
+        "log_truncated", "log_shown_rows", "page", "total_pages",
+    }
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            if k in ENVELOPE_KEYS:
+                out[k] = _filter_result_to_fields(v, allowed)
+            elif k in allowed:
+                out[k] = v  # leaf data field — keep as-is, no recurse
+        return out
+    if isinstance(obj, list):
+        return [_filter_result_to_fields(item, allowed) for item in obj]
+    return obj
+
+
+def _apply_selectable_fields(
+    tool_name: str,
+    arguments: dict,
+    result: ToolResult,
+    tool_config: dict | None,
+) -> ToolResult:
+    """Trim tool output to only the fields LLM asked for in `arguments.fields`.
+
+    Activated when both conditions hold:
+      • tool config declares `x_backend_config.selectable_fields: [...]`
+      • LLM passed a non-empty `fields` array in this call's arguments
+
+    If LLM passed `fields` but tool doesn't declare selectable_fields, we
+    ignore it (no enforcement) to keep changes additive and safe.
+    """
+    if not isinstance(arguments, dict):
+        return result
+    fields_arg = arguments.get("fields")
+    if not (isinstance(fields_arg, list) and fields_arg):
+        return result
+
+    if not isinstance(tool_config, dict):
+        return result
+    runtime = tool_config.get("x_backend_config")
+    if not isinstance(runtime, dict):
+        return result
+    selectable = runtime.get("selectable_fields")
+    if not (isinstance(selectable, list) and selectable):
+        return result
+
+    selectable_set = {str(s).strip() for s in selectable if isinstance(s, str)}
+    asked = {str(f).strip() for f in fields_arg if isinstance(f, str)}
+    allowed = asked & selectable_set  # silently ignore unknown field names
+    if not allowed:
+        return result
+
+    output = result.output or ""
+    if not output:
+        return result
+    try:
+        parsed = json.loads(output)
+    except (json.JSONDecodeError, ValueError):
+        return result  # non-JSON output — can't filter
+
+    filtered = _filter_result_to_fields(parsed, allowed)
+    new_output = json.dumps(filtered, ensure_ascii=False)
+    if new_output != output:
+        logger.info(
+            "[selectable_fields] %s: %d → %d chars (kept %s)",
+            tool_name, len(output), len(new_output), sorted(allowed),
+        )
+        return ToolResult(success=result.success, output=new_output, error=result.error)
+    return result
+
+
+def _apply_result_processing(
+    tool_name: str,
+    result: ToolResult,
+    tool_config: dict | None,
+) -> ToolResult:
+    """Generic post-processor for tool output.
+
+    Reads `x_backend_config.result_processing` from the tool config and
+    applies size-control transforms BEFORE the result reaches the LLM:
+      - `drop_fields`: list of JSON keys to remove recursively (noise like
+        `lat`, `lng`, `packet_id`, `updated_at`)
+      - `limit_items`: cap any array length, append `_truncated` sentinel
+      - `max_chars`: hard char limit on final output string (last resort)
+
+    Same engine concept as `arg_formats` but on the OUTPUT side. Works for
+    ANY tool — no per-tool code needed, just config.
+    """
+    if not isinstance(tool_config, dict):
+        return result
+    runtime = tool_config.get("x_backend_config")
+    if not isinstance(runtime, dict):
+        return result
+    rp = runtime.get("result_processing")
+    if not isinstance(rp, dict) or not rp:
+        return result
+
+    output = result.output or ""
+    original_len = len(output)
+    if original_len == 0:
+        return result
+
+    drop_fields = set(rp.get("drop_fields") or [])
+    limit_items = rp.get("limit_items")
+    if not (isinstance(limit_items, int) and limit_items > 0):
+        limit_items = None
+
+    if drop_fields or limit_items:
+        try:
+            parsed = json.loads(output)
+            transformed = _transform_json_for_result(parsed, drop_fields, limit_items)
+            output = json.dumps(transformed, ensure_ascii=False)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    max_chars = rp.get("max_chars")
+    if isinstance(max_chars, int) and max_chars > 0 and len(output) > max_chars:
+        cut = output[:max_chars]
+        omitted = len(output) - max_chars
+        output = f"{cut}\n\n[output truncated: {omitted} chars omitted, original={original_len}]"
+
+    if output != (result.output or "") or original_len != len(output):
+        logger.info(
+            "[result_processing] %s: %d → %d chars (drop=%s limit=%s max_chars=%s)",
+            tool_name, original_len, len(output),
+            sorted(drop_fields) if drop_fields else None,
+            limit_items, max_chars,
+        )
+        return ToolResult(success=result.success, output=output, error=result.error)
+    return result
+
+
 async def execute_tool(tool_name: str, arguments: dict, tool_config: dict | None = None) -> ToolResult:
     """Execute a registered tool by name with given arguments."""
     handler_name = resolve_tool_handler(tool_name, tool_config)
@@ -75,6 +500,33 @@ async def execute_tool(tool_name: str, arguments: dict, tool_config: dict | None
             output="",
             error=f"Инструмент '{handler_name}' не зарегистрирован. Доступные: {', '.join(_HANDLERS.keys())}",
         )
+
+    # Argument validation against the tool's declared JSON schema. Catches
+    # the "string '1-18' instead of integer" class of bugs before we waste a
+    # round-trip to the backend API and come back with HTTP 404. The model
+    # gets a precise error message and self-corrects on the next round.
+    validation_error = _validate_arguments_against_schema(tool_name, arguments, tool_config)
+    if validation_error:
+        logger.info("[tool-validation] %s rejected: %s", tool_name, validation_error[:200])
+        return ToolResult(success=False, output="", error=validation_error)
+
+    # Generic per-path arg-format pipeline (tenant defines map from dotted
+    # path to a format pipeline string). Runs first so context-free
+    # normalization (e.g. "query_params.mac always lowercase-dotted") fires
+    # before any enum-conditional rules below.
+    arg_format_error = _apply_arg_formats(tool_name, arguments, tool_config)
+    if arg_format_error:
+        logger.info("[arg_formats] %s rejected: %s", tool_name, arg_format_error[:200])
+        return ToolResult(success=False, output="", error=arg_format_error)
+
+    # Per-enum-value format templates (e.g. "this command_key wants MAC as
+    # xxxx.xxxx.xxxx"). Same engine as arg_formats above, but the format
+    # depends on which enum value the model picked (different command_keys
+    # may want different MAC layouts on the same alias).
+    format_error = _normalize_enum_formats(tool_name, arguments, tool_config)
+    if format_error:
+        logger.info("[enum_formats] %s rejected: %s", tool_name, format_error[:200])
+        return ToolResult(success=False, output="", error=format_error)
 
     # Determine timeout: respect configured timeout_seconds in tool_config (capped),
     # with sensible defaults for batch ping.
@@ -88,7 +540,10 @@ async def execute_tool(tool_name: str, arguments: dict, tool_config: dict | None
 
     try:
         result = await asyncio.wait_for(handler(arguments, tool_config), timeout=timeout)
-        return result
+        # LLM-requested field projection runs first (smaller payload for the
+        # subsequent generic transforms to chew on).
+        result = _apply_selectable_fields(tool_name, arguments, result, tool_config)
+        return _apply_result_processing(tool_name, result, tool_config)
     except asyncio.TimeoutError:
         # Log the actual tool name + args so we can see WHICH call timed out
         # (used to be invisible — the model just got a generic "Таймаут").
@@ -168,6 +623,10 @@ def _quote_table_with_alias(name: str, alias: str | None, db_kind: str) -> str:
 
 
 def _text_expr(column_name: str, db_kind: str) -> str:
+    # If the value contains '(' it's a raw SQL expression (e.g. CONCAT(...)) —
+    # admin-configured, not user input, so safe to pass through without quoting.
+    if "(" in column_name:
+        return f"({column_name})"
     quoted = _quote_identifier_for_db(column_name, db_kind)
     if db_kind == "postgresql":
         return f"CAST({quoted} AS TEXT)"
@@ -425,8 +884,11 @@ def _build_records_query(arguments: dict, runtime: dict, db_url: str) -> tuple[s
                 raise ValueError("Каждый result_columns object должен содержать column и alias")
             output_columns.append(alias_name)
             alias_quote = '"' if db_kind == "postgresql" else "`"
+            # If column_name looks like an SQL expression (contains parens) pass it
+            # through as-is — admin-configured, not user input.
+            col_expr = f"({column_name})" if "(" in column_name else _quote_identifier_for_db(column_name, db_kind)
             select_column_exprs.append(
-                f"{_quote_identifier_for_db(column_name, db_kind)} AS {alias_quote}{alias_name}{alias_quote}"
+                f"{col_expr} AS {alias_quote}{alias_name}{alias_quote}"
             )
             desc = str(item.get("description") or "").strip()
             if desc:
@@ -487,11 +949,19 @@ def _build_records_query(arguments: dict, runtime: dict, db_url: str) -> tuple[s
                 "Для этого инструмента free-text query не настроен. "
                 "Используй filters вместо query." + hint
             )
+        # search_word_mode: replace spaces with % so "ул 14Б кв 5" → %ул%14Б%кв%5%
+        # Each word must appear somewhere in the column — useful for CONCAT address fields.
+        word_mode = bool(runtime.get("search_word_mode"))
+        raw_q = str(free_query).strip()
+        if word_mode:
+            query_pattern = "%" + re.sub(r"\s+", "%", raw_q) + "%"
+        else:
+            query_pattern = f"%{raw_q}%"
         query_terms = []
         for idx, column in enumerate(search_columns):
             param_name = f"query_{idx}"
             query_terms.append(_contains_expr(str(column), param_name, db_kind))
-            params[param_name] = f"%{str(free_query).strip()}%"
+            params[param_name] = query_pattern
         conditions.append("(" + " OR ".join(query_terms) + ")")
 
     static_filters = runtime.get("static_filters")
@@ -939,15 +1409,209 @@ async def tool_search_records(arguments: dict, tool_config: dict | None = None) 
         return ToolResult(success=False, output="", error=str(e))
 
 
+async def _fetch_api_single(arguments: dict, runtime: dict) -> tuple[bool, str, str]:
+    """Single HTTP call — shared by tool_fetch_api_data and its batch path.
+    Returns (success, output, error)."""
+    try:
+        data_source = None
+        if runtime.get("data_source_id"):
+            data_source = await _load_tenant_data_source(str(runtime.get("data_source_id")))
+            if str(data_source.get("kind") or "").strip().lower() != "http_api":
+                return (False, "", "Указанный источник данных не является HTTP API")
+        method, url, headers, _query_params, body, timeout_seconds, result_path = _build_api_request(arguments, runtime, data_source)
+    except ValueError as e:
+        return (False, "", str(e))
+
+    body_format = str(runtime.get("body_format") or "json").strip().lower()
+    request_kwargs: dict = {"headers": headers}
+    if method == "POST" and body is not None:
+        if body_format == "form":
+            request_kwargs["data"] = body
+        else:
+            request_kwargs["json"] = body
+
+    try:
+        response = await _get_http_client().request(method, url, timeout=timeout_seconds, **request_kwargs)
+        response.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        return (False, "", f"HTTP {e.response.status_code}: {(e.response.text or '')[:500]}")
+    except httpx.HTTPError as e:
+        return (False, "", f"Ошибка HTTP-клиента: {str(e)}")
+
+    runtime_max_chars = runtime.get("max_response_chars")
+    if not (isinstance(runtime_max_chars, int) and runtime_max_chars > 0):
+        runtime_max_chars = None
+    effective_limit = runtime_max_chars or MAX_API_RESPONSE_CHARS
+
+    content_type = response.headers.get("content-type", "")
+    if "application/json" in content_type:
+        try:
+            payload = response.json()
+        except ValueError:
+            return (False, "", "API вернул некорректный JSON")
+        return (True, _render_api_payload(payload, result_path, effective_limit), "")
+
+    text_body = response.text[:effective_limit]
+    if len(response.text) > effective_limit:
+        text_body += "\n... [truncated]"
+    return (True, text_body, "")
+
+
+def _expand_path_batch(arguments: dict, runtime: dict) -> list[dict]:
+    """If any of the path-params listed in `batchable_path_params` carries a
+    batch syntax — range like '1-18', csv like '1,3,5', or an actual list —
+    return a list of argument-dicts, one per expanded value. Otherwise return
+    a single-element list (no expansion).
+
+    Cap at 64 expansions to avoid blowing up backend with accidental ranges.
+    """
+    batchable = runtime.get("batchable_path_params") or []
+    if not isinstance(batchable, list) or not batchable:
+        return [arguments]
+    pv = (arguments.get("path_values") or {})
+    if not isinstance(pv, dict):
+        return [arguments]
+
+    BATCH_CAP = 64
+
+    def _expand(raw):
+        # Already a list?
+        if isinstance(raw, list):
+            return [str(x) for x in raw if x is not None]
+        s = str(raw).strip()
+        # Range "A-B" with both ends numeric → [A..B]
+        m = re.fullmatch(r"\s*(\d+)\s*-\s*(\d+)\s*", s)
+        if m:
+            a, b = int(m.group(1)), int(m.group(2))
+            if a > b:
+                a, b = b, a
+            return [str(i) for i in range(a, b + 1)]
+        # CSV with at least one comma and all numeric tokens
+        if "," in s:
+            tokens = [t.strip() for t in s.split(",") if t.strip()]
+            if tokens and all(t.isdigit() for t in tokens):
+                return tokens
+        return None  # no batch syntax — leave as scalar
+
+    expanded_values: dict[str, list[str]] = {}
+    for key in batchable:
+        if key not in pv:
+            continue
+        vals = _expand(pv[key])
+        if vals is None:
+            continue
+        if len(vals) == 1:
+            continue
+        expanded_values[key] = vals
+
+    if not expanded_values:
+        return [arguments]
+
+    # If multiple batchable params got expanded we just do a cross product over
+    # them. In practice it'll usually be one (e.g. port_index).
+    keys = list(expanded_values.keys())
+    out: list[dict] = []
+    def _walk(i: int, cur: dict):
+        if i == len(keys):
+            new_pv = dict(pv)
+            new_pv.update(cur)
+            out.append({**arguments, "path_values": new_pv})
+            return
+        k = keys[i]
+        for v in expanded_values[k]:
+            _walk(i + 1, {**cur, k: v})
+    _walk(0, {})
+    return out[:BATCH_CAP]
+
+
 @register_tool("fetch_api_data")
 async def tool_fetch_api_data(arguments: dict, tool_config: dict | None = None) -> ToolResult:
     """
     Generic read-only HTTP API fetch tool.
 
     The admin config defines base_url, endpoint template and whitelisted params.
+    If the tool's `batchable_path_params` lists path-params (e.g. ["port_index"])
+    and the model passes a range/csv/list for them, we expand and run all calls
+    in parallel, returning a combined view. This is how the model can request
+    "ports 1-18" in one call instead of 18.
     """
     runtime = _extract_runtime_config(tool_config)
 
+    # Expand batch path-params if any.
+    expanded = _expand_path_batch(arguments, runtime)
+    if len(expanded) > 1:
+        sem = asyncio.Semaphore(API_BATCH_CONCURRENCY)
+
+        async def _limited_fetch(args: dict):
+            async with sem:
+                return await _fetch_api_single(args, runtime)
+
+        results = await asyncio.gather(
+            *[_limited_fetch(args) for args in expanded],
+            return_exceptions=True,
+        )
+        batchable = runtime.get("batchable_path_params") or []
+        label_key = batchable[0] if batchable else None
+
+        # Normalize each result into (label, ok, output, err_signature, err_text)
+        # err_signature is a short normalized form used to group identical errors.
+        def _err_sig(err_text: str) -> str:
+            # HTTP 404 / 500 style — keep the status code, drop the URL/body.
+            m = re.match(r"^HTTP (\d+):", err_text or "")
+            if m:
+                return f"http_{m.group(1)}"
+            # Strip numbers and quoted strings so e.g. "param 'foo' invalid" and
+            # "param 'bar' invalid" collapse.
+            sig = re.sub(r"\d+", "N", err_text or "")
+            sig = re.sub(r"['\"][^'\"]+['\"]", "X", sig)
+            return sig[:80]
+
+        successes: list[tuple[str | None, str]] = []
+        # err_groups: signature -> {"sample": full_err_text, "labels": [labels]}
+        err_groups: dict[str, dict] = {}
+        for args, r in zip(expanded, results):
+            label = (args.get("path_values") or {}).get(label_key) if label_key else None
+            if isinstance(r, Exception):
+                sig = f"exc_{type(r).__name__}"
+                err_groups.setdefault(sig, {"sample": f"{type(r).__name__}: {r}", "labels": []})
+                err_groups[sig]["labels"].append(str(label))
+                continue
+            ok, output, err = r
+            if ok:
+                successes.append((label, output))
+            else:
+                sig = _err_sig(err)
+                err_groups.setdefault(sig, {"sample": err, "labels": []})
+                err_groups[sig]["labels"].append(str(label))
+
+        lines = [
+            f"Batch результат ({len(expanded)} вызовов{label_key and f' по {label_key}' or ''}): "
+            f"{len(successes)} ok, {sum(len(g['labels']) for g in err_groups.values())} ошибок."
+        ]
+        # Print successes in their own section
+        for label, output in successes:
+            tag = f"{label_key}={label}" if label is not None else "(вызов)"
+            lines.append(f"--- {tag}\n{output}")
+        # Group errors by signature — say once "404 на портах 1..18" instead
+        # of pasting the same Symfony stacktrace 18 times.
+        for sig, info in err_groups.items():
+            labels = info["labels"]
+            sample = (info["sample"] or "")[:400]
+            if len(labels) >= 3:
+                lines.append(
+                    f"--- ОШИБКА на {len(labels)} вызовах "
+                    f"({label_key}={', '.join(labels[:8])}{'...' if len(labels) > 8 else ''}): {sample}\n"
+                    f"    Все {len(labels)} вызовов вернули одну и ту же ошибку — "
+                    f"параметры вероятно неверные, повторять не нужно."
+                )
+            else:
+                for label in labels:
+                    tag = f"{label_key}={label}" if label is not None else "(вызов)"
+                    lines.append(f"--- {tag} → ошибка: {sample}")
+        # Tool result is "successful" iff at least one sub-call succeeded.
+        return ToolResult(success=bool(successes), output="\n".join(lines))
+
+    # Single-call path (unchanged).
     try:
         data_source = None
         if runtime.get("data_source_id"):
@@ -967,9 +1631,8 @@ async def tool_fetch_api_data(arguments: dict, tool_config: dict | None = None) 
             request_kwargs["json"] = body
 
     try:
-        async with httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=True) as client:
-            response = await client.request(method, url, **request_kwargs)
-            response.raise_for_status()
+        response = await _get_http_client().request(method, url, timeout=timeout_seconds, **request_kwargs)
+        response.raise_for_status()
     except httpx.HTTPStatusError as e:
         body = e.response.text[:500]
         return ToolResult(success=False, output="", error=f"HTTP {e.response.status_code}: {body}")
@@ -1573,6 +2236,9 @@ async def get_message_handler(arguments: dict, tool_config: dict | None = None) 
     mid_s = (arguments.get("id") or "").strip()
     if not mid_s:
         return ToolResult(success=False, output="", error="get_message: 'id' is required")
+    # Model may copy the bracketed token verbatim — strip the msg: prefix if present.
+    if mid_s.startswith("msg:"):
+        mid_s = mid_s[4:].strip()
     try:
         mid = _uuid.UUID(mid_s)
     except ValueError:
@@ -1813,6 +2479,19 @@ async def get_artifact_handler(arguments: dict, tool_config: dict | None = None)
     aid_s = (arguments.get("id") or "").strip()
     if not aid_s:
         return ToolResult(success=False, output="", error="get_artifact: 'id' is required")
+    # Defensive: model occasionally pastes a `msg:<uuid>` token here instead of
+    # an artifact_id — fail fast with an informative error pointing at the
+    # right tool, rather than the cryptic "not found".
+    if aid_s.startswith("msg:"):
+        return ToolResult(
+            success=False, output="",
+            error=(
+                f"get_artifact: id '{aid_s}' начинается с 'msg:' — это id СООБЩЕНИЯ, "
+                "не артефакта. Вызови `get_message(id=\"<uuid-без-префикса>\")` "
+                "для полного текста обмена. Для артефакта используй id из "
+                "маркера 📎 (artifact_id=...)."
+            ),
+        )
     try:
         aid = _uuid.UUID(aid_s)
     except ValueError:
@@ -2016,3 +2695,116 @@ async def recall_memory_handler(arguments: dict, tool_config: dict | None = None
     except Exception as e:
         logger.exception("recall_memory failed")
         return ToolResult(success=False, output="", error=f"recall_memory: {str(e)[:200]}")
+
+
+# get_current_time was removed: the current date is now a system-prompt
+# constant (HARDCODED-0 in pipeline.py) — there's no reason to make the
+# model spend a tool round-trip on a deterministic value it could read
+# directly. The model never needs the precise second resolution that the
+# tool provided.
+
+
+@register_tool("plan")
+async def plan_handler(arguments: dict, tool_config: dict | None = None) -> ToolResult:
+    """Register a multi-step plan as a `plan` artifact. No execution — just
+    records the plan in DB and lets the model proceed step-by-step with normal
+    tool calls. The artifact shows up in UI as a checklist; the model's own
+    follow-up turns implicitly check items off."""
+    import uuid as _uuid
+    from datetime import datetime, timezone
+    from app.core.database import async_session
+    from app.models.artifact import Artifact
+
+    ctx = (tool_config or {}).get("_context") or {}
+    tenant_id_s = ctx.get("tenant_id")
+    chat_id_s = ctx.get("chat_id")
+    if not tenant_id_s or not chat_id_s:
+        return ToolResult(success=False, output="", error="plan: tenant/chat context missing")
+
+    steps = arguments.get("steps") or []
+    if not isinstance(steps, list) or not steps:
+        return ToolResult(success=False, output="", error="plan: 'steps' must be a non-empty list of strings")
+    clean_steps = [str(s).strip() for s in steps if str(s).strip()]
+    if len(clean_steps) < 2:
+        return ToolResult(success=False, output="", error="plan: нужно минимум 2 шага. Для одношагового запроса plan не нужен — звать tool напрямую.")
+    if len(clean_steps) > 8:
+        clean_steps = clean_steps[:8]
+    rationale = (arguments.get("rationale") or "").strip()[:500]
+
+    # Markdown body as checklist — visible artifact for the user; the model
+    # also reads it back via auto-grounding on subsequent turns if needed.
+    lines = ["**План:**"]
+    for i, s in enumerate(clean_steps, 1):
+        lines.append(f"- [ ] {i}. {s}")
+    if rationale:
+        lines.append("")
+        lines.append(f"_Обоснование: {rationale}_")
+    content = "\n".join(lines)
+    label = f"План: {clean_steps[0][:80]}{'...' if len(clean_steps) > 1 else ''}"
+
+    try:
+        async with async_session() as db:
+            art = Artifact(
+                tenant_id=_uuid.UUID(tenant_id_s),
+                chat_id=_uuid.UUID(chat_id_s),
+                source_message_id=_uuid.UUID(str(ctx.get("user_message_id"))) if ctx.get("user_message_id") else None,
+                kind="plan",
+                label=label[:500],
+                lang=None,
+                content=content,
+                tokens_estimate=max(1, len(content) // 4),
+                version=1,
+                parent_artifact_id=None,
+                last_referenced_at=datetime.now(timezone.utc),
+            )
+            db.add(art)
+            await db.commit()
+            await db.refresh(art)
+            aid = art.id
+    except Exception as e:
+        return ToolResult(success=False, output="", error=f"plan: failed to save artifact: {e}")
+
+    output = (
+        f"План записан ({len(clean_steps)} шагов, artifact_id={aid}).\n\n"
+        + content
+        + "\n\nТеперь последовательно выполняй шаги через нужные tools. "
+        "В финальном ответе кратко сверь результаты с пунктами плана."
+    )
+    return ToolResult(success=True, output=output)
+
+
+@register_tool("describe_tool")
+async def describe_tool_handler(arguments: dict, tool_config: dict | None = None) -> ToolResult:
+    """Return the full schema of a tool that's listed in the compact catalog
+    but isn't yet in the model's tools=[...] payload. Pipeline keeps the
+    full allow-set in `_context.full_tool_catalog` (set at tool-selection
+    time) so we don't have to re-query the DB here."""
+    import json as _json
+    name = (arguments.get("name") or "").strip()
+    if not name:
+        return ToolResult(success=False, output="", error="describe_tool: 'name' is required")
+
+    ctx = (tool_config or {}).get("_context") or {}
+    catalog = ctx.get("full_tool_catalog") if isinstance(ctx, dict) else None
+    if not isinstance(catalog, dict):
+        return ToolResult(success=False, output="", error="describe_tool: catalog not available in this round")
+
+    entry = catalog.get(name)
+    if not entry:
+        sample = ", ".join(sorted(catalog.keys())[:15])
+        return ToolResult(
+            success=False, output="",
+            error=f"describe_tool: tool '{name}' не найден. Доступные: {sample}{'...' if len(catalog) > 15 else ''}",
+        )
+
+    fn = entry.get("function") or {}
+    desc = fn.get("description") or ""
+    params = fn.get("parameters") or {}
+    output = (
+        f"Tool: {name}\n"
+        f"Description:\n{desc}\n\n"
+        f"Parameters schema:\n{_json.dumps(params, ensure_ascii=False, indent=2)}\n\n"
+        "Вызови tool по имени с подходящими аргументами; пайплайн добавит "
+        "его схему в payload на следующих раундах автоматически."
+    )
+    return ToolResult(success=True, output=output)

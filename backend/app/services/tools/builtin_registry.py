@@ -149,11 +149,10 @@ BUILTIN_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "search_kb",
             "description": (
-                "Поиск по корпусу знаний (Knowledge Base) tenant'а — документация, "
-                "регламенты, домен-факты. Используй когда: (1) релевантной выдержки "
-                "нет в системном блоке Knowledge Base, (2) нужна другая формулировка "
-                "запроса, (3) нужен более широкий список источников. Возвращает "
-                "title+source+content (обрезано до 600 симв)."
+                "Поиск по корпусу знаний (Knowledge Base) — документация, регламенты, "
+                "домен-факты. Вызывай когда нужна справочная информация: инструкции, "
+                "процедуры, технические детали, которых нет в памяти или истории чата. "
+                "Возвращает title+source+content (до 600 симв на фрагмент)."
             ),
             "parameters": {
                 "type": "object",
@@ -214,6 +213,68 @@ BUILTIN_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "plan",
+            "description": (
+                "Зарегистрировать план для МНОГОШАГОВОГО запроса. Вызывай ДО "
+                "выполнения tools если задача состоит из >1 шага: «проверь A "
+                "и B», «найди X, затем покажи Y», «диагностика всей цепочки». "
+                "Один tool на простой вопрос — plan НЕ нужен.\n\n"
+                "Эффект: план становится артефактом (виден в UI), помогает "
+                "тебе самому не сбиться с курса, а пользователь видит что ты "
+                "понял задачу. После plan — последовательно выполняй tools "
+                "по пунктам. В финальном ответе кратко сверь результаты с планом."
+            ),
+            "parameters": {
+                "type": "object",
+                "required": ["steps"],
+                "properties": {
+                    "steps": {
+                        "type": "array",
+                        "description": "Шаги в порядке выполнения, 2-8 пунктов. Каждый шаг — короткая фраза-действие («Найти switch_id по адресу через search_addresses», «Снять FDB на порту через switch_command», «Сопоставить mac'и»).",
+                        "items": {"type": "string"},
+                        "minItems": 2,
+                        "maxItems": 8,
+                    },
+                    "rationale": {
+                        "type": "string",
+                        "description": "Опциональное обоснование плана 1-2 предложения — почему именно такие шаги и в таком порядке.",
+                    },
+                },
+                "additionalProperties": False,
+            },
+        },
+        "x_backend_config": {"handler": "plan"},
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "describe_tool",
+            "description": (
+                "Получить ПОЛНОЕ описание + parameters schema указанного tool — "
+                "используется когда tool упомянут в системном блоке «Доп. tools "
+                "(compact)», но в payload-е его полной схемы ещё нет. Возвращает "
+                "description, parameters (JSON schema), и hint когда обычно "
+                "вызывать. Альтернатива: можешь вызвать tool сразу по имени — "
+                "пайплайн добавит схему в payload на следующий раунд. "
+                "describe_tool полезнее когда нужны параметры ДО вызова."
+            ),
+            "parameters": {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Имя tool из списка «Доп. tools (compact)».",
+                    },
+                },
+                "additionalProperties": False,
+            },
+        },
+        "x_backend_config": {"handler": "describe_tool"},
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "memory_save",
             "description": (
                 "ВЫЗОВИ когда пользователь говорит запомни/note/remember — для "
@@ -267,19 +328,53 @@ def is_builtin(tool_name: str) -> bool:
     return tool_name in BUILTIN_TOOL_NAMES
 
 
-def builtin_tools_for_payload() -> list[dict]:
+def _apply_description_overrides(tool: dict, overrides: dict[str, str] | None) -> dict:
+    """Return a deep-enough copy of `tool` with description swapped if an
+    override exists for this tool name. The override only touches the visible
+    description — name, parameters, handler stay frozen."""
+    if not overrides:
+        return tool
+    name = tool.get("function", {}).get("name")
+    new_desc = overrides.get(name) if name else None
+    if not new_desc:
+        return tool
+    cloned = dict(tool)
+    cloned_fn = dict(tool.get("function") or {})
+    cloned_fn["description"] = new_desc
+    cloned["function"] = cloned_fn
+    return cloned
+
+
+def builtin_tools_for_payload(overrides: dict[str, str] | None = None) -> list[dict]:
     """Return PUBLIC tool definitions (no x_backend_config) ready to attach
-    to a chat-completion `tools=[...]` payload."""
+    to a chat-completion `tools=[...]` payload. Per-tenant description
+    overrides can be passed in (map: tool_name -> description)."""
     out: list[dict] = []
     for t in BUILTIN_TOOLS:
-        d = dict(t)
+        with_override = _apply_description_overrides(t, overrides)
+        d = dict(with_override)
         d.pop("x_backend_config", None)
         out.append(d)
     return out
 
 
-def builtin_tool_config_map() -> dict[str, dict]:
+def builtin_tool_config_map(overrides: dict[str, str] | None = None) -> dict[str, dict]:
     """Return {name: full_config_dict} including x_backend_config — the form
     the executor uses to dispatch handlers. Pipeline copies this and injects
-    runtime _context (tenant_id/chat_id/api_key_id)."""
-    return {t["function"]["name"]: dict(t) for t in BUILTIN_TOOLS}
+    runtime _context (tenant_id/chat_id/api_key_id). Per-tenant description
+    overrides applied if provided."""
+    out: dict[str, dict] = {}
+    for t in BUILTIN_TOOLS:
+        with_override = _apply_description_overrides(t, overrides)
+        out[t["function"]["name"]] = dict(with_override)
+    return out
+
+
+def get_builtin_default(tool_name: str) -> dict | None:
+    """Return the canonical (un-overridden) registry entry for a builtin
+    tool by name, or None if no such tool. Used by the admin endpoint that
+    surfaces both the default description and the active override."""
+    for t in BUILTIN_TOOLS:
+        if t.get("function", {}).get("name") == tool_name:
+            return t
+    return None

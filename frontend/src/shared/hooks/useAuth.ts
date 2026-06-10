@@ -4,12 +4,18 @@ import { useNavigate } from 'react-router-dom';
 import { authApi } from '../api/endpoints';
 import type { LoginRequest } from '../api/types';
 
+// The access token now lives in an HttpOnly cookie (not readable by JS), so we
+// can't synchronously tell "logged in?" from it. We keep a non-secret boolean
+// marker in localStorage purely to gate the /me probe and the route guards; the
+// real authority is the cookie, validated server-side on every request.
+const AUTH_FLAG = 'auth_active';
+export const isAuthFlagSet = () => localStorage.getItem(AUTH_FLAG) === '1';
+
 export function useAuth() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
 
-  const token = localStorage.getItem('auth_token');
-  const isAuthenticated = !!token;
+  const isAuthenticated = isAuthFlagSet();
 
   const {
     data: user,
@@ -25,8 +31,9 @@ export function useAuth() {
 
   const login = useCallback(
     async (credentials: LoginRequest) => {
-      const response = await authApi.login(credentials);
-      localStorage.setItem('auth_token', response.access_token);
+      await authApi.login(credentials); // sets the HttpOnly cookie via Set-Cookie
+      localStorage.setItem(AUTH_FLAG, '1');
+      localStorage.removeItem('auth_token'); // drop any legacy token from older builds
       await queryClient.invalidateQueries({ queryKey: ['auth', 'me'] });
       const me = await authApi.me();
       queryClient.setQueryData(['auth', 'me'], me);
@@ -39,8 +46,14 @@ export function useAuth() {
     [queryClient, navigate]
   );
 
-  const logout = useCallback(() => {
-    authApi.logout();
+  const logout = useCallback(async () => {
+    try {
+      await authApi.logout(); // revokes the token server-side + clears cookie
+    } catch {
+      /* best-effort — clear local state regardless */
+    }
+    localStorage.removeItem(AUTH_FLAG);
+    localStorage.removeItem('auth_token');
     queryClient.clear();
     navigate('/login');
   }, [queryClient, navigate]);

@@ -46,6 +46,8 @@ def _chat_to_response(c: Chat) -> ChatResponse:
         created_by=c.created_by,
         created_at=c.created_at,
         updated_at=c.updated_at,
+        flagged_issue=c.flagged_issue,
+        flagged_at=c.flagged_at,
     )
 
 
@@ -187,7 +189,17 @@ async def update_chat(
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found.")
 
-    for field, value in body.model_dump(exclude_unset=True).items():
+    update_data = body.model_dump(exclude_unset=True)
+
+    # flagged_issue is special: setting/clearing it must also touch flagged_at.
+    # Empty string -> treat as null (clear).
+    if "flagged_issue" in update_data:
+        new_issue = update_data.pop("flagged_issue") or None
+        chat.flagged_issue = new_issue
+        from datetime import datetime as _dt, timezone as _tz
+        chat.flagged_at = _dt.now(_tz.utc) if new_issue else None
+
+    for field, value in update_data.items():
         setattr(chat, field, value)
 
     await db.flush()
@@ -345,6 +357,7 @@ async def send_message(
                 user_content=body.content, db=db,
                 user_message_id=str(user_message.id),
                 api_key_id=chat_api_key_id,
+                voice_mode=getattr(body, "voice_mode", False),
             )
         except ThrottleRejected as exc:
             raise HTTPException(
@@ -370,6 +383,7 @@ async def send_message(
             "attachment_summary": llm_result.get("attachment_summary"),
             "context_card": llm_result.get("context_card"),
             "history_exclude": llm_result.get("history_exclude"),
+            "tier0": llm_result.get("tier0"),
         }
         msg_status = "sent"
     except Exception as exc:
@@ -485,6 +499,7 @@ async def send_message_stream(
                 "attachment_summary": llm_result.get("attachment_summary"),
                 "context_card": llm_result.get("context_card"),
                 "history_exclude": llm_result.get("history_exclude"),
+                "tier0": llm_result.get("tier0"),
             }
             kwargs = {
                 "prompt_tokens": llm_result.get("prompt_tokens"),
@@ -554,6 +569,7 @@ async def send_message_stream(
                     user_message_id=user_message_id,
                     api_key_id=chat_api_key_id,
                     on_event=emitter,
+                    voice_mode=getattr(body, "voice_mode", False),
                 )
                 # Pipeline writes LLMRequestLog via db.add — commit before session closes
                 await fresh_db.commit()
@@ -635,6 +651,7 @@ async def send_message_with_files(
     files: list[UploadFile] = File(default=[]),
     # Comma-separated UUIDs of drafts uploaded via .../attachments/draft.
     attachment_ids: Optional[str] = Form(default=None),
+    voice_mode: bool = Form(default=False),
     db: AsyncSession = Depends(get_db),
     current_user: AdminUser = Depends(require_role("superadmin", "tenant_admin")),
 ):
@@ -780,6 +797,7 @@ async def send_message_with_files(
             tenant_id=str(tenant_id), chat_id=str(chat_id),
             user_content=content, db=db,
             user_message_id=str(user_message.id),
+            voice_mode=voice_mode,
         )
         assistant_content = llm_result.get("content", "")
         prompt_tokens = llm_result.get("prompt_tokens")
@@ -799,6 +817,7 @@ async def send_message_with_files(
             "attachment_summary": llm_result.get("attachment_summary"),
             "context_card": llm_result.get("context_card"),
             "history_exclude": llm_result.get("history_exclude"),
+            "tier0": llm_result.get("tier0"),
         }
         msg_status = "sent"
     except Exception as exc:

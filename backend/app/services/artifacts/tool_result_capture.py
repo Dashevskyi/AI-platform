@@ -82,10 +82,89 @@ def _short_args(arguments: dict | str | None, max_chars: int = 120) -> str:
 
 
 def _build_label(tool_name: str, arguments: dict | str | None) -> str:
+    """Heuristic fallback when LLM labeling isn't available — just echoes
+    tool name + a compact args summary."""
     args_str = _short_args(arguments)
     if args_str:
         return f"Результат {tool_name}({args_str})"
     return f"Результат {tool_name}"
+
+
+_TOOL_RESULT_LABEL_PROMPT = (
+    "Сожми результат вызова tool в один короткий заголовок (30-90 символов) "
+    "на языке пользователя. Включи: тематику + ключевой факт результата "
+    "(сколько строк/что найдено/ошибка/итог). Без кавычек, без префиксов "
+    "«Результат», «Tool». Только заголовок одной строкой.\n\n"
+    "Tool: {tool_name}\n"
+    "Аргументы: {args_str}\n\n"
+    "Результат (фрагмент):\n{content_head}\n\n"
+    "Заголовок:"
+)
+
+
+async def _llm_label_for_tool_result(
+    *,
+    tenant_id: uuid.UUID,
+    tool_name: str,
+    arguments: dict | str | None,
+    content: str,
+) -> str | None:
+    """Ask the cheapest/fastest tenant model to produce a one-line description
+    of this tool result. Returns None on failure — caller falls back to the
+    heuristic `_build_label`. Capped to 1500 chars of content + 200 chars of
+    args to keep this cheap; ~50 token output."""
+    if not content:
+        return None
+    try:
+        from sqlalchemy import select as _select
+        from app.models.tenant_shell_config import TenantShellConfig
+        from app.providers.factory import get_provider
+        from app.core.security import decrypt_value
+
+        async with async_session() as db:
+            cfg = (await db.execute(
+                _select(TenantShellConfig).where(TenantShellConfig.tenant_id == tenant_id)
+            )).scalar_one_or_none()
+            if not cfg:
+                return None
+            model_name = (cfg.summary_model_name or cfg.model_name or "").strip()
+            if not model_name:
+                return None
+            api_key = decrypt_value(cfg.provider_api_key_enc) if cfg.provider_api_key_enc else None
+            provider = get_provider(cfg.provider_type, cfg.provider_base_url, api_key)
+
+        # Compose prompt
+        args_summary = _short_args(arguments, max_chars=200) or "(нет аргументов)"
+        head = content[:1500]
+        prompt = _TOOL_RESULT_LABEL_PROMPT.format(
+            tool_name=tool_name,
+            args_str=args_summary,
+            content_head=head,
+        )
+        resp = await provider.chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            model=model_name,
+            temperature=0.1,
+            max_tokens=80,
+            # Disable thinking: tool-result labeling is one short line — reasoning
+            # burns the token budget and leaves resp.content empty on Qwen3.
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        label = (resp.content or "").strip().splitlines()[0].strip()
+        # Strip common pre/suffixes the model might add despite instruction.
+        for prefix in ("Заголовок:", "Результат:", "«", "\"", "'"):
+            if label.startswith(prefix):
+                label = label[len(prefix):].lstrip()
+        for suffix in ("»", "\"", "'"):
+            if label.endswith(suffix):
+                label = label[:-len(suffix)].rstrip()
+        # Sanity bounds
+        if not label or len(label) > 200:
+            return None
+        return label
+    except Exception:
+        logger.warning("[tool-result-capture] LLM labeling failed; falling back to heuristic", exc_info=True)
+        return None
 
 
 async def capture_tool_result_as_artifact(
@@ -105,7 +184,13 @@ async def capture_tool_result_as_artifact(
         return None
 
     content = output if len(output) <= MAX_TOOL_RESULT_CHARS else output[:MAX_TOOL_RESULT_CHARS] + "\n…[усечено]"
-    label = _build_label(tool_name, arguments)
+    # Prefer LLM-generated semantic label (helps semantic grounding because
+    # the embedding text includes the label). Fall back to the heuristic
+    # "Результат tool(args)" when the LLM call fails.
+    llm_label = await _llm_label_for_tool_result(
+        tenant_id=tenant_id, tool_name=tool_name, arguments=arguments, content=content,
+    )
+    label = llm_label or _build_label(tool_name, arguments)
 
     # Use a dedicated short-lived session — the pipeline's session stays
     # open across the LLM call, so we MUST NOT hold row-locks here.

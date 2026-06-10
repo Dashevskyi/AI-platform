@@ -35,6 +35,31 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None) -> s
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
+def set_auth_cookie(response, token: str, request) -> None:
+    """Store the access token in an HttpOnly cookie so page JS can't read it
+    (XSS can't exfiltrate the session). `secure` follows the request scheme so
+    it works on http://localhost in dev and stays Secure behind https/nginx."""
+    from app.api.deps import ACCESS_TOKEN_COOKIE
+
+    forwarded_proto = request.headers.get("x-forwarded-proto", "").lower()
+    is_https = forwarded_proto == "https" or request.url.scheme == "https"
+    response.set_cookie(
+        key=ACCESS_TOKEN_COOKIE,
+        value=token,
+        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        httponly=True,
+        secure=is_https,
+        samesite="lax",
+        path="/",
+    )
+
+
+def clear_auth_cookie(response) -> None:
+    from app.api.deps import ACCESS_TOKEN_COOKIE
+
+    response.delete_cookie(key=ACCESS_TOKEN_COOKIE, path="/")
+
+
 def decode_access_token(token: str) -> dict:
     return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
 

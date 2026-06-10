@@ -19,6 +19,7 @@ from app.schemas.shell_config import (
     ShellConfigResponse,
     TestConnectionRequest,
     TestConnectionResponse,
+    VocabRebuildResponse,
 )
 from app.api.deps import require_role, require_tenant_access, require_permission
 
@@ -50,6 +51,14 @@ def _config_to_response(cfg: TenantShellConfig) -> ShellConfigResponse:
         except Exception:
             masked_key = "****"
 
+    tts_key_masked: str | None = None
+    if getattr(cfg, "tts_api_key_enc", None):
+        try:
+            raw = decrypt_value(cfg.tts_api_key_enc)
+            tts_key_masked = mask_secret(raw)
+        except Exception:
+            tts_key_masked = "****"
+
     return ShellConfigResponse(
         id=str(cfg.id),
         tenant_id=str(cfg.tenant_id),
@@ -70,9 +79,31 @@ def _config_to_response(cfg: TenantShellConfig) -> ShellConfigResponse:
         embedding_model_name=cfg.embedding_model_name,
         vision_model_name=cfg.vision_model_name,
         kb_max_chunks=cfg.kb_max_chunks,
+        kb_inject_auto=getattr(cfg, "kb_inject_auto", True),
         tools_policy=cfg.tools_policy,
         enable_thinking=cfg.enable_thinking,
         response_language=cfg.response_language,
+        debug_enabled=cfg.debug_enabled,
+        timezone=cfg.timezone,
+        tool_semantic_floor=cfg.tool_semantic_floor,
+        tool_routing_temperature=cfg.tool_routing_temperature,
+        lazy_tool_catalog_topk=cfg.lazy_tool_catalog_topk,
+        max_tool_rounds=cfg.max_tool_rounds,
+        tier0_enabled=cfg.tier0_enabled,
+        tier0_min_tool_score=cfg.tier0_min_tool_score,
+        tier0_max_score_gap=cfg.tier0_max_score_gap,
+        pii_routing_enabled=cfg.pii_routing_enabled,
+        stt_initial_prompt=cfg.stt_initial_prompt,
+        stt_hotwords=cfg.stt_hotwords,
+        stt_vocab_source=cfg.stt_vocab_source,
+        stt_vocab_source_dsn_masked=mask_secret(decrypt_value(cfg.stt_vocab_source_dsn_enc)) if cfg.stt_vocab_source_dsn_enc else None,
+        stt_fuzzy_threshold=cfg.stt_fuzzy_threshold,
+        tts_provider=getattr(cfg, "tts_provider", None) or "system",
+        tts_api_key_masked=tts_key_masked,
+        tts_voice_id=getattr(cfg, "tts_voice_id", None),
+        tts_model=getattr(cfg, "tts_model", None),
+        tts_speed=getattr(cfg, "tts_speed", None),
+        tts_fish_url=getattr(cfg, "tts_fish_url", None),
     )
 
 
@@ -93,10 +124,25 @@ def _config_to_dict(cfg: TenantShellConfig) -> dict:
         "embedding_model_name": cfg.embedding_model_name,
         "vision_model_name": cfg.vision_model_name,
         "kb_max_chunks": cfg.kb_max_chunks,
+        "kb_inject_auto": getattr(cfg, "kb_inject_auto", True),
         "tools_policy": cfg.tools_policy,
         "enable_thinking": cfg.enable_thinking,
         "ontology_prompt": cfg.ontology_prompt,
         "response_language": cfg.response_language,
+        "debug_enabled": cfg.debug_enabled,
+        "timezone": cfg.timezone,
+        "tool_semantic_floor": cfg.tool_semantic_floor,
+        "tool_routing_temperature": cfg.tool_routing_temperature,
+        "lazy_tool_catalog_topk": cfg.lazy_tool_catalog_topk,
+        "max_tool_rounds": cfg.max_tool_rounds,
+        "tier0_enabled": cfg.tier0_enabled,
+        "tier0_min_tool_score": cfg.tier0_min_tool_score,
+        "tier0_max_score_gap": cfg.tier0_max_score_gap,
+        "pii_routing_enabled": cfg.pii_routing_enabled,
+        "stt_initial_prompt": cfg.stt_initial_prompt,
+        "stt_hotwords": cfg.stt_hotwords,
+        "stt_vocab_source": cfg.stt_vocab_source,
+        "stt_fuzzy_threshold": cfg.stt_fuzzy_threshold,
     }
 
 
@@ -146,13 +192,37 @@ async def update_shell_config(
 
     update_data = body.model_dump(exclude_unset=True)
 
-    # Handle provider_api_key separately
+    # Handle provider_api_key separately (encrypted)
     if "provider_api_key" in update_data:
         raw_key = update_data.pop("provider_api_key")
         if raw_key:
             cfg.provider_api_key_enc = encrypt_value(raw_key)
         else:
             cfg.provider_api_key_enc = None
+
+    # Handle tts_api_key separately (encrypted ElevenLabs key)
+    if "tts_api_key" in update_data:
+        raw_tts_key = update_data.pop("tts_api_key")
+        if raw_tts_key:
+            cfg.tts_api_key_enc = encrypt_value(raw_tts_key)
+        else:
+            cfg.tts_api_key_enc = None
+
+    # Handle stt_vocab_source_dsn separately (encrypted)
+    if "stt_vocab_source_dsn" in update_data:
+        raw_dsn = update_data.pop("stt_vocab_source_dsn")
+        if raw_dsn:
+            cfg.stt_vocab_source_dsn_enc = encrypt_value(raw_dsn)
+        else:
+            cfg.stt_vocab_source_dsn_enc = None
+        # Invalidate vocab cache when DSN changes
+        from app.services.stt_normalizer import invalidate_vocab_cache
+        invalidate_vocab_cache(tenant_id)
+
+    # Invalidate vocab cache when source config changes
+    if "stt_vocab_source" in update_data:
+        from app.services.stt_normalizer import invalidate_vocab_cache
+        invalidate_vocab_cache(tenant_id)
 
     for field, value in update_data.items():
         if field == "temperature" and value is not None:
@@ -307,3 +377,45 @@ async def list_models(
             success=False,
             message=f"Connection failed: {str(exc)[:300]}",
         )
+
+
+@router.post("/rebuild-stt-vocab", response_model=VocabRebuildResponse)
+async def rebuild_stt_vocab(
+    tenant_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Force-reload the STT vocabulary from the configured source and return a sample.
+
+    Use this button from the admin UI to verify the source is working and to
+    warm the cache manually (e.g. after adding new subscribers).
+    """
+    await _verify_tenant(tenant_id, db)
+
+    result = await db.execute(
+        select(TenantShellConfig).where(TenantShellConfig.tenant_id == tenant_id)
+    )
+    cfg = result.scalars().first()
+    if not cfg:
+        raise HTTPException(status_code=404, detail="Shell config not found.")
+    if not cfg.stt_vocab_source:
+        raise HTTPException(status_code=400, detail="Источник словаря не настроен (stt_vocab_source).")
+
+    from app.services.stt_normalizer import get_tenant_vocab
+    import time
+
+    try:
+        terms = await get_tenant_vocab(
+            tenant_id,
+            cfg.stt_vocab_source,
+            cfg.stt_vocab_source_dsn_enc,
+            force_refresh=True,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Ошибка загрузки словаря: {str(exc)[:300]}")
+
+    sample = terms[:20]
+    return VocabRebuildResponse(
+        terms_count=len(terms),
+        sample=sample,
+        cached_at=time.time(),
+    )

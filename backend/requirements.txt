@@ -19,3 +19,5 @@ pymupdf==1.27.2.3
 asyncssh==2.22.0
 telnetlib3==4.0.2
 pysnmp-lextudio==6.3.0
+jsonschema==4.26.0
+ormsgpack==1.12.2

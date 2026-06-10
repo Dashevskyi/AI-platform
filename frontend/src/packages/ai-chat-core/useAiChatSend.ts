@@ -120,7 +120,7 @@ export function useAiChatSend(options: UseAiChatSendOptions): UseAiChatSendResul
   }, []);
 
   const send = useCallback(
-    async ({ content, files = [], attachmentIds = [], idempotencyKey }: SendArgs): Promise<void> => {
+    async ({ content, files = [], attachmentIds = [], idempotencyKey, voiceMode = false }: SendArgs): Promise<void> => {
       if (!chatId) {
         const err = new Error('chatId is required to send a message');
         setError(err);
@@ -144,7 +144,7 @@ export function useAiChatSend(options: UseAiChatSendOptions): UseAiChatSendResul
         }
 
         if (!streamingMode) {
-          const msg = await api.sendMessage(tenantId, chatId, { content, idempotency_key: idemKey });
+          const msg = await api.sendMessage(tenantId, chatId, { content, idempotency_key: idemKey, voice_mode: voiceMode });
           onComplete?.(msg);
           onSuccess?.('Сообщение отправлено');
           return;
@@ -160,7 +160,7 @@ export function useAiChatSend(options: UseAiChatSendOptions): UseAiChatSendResul
         await api.sendMessageStream(
           tenantId,
           chatId,
-          { content, idempotency_key: idemKey },
+          { content, idempotency_key: idemKey, voice_mode: voiceMode },
           (eventType, payload) => {
             const ev: StreamEvent = { type: eventType, payload, ts: Date.now() };
             setStreamEvents((prev) => [...prev, ev]);

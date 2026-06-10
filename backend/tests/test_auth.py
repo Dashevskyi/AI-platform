@@ -1,8 +1,13 @@
 import httpx
 
+from app.core.config import settings
+
 
 def test_login_success(base_url):
-    r = httpx.post(f"{base_url}/api/admin/auth/login", json={"login": "admin", "password": "admin"})
+    r = httpx.post(
+        f"{base_url}/api/admin/auth/login",
+        json={"login": settings.ADMIN_LOGIN, "password": settings.ADMIN_PASSWORD},
+    )
     assert r.status_code == 200
     data = r.json()
     assert "access_token" in data
@@ -10,7 +15,7 @@ def test_login_success(base_url):
 
 
 def test_login_wrong_password(base_url):
-    r = httpx.post(f"{base_url}/api/admin/auth/login", json={"login": "admin", "password": "wrong"})
+    r = httpx.post(f"{base_url}/api/admin/auth/login", json={"login": settings.ADMIN_LOGIN, "password": "wrong"})
     assert r.status_code == 401
 
 

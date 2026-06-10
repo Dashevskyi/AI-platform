@@ -2,8 +2,10 @@
 Admin endpoints for global LLM model catalog.
 """
 import uuid
+from datetime import datetime
 
 import httpx
+from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -52,6 +54,9 @@ def _model_to_response(m: LLMModel) -> LLMModelResponse:
         cost_per_1k_input=m.cost_per_1k_input,
         cost_per_1k_output=m.cost_per_1k_output,
         is_active=m.is_active,
+        last_check_at=m.last_check_at,
+        last_check_status=m.last_check_status,
+        last_check_detail=m.last_check_detail,
         created_at=m.created_at,
         updated_at=m.updated_at,
     )
@@ -240,3 +245,94 @@ async def test_model_connection(
             success=False,
             message=f"Ошибка соединения: {str(exc)[:300]}",
         )
+
+
+class ModelHealthCheckResponse(BaseModel):
+    status: str          # ok | empty_content | no_completion | http_error | timeout | provider_error
+    detail: str | None
+    content: str | None  # what the model actually replied (first 200 chars)
+    completion_tokens: int | None
+    latency_ms: int | None
+    checked_at: datetime
+
+
+@router.post("/{model_id}/test", response_model=ModelHealthCheckResponse)
+async def health_check_model(
+    model_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Send a tiny probe to the model and record whether it actually
+    answered. Catches the 'wrong model_id, provider returns empty content,
+    pipeline silently degrades' failure mode that bit us earlier today."""
+    import time
+    from app.core.security import decrypt_value
+    from app.providers.factory import get_provider
+    from datetime import datetime, timezone as _tz
+
+    m = (await db.execute(select(LLMModel).where(LLMModel.id == model_id))).scalars().first()
+    if not m:
+        raise HTTPException(status_code=404, detail="Model not found.")
+
+    api_key = decrypt_value(m.api_key_enc) if m.api_key_enc else None
+    status_code = "ok"
+    detail: str | None = None
+    content: str | None = None
+    completion_tokens: int | None = None
+    latency_ms: int | None = None
+
+    try:
+        provider = get_provider(m.provider_type, m.base_url, api_key)
+        t0 = time.time()
+        # Reasoning models (Qwen3-thinking, DeepSeek-R1, etc.) need headroom
+        # to finish reasoning AND produce a short final answer; 20 is not enough.
+        resp = await provider.chat_completion(
+            messages=[{"role": "user", "content": "скажи привет одним словом"}],
+            model=m.model_id,
+            temperature=0.1,
+            max_tokens=300,
+        )
+        latency_ms = int((time.time() - t0) * 1000)
+        content = (resp.content or "")[:200]
+        reasoning = (getattr(resp, "reasoning", None) or "")[:200]
+        completion_tokens = int(resp.completion_tokens or 0)
+        # Accept either content OR reasoning (the model IS replying, just via
+        # the reasoning channel) — for reasoning models that's a healthy signal.
+        if not (resp.content or "").strip() and not reasoning.strip():
+            status_code = "empty_content"
+            detail = (
+                "Провайдер ответил, но и content и reasoning пустые. "
+                "Скорее всего model_id не существует или есть отдельный "
+                "канал который мы не парсим."
+            )
+        elif not (resp.content or "").strip() and reasoning.strip():
+            # Reasoning came through but final answer didn't — common for R1/Qwen3
+            # на короткий max_tokens; либо модель действительно ответила в reasoning.
+            status_code = "ok"
+            detail = "Содержимое в канале reasoning (reasoning-модель отвечает рассуждением)."
+        elif completion_tokens == 0:
+            status_code = "no_completion"
+            detail = "completion_tokens=0 — usage не вернулся, но content есть."
+    except httpx.HTTPStatusError as exc:
+        status_code = "http_error"
+        detail = f"HTTP {exc.response.status_code}: {(exc.response.text or '')[:300]}"
+    except httpx.TimeoutException:
+        status_code = "timeout"
+        detail = "Запрос превысил таймаут."
+    except Exception as exc:
+        status_code = "provider_error"
+        detail = f"{type(exc).__name__}: {str(exc)[:300]}"
+
+    now = datetime.now(_tz.utc)
+    m.last_check_at = now
+    m.last_check_status = status_code
+    m.last_check_detail = detail
+    await db.commit()
+
+    return ModelHealthCheckResponse(
+        status=status_code,
+        detail=detail,
+        content=content,
+        completion_tokens=completion_tokens,
+        latency_ms=latency_ms,
+        checked_at=now,
+    )

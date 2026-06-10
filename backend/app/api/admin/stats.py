@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.models.tenant import Tenant
 from app.models.llm_request_log import LLMRequestLog
-from app.schemas.stats import TenantStatsResponse, StatsSummary, DailyModelStats
+from app.schemas.stats import TenantStatsResponse, StatsSummary, DailyModelStats, TierStats
 from app.api.deps import require_role, require_tenant_access
 
 router = APIRouter(
@@ -108,4 +108,37 @@ async def get_stats(
         for row in daily_rows
     ]
 
-    return TenantStatsResponse(summary=summary, daily=daily)
+    # Tier breakdown: how much traffic the deterministic Tier 0 path served
+    # ($0) vs the LLM tiers. Legacy rows with NULL served_by count as 'llm'.
+    # Reuse one expression object in SELECT and GROUP BY — two separate
+    # coalesce(...) calls would bind distinct params and Postgres would reject
+    # the grouping.
+    served_expr = func.coalesce(LLMRequestLog.served_by, "llm")
+    tier_q = (
+        select(
+            served_expr.label("served_by"),
+            func.count().label("request_count"),
+            func.coalesce(func.sum(LLMRequestLog.estimated_cost), 0).label("estimated_cost"),
+        )
+        .where(
+            LLMRequestLog.tenant_id == tenant_id,
+            cast(LLMRequestLog.created_at, Date) >= date_from,
+            cast(LLMRequestLog.created_at, Date) <= date_to,
+            LLMRequestLog.status == "success",
+        )
+        .group_by(served_expr)
+    )
+    tier_rows = (await db.execute(tier_q)).all()
+    tiers = [
+        TierStats(
+            served_by=row.served_by,
+            request_count=row.request_count,
+            estimated_cost=float(row.estimated_cost),
+        )
+        for row in tier_rows
+    ]
+    total_reqs = sum(t.request_count for t in tiers)
+    tier0_reqs = sum(t.request_count for t in tiers if t.served_by == "tier0_template")
+    tier0_share = (tier0_reqs / total_reqs) if total_reqs else 0.0
+
+    return TenantStatsResponse(summary=summary, daily=daily, tiers=tiers, tier0_share=tier0_share)

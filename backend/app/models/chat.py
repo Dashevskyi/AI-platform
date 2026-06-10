@@ -30,3 +30,7 @@ class Chat(Base):
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     deleted_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    # User-flagged "this chat went off the rails" marker for the 100-chat
+    # offline analysis. Free-form note + timestamp; cleared by sending null.
+    flagged_issue: Mapped[str | None] = mapped_column(Text, nullable=True)
+    flagged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

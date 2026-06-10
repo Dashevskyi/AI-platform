@@ -20,6 +20,15 @@ class StatsSummary(BaseModel):
     request_count: int
 
 
+class TierStats(BaseModel):
+    served_by: str          # 'tier0_template' | 'llm'
+    request_count: int
+    estimated_cost: float
+
+
 class TenantStatsResponse(BaseModel):
     summary: StatsSummary
     daily: list[DailyModelStats]
+    # Deterministic (Tier 0, $0) vs LLM split, and the Tier 0 share of traffic.
+    tiers: list[TierStats] = []
+    tier0_share: float = 0.0
