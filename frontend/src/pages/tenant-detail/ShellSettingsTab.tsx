@@ -11,7 +11,9 @@ import {
   Fieldset,
   Group,
   Loader,
+  Modal,
   NumberInput,
+  Pagination,
   PasswordInput,
   ScrollArea,
   Select,
@@ -19,6 +21,7 @@ import {
   Slider,
   Stack,
   Switch,
+  Table,
   Tabs,
   Text,
   TextInput,
@@ -27,8 +30,10 @@ import {
 } from '@mantine/core';
 import {
   IconAlertCircle,
+  IconArrowBackUp,
   IconDeviceFloppy,
   IconHelpCircle,
+  IconHistory,
   IconMicrophone,
   IconPlugConnected,
   IconRefresh,
@@ -38,7 +43,7 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { notifications } from '@mantine/notifications';
 import { shellApi } from '../../shared/api/endpoints';
-import type { ShellConfigUpdate } from '../../shared/api/types';
+import type { ShellConfigUpdate, ShellVersionDetail } from '../../shared/api/types';
 
 type ShellSettingsTabProps = {
   tenantId: string;
@@ -435,6 +440,179 @@ function TTSSection({
   );
 }
 
+// ── Version history sub-component ───────────────────────────────────────────
+function fmtVal(v: unknown): string {
+  if (v === null || v === undefined) return '∅';
+  if (typeof v === 'boolean') return v ? 'вкл' : 'выкл';
+  if (typeof v === 'object') return JSON.stringify(v);
+  const s = String(v);
+  return s.length > 200 ? s.slice(0, 200) + '…' : s;
+}
+
+function VersionDiff({ detail }: { detail: ShellVersionDetail }) {
+  const prev = (detail.previous_payload ?? {}) as Record<string, unknown>;
+  const next = detail.new_payload as Record<string, unknown>;
+  const readonly = new Set(['id', 'tenant_id', 'created_at', 'updated_at']);
+  const fields = [...new Set([...Object.keys(prev), ...Object.keys(next)])]
+    .filter((k) => !readonly.has(k) && JSON.stringify(prev[k]) !== JSON.stringify(next[k]))
+    .sort();
+
+  if (fields.length === 0) {
+    return <Text size="sm" c="dimmed">Без изменений полей конфигурации (служебная запись).</Text>;
+  }
+  return (
+    <Table withTableBorder withColumnBorders verticalSpacing={6} fz="xs">
+      <Table.Thead>
+        <Table.Tr>
+          <Table.Th style={{ width: 200 }}>Поле</Table.Th>
+          <Table.Th>Было</Table.Th>
+          <Table.Th>Стало</Table.Th>
+        </Table.Tr>
+      </Table.Thead>
+      <Table.Tbody>
+        {fields.map((f) => (
+          <Table.Tr key={f}>
+            <Table.Td><Code fz="xs">{f}</Code></Table.Td>
+            <Table.Td><Text size="xs" c="red.7" style={{ wordBreak: 'break-word' }}>{fmtVal(prev[f])}</Text></Table.Td>
+            <Table.Td><Text size="xs" c="green.7" style={{ wordBreak: 'break-word' }}>{fmtVal(next[f])}</Text></Table.Td>
+          </Table.Tr>
+        ))}
+      </Table.Tbody>
+    </Table>
+  );
+}
+
+function VersionsSection({ tenantId }: { tenantId: string }) {
+  const queryClient = useQueryClient();
+  const [page, setPage] = useState(1);
+  const [openId, setOpenId] = useState<string | null>(null);
+  const pageSize = 20;
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['tenants', tenantId, 'shell', 'versions', page],
+    queryFn: () => shellApi.listVersions(tenantId, page, pageSize),
+  });
+
+  const { data: detail, isLoading: detailLoading } = useQuery({
+    queryKey: ['tenants', tenantId, 'shell', 'version', openId],
+    queryFn: () => shellApi.getVersion(tenantId, openId as string),
+    enabled: !!openId,
+  });
+
+  const restoreMutation = useMutation({
+    mutationFn: (versionId: string) => shellApi.restoreVersion(tenantId, versionId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['tenants', tenantId, 'shell'] });
+      setOpenId(null);
+      notifications.show({ title: 'Восстановлено', message: 'Конфигурация откатана к выбранной версии', color: 'green' });
+    },
+    onError: (err: unknown) => {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || 'Не удалось восстановить';
+      notifications.show({ title: 'Ошибка', message: msg, color: 'red' });
+    },
+  });
+
+  const totalPages = data ? Math.max(1, Math.ceil(data.total_count / pageSize)) : 1;
+
+  return (
+    <Stack gap="md">
+      <Alert icon={<IconHistory size={14} />} color="blue" variant="light" py={6}>
+        Каждое сохранение настроек оболочки фиксируется как версия. Открой запись, чтобы увидеть diff,
+        и при необходимости откати конфигурацию — откат сам записывается новой версией (обратимо).
+      </Alert>
+
+      {isLoading ? (
+        <Center py="md"><Loader /></Center>
+      ) : !data || data.items.length === 0 ? (
+        <Text size="sm" c="dimmed">История пуста.</Text>
+      ) : (
+        <>
+          <Table highlightOnHover verticalSpacing="xs" fz="sm">
+            <Table.Thead>
+              <Table.Tr>
+                <Table.Th style={{ width: 170 }}>Дата</Table.Th>
+                <Table.Th style={{ width: 140 }}>Автор</Table.Th>
+                <Table.Th>Изменённые поля</Table.Th>
+                <Table.Th style={{ width: 90 }} />
+              </Table.Tr>
+            </Table.Thead>
+            <Table.Tbody>
+              {data.items.map((v) => (
+                <Table.Tr
+                  key={v.id}
+                  style={{ cursor: 'pointer' }}
+                  onClick={() => setOpenId(v.id)}
+                >
+                  <Table.Td>{new Date(v.changed_at).toLocaleString()}</Table.Td>
+                  <Table.Td>{v.changed_by ?? <Text span c="dimmed" size="xs">система</Text>}</Table.Td>
+                  <Table.Td>
+                    {v.comment ? (
+                      <Text size="xs" c="dimmed">{v.comment}</Text>
+                    ) : v.changed_fields.length === 0 ? (
+                      <Text size="xs" c="dimmed">—</Text>
+                    ) : (
+                      <Group gap={4}>
+                        {v.changed_fields.slice(0, 6).map((f) => (
+                          <Badge key={f} variant="light" size="xs" color="gray">{f}</Badge>
+                        ))}
+                        {v.changed_fields.length > 6 && (
+                          <Badge variant="light" size="xs" color="gray">+{v.changed_fields.length - 6}</Badge>
+                        )}
+                      </Group>
+                    )}
+                  </Table.Td>
+                  <Table.Td>
+                    <Button size="compact-xs" variant="subtle">Diff</Button>
+                  </Table.Td>
+                </Table.Tr>
+              ))}
+            </Table.Tbody>
+          </Table>
+          {totalPages > 1 && (
+            <Group justify="center">
+              <Pagination value={page} onChange={setPage} total={totalPages} size="sm" />
+            </Group>
+          )}
+        </>
+      )}
+
+      <Modal
+        opened={!!openId}
+        onClose={() => setOpenId(null)}
+        title="Версия конфигурации"
+        size="xl"
+      >
+        {detailLoading || !detail ? (
+          <Center py="md"><Loader /></Center>
+        ) : (
+          <Stack gap="md">
+            <Group gap="lg">
+              <Text size="sm"><Text span fw={500}>Дата:</Text> {new Date(detail.changed_at).toLocaleString()}</Text>
+              <Text size="sm"><Text span fw={500}>Автор:</Text> {detail.changed_by ?? 'система'}</Text>
+            </Group>
+            {detail.comment && <Text size="sm" c="dimmed">{detail.comment}</Text>}
+            <ScrollArea.Autosize mah={420}>
+              <VersionDiff detail={detail} />
+            </ScrollArea.Autosize>
+            <Divider />
+            <Group justify="flex-end">
+              <Button variant="default" onClick={() => setOpenId(null)}>Закрыть</Button>
+              <Button
+                color="orange"
+                leftSection={<IconArrowBackUp size={16} />}
+                loading={restoreMutation.isPending}
+                onClick={() => restoreMutation.mutate(detail.id)}
+              >
+                Восстановить эту версию
+              </Button>
+            </Group>
+          </Stack>
+        )}
+      </Modal>
+    </Stack>
+  );
+}
+
 export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
   const queryClient = useQueryClient();
   const { data: config, isLoading } = useQuery({
@@ -554,6 +732,7 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
               <Tabs.Tab value="llm" leftSection={<IconRobot size={16} />}>LLM</Tabs.Tab>
               <Tabs.Tab value="stt" leftSection={<IconMicrophone size={16} />}>STT</Tabs.Tab>
               <Tabs.Tab value="tts" leftSection={<IconVolume size={16} />}>TTS</Tabs.Tab>
+              <Tabs.Tab value="history" leftSection={<IconHistory size={16} />}>История</Tabs.Tab>
             </Tabs.List>
 
             {/* ── LLM tab ──────────────────────────────────────────────────── */}
@@ -957,6 +1136,11 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
                 config={config}
                 updateField={updateField}
               />
+            </Tabs.Panel>
+
+            {/* ── History tab ──────────────────────────────────────────────── */}
+            <Tabs.Panel value="history">
+              <VersionsSection tenantId={tenantId} />
             </Tabs.Panel>
 
           </Tabs>

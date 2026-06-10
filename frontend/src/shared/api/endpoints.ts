@@ -18,6 +18,8 @@ import type {
   TenantApiKeyGroupUpdate,
   ShellConfig,
   ShellConfigUpdate,
+  ShellVersionItem,
+  ShellVersionDetail,
   Tool,
   ToolMetric,
   ToolCreate,
@@ -197,6 +199,18 @@ export const shellApi = {
   },
   rebuildSttVocab: async (tenantId: string): Promise<{ terms_count: number; sample: string[]; cached_at: number }> => {
     const res = await apiClient.post(`/api/admin/tenants/${tenantId}/shell/rebuild-stt-vocab`);
+    return res.data;
+  },
+  listVersions: async (tenantId: string, page = 1, pageSize = 20): Promise<PaginatedResponse<ShellVersionItem>> => {
+    const res = await apiClient.get(`/api/admin/tenants/${tenantId}/shell/versions`, { params: { page, page_size: pageSize } });
+    return res.data;
+  },
+  getVersion: async (tenantId: string, versionId: string): Promise<ShellVersionDetail> => {
+    const res = await apiClient.get(`/api/admin/tenants/${tenantId}/shell/versions/${versionId}`);
+    return res.data;
+  },
+  restoreVersion: async (tenantId: string, versionId: string): Promise<ShellConfig> => {
+    const res = await apiClient.post(`/api/admin/tenants/${tenantId}/shell/versions/${versionId}/restore`);
     return res.data;
   },
 };

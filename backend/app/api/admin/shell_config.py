@@ -2,13 +2,16 @@
 Admin endpoints for tenant shell (LLM) configuration.
 """
 import uuid
+from datetime import datetime, timezone
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.schemas.common import PaginatedResponse
 from app.core.security import encrypt_value, decrypt_value, mask_secret
 from app.models.admin_user import AdminUser
 from app.models.tenant import Tenant
@@ -244,6 +247,137 @@ async def update_shell_config(
     db.add(version)
     await db.flush()
 
+    return _config_to_response(cfg)
+
+
+class VersionListItem(BaseModel):
+    id: str
+    changed_at: datetime
+    changed_by: str | None  # admin login
+    comment: str | None
+    changed_fields: list[str]
+
+
+class VersionDetail(BaseModel):
+    id: str
+    changed_at: datetime
+    changed_by: str | None
+    comment: str | None
+    previous_payload: dict | None
+    new_payload: dict
+
+
+def _changed_fields(prev: dict | None, new: dict | None) -> list[str]:
+    prev = prev or {}
+    new = new or {}
+    return sorted(k for k in (set(new) | set(prev)) if prev.get(k) != new.get(k))
+
+
+@router.get("/versions", response_model=PaginatedResponse[VersionListItem])
+async def list_versions(
+    tenant_id: uuid.UUID,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    """History of shell-config changes (newest first), with who changed what."""
+    await _verify_tenant(tenant_id, db)
+    base = select(TenantShellConfigVersion).where(TenantShellConfigVersion.tenant_id == tenant_id)
+    total = (await db.execute(select(func.count()).select_from(base.subquery()))).scalar()
+    rows = (await db.execute(
+        base.order_by(TenantShellConfigVersion.changed_at.desc())
+        .offset((page - 1) * page_size).limit(page_size)
+    )).scalars().all()
+
+    actor_ids = {v.changed_by for v in rows if v.changed_by}
+    logins: dict = {}
+    if actor_ids:
+        logins = dict((await db.execute(
+            select(AdminUser.id, AdminUser.login).where(AdminUser.id.in_(actor_ids))
+        )).all())
+
+    items = [
+        VersionListItem(
+            id=str(v.id),
+            changed_at=v.changed_at,
+            changed_by=logins.get(v.changed_by),
+            comment=v.comment,
+            changed_fields=_changed_fields(v.previous_payload, v.new_payload),
+        )
+        for v in rows
+    ]
+    return PaginatedResponse[VersionListItem](items=items, total_count=total, page=page, page_size=page_size)
+
+
+@router.get("/versions/{version_id}", response_model=VersionDetail)
+async def get_version(
+    tenant_id: uuid.UUID,
+    version_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    await _verify_tenant(tenant_id, db)
+    v = (await db.execute(
+        select(TenantShellConfigVersion).where(
+            TenantShellConfigVersion.id == version_id,
+            TenantShellConfigVersion.tenant_id == tenant_id,
+        )
+    )).scalars().first()
+    if not v:
+        raise HTTPException(status_code=404, detail="Версия не найдена.")
+    login = None
+    if v.changed_by:
+        login = (await db.execute(select(AdminUser.login).where(AdminUser.id == v.changed_by))).scalar()
+    return VersionDetail(
+        id=str(v.id), changed_at=v.changed_at, changed_by=login, comment=v.comment,
+        previous_payload=v.previous_payload, new_payload=v.new_payload,
+    )
+
+
+@router.post("/versions/{version_id}/restore", response_model=ShellConfigResponse)
+async def restore_version(
+    tenant_id: uuid.UUID,
+    version_id: uuid.UUID,
+    current_user: AdminUser = Depends(require_tenant_access),
+    db: AsyncSession = Depends(get_db),
+):
+    """Roll the shell config back to a stored version's payload. The restore is
+    itself recorded as a new version (so it's undoable)."""
+    await _verify_tenant(tenant_id, db)
+    v = (await db.execute(
+        select(TenantShellConfigVersion).where(
+            TenantShellConfigVersion.id == version_id,
+            TenantShellConfigVersion.tenant_id == tenant_id,
+        )
+    )).scalars().first()
+    if not v or not isinstance(v.new_payload, dict):
+        raise HTTPException(status_code=404, detail="Версия не найдена.")
+
+    cfg = (await db.execute(
+        select(TenantShellConfig).where(TenantShellConfig.tenant_id == tenant_id)
+    )).scalars().first()
+    if not cfg:
+        raise HTTPException(status_code=404, detail="Конфигурация не найдена.")
+
+    previous_payload = _config_to_dict(cfg)
+    _readonly = {"id", "tenant_id", "created_at", "updated_at"}
+    for field, value in v.new_payload.items():
+        if field in _readonly:
+            continue
+        if hasattr(cfg, field):
+            if field == "temperature" and value is not None:
+                value = min(float(value), MAX_SAFE_TEMPERATURE)
+            setattr(cfg, field, value)
+    await db.flush()
+    await db.refresh(cfg)
+
+    db.add(TenantShellConfigVersion(
+        tenant_id=tenant_id,
+        changed_by=current_user.id,
+        previous_payload=previous_payload,
+        new_payload=_config_to_dict(cfg),
+        comment=f"Восстановлено из версии от {v.changed_at:%Y-%m-%d %H:%M}",
+    ))
+    await db.flush()
     return _config_to_response(cfg)
 
 

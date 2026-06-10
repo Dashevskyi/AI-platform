@@ -469,6 +469,23 @@ export interface LLMLog {
   created_at: string;
 }
 
+export interface ShellVersionItem {
+  id: string;
+  changed_at: string;
+  changed_by: string | null;
+  comment: string | null;
+  changed_fields: string[];
+}
+
+export interface ShellVersionDetail {
+  id: string;
+  changed_at: string;
+  changed_by: string | null;
+  comment: string | null;
+  previous_payload: Record<string, unknown> | null;
+  new_payload: Record<string, unknown>;
+}
+
 export interface KBChunkRow {
   chunk_index: number;
   chars: number;
