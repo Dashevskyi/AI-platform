@@ -730,11 +730,28 @@ async def explain_tier0(
     max_score_gap: float = 0.15,
     focus_tool: str | None = None,
     run_tool: bool = False,
+    override_tier0: dict | None = None,
 ) -> dict:
     """Explain why Tier 0 would or would not fire for `user_query`, with a full
-    trace, competing-tool matches, and recommendations (esp. for `focus_tool`)."""
+    trace, competing-tool matches, and recommendations (esp. for `focus_tool`).
+
+    If `override_tier0` is given, it replaces `focus_tool`'s stored tier0_template
+    for this run — so the admin can test an unsaved config straight from the editor
+    or wizard, before persisting it.
+    """
     from app.models.tenant_tool import TenantTool
     from sqlalchemy import select as _select
+
+    def _t0_of(tool):
+        """tier0 config for a tool, honouring the unsaved override on focus_tool."""
+        if override_tier0 is not None and focus_tool and tool.name == focus_tool:
+            t0 = override_tier0
+            if not isinstance(t0, dict):
+                return None
+            if not t0.get("raw_output") and not t0.get("template"):
+                return None
+            return t0
+        return _extract_tier0_config(tool)
 
     user_query = (user_query or "").strip()
     steps: list[dict] = []
@@ -758,7 +775,7 @@ async def explain_tier0(
     for rank, t in enumerate(top):
         raw = float(getattr(t, "_semantic_score", 0.0) or 0.0)
         bonus, matched = _compute_entity_boost(t, entities)
-        t0 = _extract_tier0_config(t)
+        t0 = _t0_of(t)
         topk_ids.add(t.id)
         ranking.append({
             "name": t.name,
@@ -779,7 +796,7 @@ async def explain_tier0(
     rank_by_id = {t.id: i for i, t in enumerate(top)}
     regex_matches: list[dict] = []
     for t in all_tools:
-        t0 = _extract_tier0_config(t)
+        t0 = _t0_of(t)
         if not t0 or t0.get("required_entity") != "keyword_extract":
             continue
         uq_lower = user_query.lower()
@@ -804,7 +821,7 @@ async def explain_tier0(
                       "reason": "", "extracted_keyword": None,
                       "arguments": None, "tool_output": None, "rendered": None}
 
-    eligible = [t for t in top if _extract_tier0_config(t) is not None]
+    eligible = [t for t in top if _t0_of(t) is not None]
     if not top:
         decision["reason"] = "семантический поиск не вернул инструментов"
         steps.append({"label": "Кандидаты", "status": "fail", "detail": "top-K пуст"})
@@ -831,7 +848,7 @@ async def explain_tier0(
     boosted.sort(key=lambda x: -x[1])
 
     for t, score in boosted:
-        t0 = _extract_tier0_config(t)
+        t0 = _t0_of(t)
         if t0.get("required_entity") != "keyword_extract":
             continue
         if score < REGEX_SANITY_FLOOR:
@@ -855,7 +872,7 @@ async def explain_tier0(
             bonus, _ = _compute_entity_boost(t, entities)
             boosted_full.append((t, raw + bonus))
         boosted_full.sort(key=lambda x: -x[1])
-        elig_sorted = [(t, s) for t, s in boosted_full if _extract_tier0_config(t) is not None]
+        elig_sorted = [(t, s) for t, s in boosted_full if _t0_of(t) is not None]
         if elig_sorted:
             top_tool, top_score = elig_sorted[0]
             competitors = [s for t, s in boosted_full if t.id != top_tool.id]
@@ -871,7 +888,7 @@ async def explain_tier0(
                 decision["reason"] = (f"«{top_tool.name}» недостаточно оторвался от конкурента "
                                       f"(разрыв {top_score - second:.3f} < {max_score_gap:.2f})")
             else:
-                winner, win_t0, win_path = top_tool, _extract_tier0_config(top_tool), "semantic-gate"
+                winner, win_t0, win_path = top_tool, _t0_of(top_tool), "semantic-gate"
 
     if winner is not None:
         decision["tool"] = winner.name
@@ -982,7 +999,7 @@ async def explain_tier0(
     if focus_tool and decision.get("tool") != focus_tool:
         ft = next((t for t in all_tools if t.name == focus_tool), None)
         if ft is not None:
-            ft0 = _extract_tier0_config(ft)
+            ft0 = _t0_of(ft)
             if ft0 is None:
                 recs.append({"severity": "info",
                              "text": f"«{focus_tool}» не имеет валидного tier0_template (нет template?) — "

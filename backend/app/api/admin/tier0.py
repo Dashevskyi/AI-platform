@@ -918,6 +918,7 @@ class Tier0ExplainRequest(BaseModel):
     query: str
     focus_tool: str | None = None
     run_tool: bool = True
+    override_tier0: dict | None = None  # unsaved editor/wizard config to test
 
 
 @router.post("/explain")
@@ -949,6 +950,7 @@ async def tier0_explain(
         max_score_gap=float(getattr(config, "tier0_max_score_gap", 0.15) or 0.15),
         focus_tool=body.focus_tool,
         run_tool=body.run_tool,
+        override_tier0=body.override_tier0,
     )
     trace["tenant_tier0_enabled"] = bool(getattr(config, "tier0_enabled", False))
     return trace

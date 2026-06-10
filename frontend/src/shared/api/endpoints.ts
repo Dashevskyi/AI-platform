@@ -710,9 +710,13 @@ export const tier0Api = {
     return res.data;
   },
 
-  explain: async (tenantId: string, query: string, focusTool?: string, runTool = true): Promise<Tier0ExplainResult> => {
+  explain: async (
+    tenantId: string, query: string, focusTool?: string, runTool = true,
+    overrideTier0?: Record<string, unknown> | null,
+  ): Promise<Tier0ExplainResult> => {
     const res = await apiClient.post(`/api/admin/tenants/${tenantId}/tier0/explain`, {
       query, focus_tool: focusTool ?? null, run_tool: runTool,
+      override_tier0: overrideTier0 ?? null,
     });
     return res.data;
   },

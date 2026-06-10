@@ -1756,7 +1756,9 @@ function TableDefsSection({ template, tableDefs, onChange }: TableDefsEditorProp
 // ─── Main editor ─────────────────────────────────────────────────────────────
 
 // ─── Test bench: query → Tier 0 explain trace + full LLM run ─────────────────
-function Tier0TestBench({ tenantId, toolName }: { tenantId: string; toolName?: string }) {
+function Tier0TestBench({ tenantId, toolName, currentConfig }: {
+  tenantId: string; toolName?: string; currentConfig?: Tier0Template | null;
+}) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [explain, setExplain] = useState<Tier0ExplainResult | null>(null);
@@ -1771,7 +1773,10 @@ function Tier0TestBench({ tenantId, toolName }: { tenantId: string; toolName?: s
     if (!query.trim()) return;
     setLoading(true); setErr(null); setLlm(null);
     try {
-      setExplain(await tier0Api.explain(tenantId, query.trim(), toolName, true));
+      // Test the LIVE editor config (unsaved) via override, so changes are
+      // checkable immediately — no need to save the tool first.
+      const override = currentConfig ? (currentConfig as unknown as Record<string, unknown>) : null;
+      setExplain(await tier0Api.explain(tenantId, query.trim(), toolName, true, override));
     } catch (e: unknown) {
       const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
       setErr(typeof detail === 'string' ? detail : e instanceof Error ? e.message : String(e));
@@ -1807,6 +1812,7 @@ function Tier0TestBench({ tenantId, toolName }: { tenantId: string; toolName?: s
           <Text fw={600} size="sm">Тест и диагностика</Text>
           <Text size="xs" c="dimmed">— проверить запрос в Tier 0 и в LLM, увидеть причину</Text>
         </Group>
+        {currentConfig && <Badge size="xs" variant="light" color="grape">текущая настройка (без сохранения)</Badge>}
       </Group>
 
       <Collapse expanded={open}>
@@ -2075,6 +2081,7 @@ export function Tier0TemplateEditor({ value, onChange, tenantId, toolName, toolD
     if (positives.length === 0) { setWizError('Добавьте хотя бы один пример-запрос.'); return; }
     setWizLoading(true);
     setWizError(null);
+    setWizCheck(null);
     try {
       const token = localStorage.getItem('auth_token') || '';
       const resp = await fetch(`/api/admin/tenants/${tenantId}/tier0/wizard`, {
@@ -2126,6 +2133,24 @@ export function Tier0TemplateEditor({ value, onChange, tenantId, toolName, toolD
     onChange({ ...tpl, ...(wizResult.suggestion as Partial<Tier0Template>) });
     setWizardOpen(false);
     setWizResult(null);
+  }
+
+  // Quick Tier 0 check of the generated suggestion WITHOUT applying/saving.
+  const [wizCheck, setWizCheck] = useState<Tier0ExplainResult | null>(null);
+  const [wizCheckLoading, setWizCheckLoading] = useState(false);
+  async function checkWizardInTier0() {
+    if (!wizResult || !tenantId) return;
+    const firstQuery = splitLines(wizPos)[0];
+    if (!firstQuery) return;
+    setWizCheckLoading(true);
+    try {
+      setWizCheck(await tier0Api.explain(
+        tenantId, firstQuery, toolName, true,
+        wizResult.suggestion as Record<string, unknown>,
+      ));
+    } catch {
+      setWizCheck(null);
+    } finally { setWizCheckLoading(false); }
   }
 
   const attempts: ParamMapRow[][] = useMemo(
@@ -2753,7 +2778,7 @@ export function Tier0TemplateEditor({ value, onChange, tenantId, toolName, toolD
       </Stack>
     </Card>
 
-    {tenantId && <Tier0TestBench tenantId={tenantId} toolName={toolName} />}
+    {tenantId && <Tier0TestBench tenantId={tenantId} toolName={toolName} currentConfig={value} />}
 
     {/* ── LLM Assist Modal ─────────────────────────────────────────────────── */}
     <Modal
@@ -2997,6 +3022,40 @@ export function Tier0TemplateEditor({ value, onChange, tenantId, toolName, toolD
               </Box>
             </div>
 
+            {/* Quick Tier 0 check of the generated config (no save needed) */}
+            <Group gap="xs" align="center">
+              <Button
+                variant="light" color="grape" size="xs"
+                leftSection={<IconFlask size={13} />}
+                loading={wizCheckLoading}
+                onClick={checkWizardInTier0}
+              >
+                ⚡ Проверить в Tier 0
+              </Button>
+              <Text size="xs" c="dimmed">прогон по первому примеру, без сохранения</Text>
+            </Group>
+            {wizCheck && (
+              <Alert
+                color={wizCheck.decision.fired ? 'green' : 'orange'} variant="light" p="xs"
+                icon={wizCheck.decision.fired ? <IconCheck size={15} /> : <IconX size={15} />}
+              >
+                <Text size="sm" fw={600}>
+                  {wizCheck.decision.fired
+                    ? `Сработает → ${wizCheck.decision.tool}`
+                    : 'Не сработает'}
+                </Text>
+                <Text size="xs" style={{ whiteSpace: 'pre-wrap' }}>{wizCheck.decision.reason}</Text>
+                {wizCheck.decision.arguments && (
+                  <Text size="xs" c="dimmed" mt={2}>
+                    Аргументы: <Code fz="xs">{JSON.stringify(wizCheck.decision.arguments)}</Code>
+                  </Text>
+                )}
+                {wizCheck.recommendations.slice(0, 2).map((r, i) => (
+                  <Text key={i} size="xs" c={r.severity === 'error' ? 'red' : 'dimmed'} mt={2}>↳ {r.text}</Text>
+                ))}
+              </Alert>
+            )}
+
             <Group justify="space-between">
               <Button
                 variant="light" color="orange" size="xs"
@@ -3008,7 +3067,7 @@ export function Tier0TemplateEditor({ value, onChange, tenantId, toolName, toolD
                 Доработать с учётом провалов
               </Button>
               <Group gap="xs">
-                <Button variant="subtle" color="gray" size="xs" onClick={() => setWizResult(null)}>
+                <Button variant="subtle" color="gray" size="xs" onClick={() => { setWizResult(null); setWizCheck(null); }}>
                   Сбросить
                 </Button>
                 <Button
