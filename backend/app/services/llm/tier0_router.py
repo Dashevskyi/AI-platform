@@ -691,3 +691,360 @@ async def try_tier0(
         latency_ms=latency_ms,
         extracted_entities=ent_dict,
     )
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics — read-only "explain" of the Tier 0 decision for one query.
+# Mirrors the gate logic above but accumulates a structured trace instead of
+# just logging, and scans ALL tier0 tools (not only top-K) so competing /
+# duplicate regex matches are visible. Safe to call from admin UI.
+# ---------------------------------------------------------------------------
+
+def _regex_match(kw_regex: str, query: str, strip_prefixes: list[str] | None) -> tuple[bool, str | None, str | None]:
+    """Return (matched, extracted, error). Mirrors runtime: re.match + strip."""
+    if not kw_regex:
+        return False, None, "keyword_regex пуст"
+    try:
+        m = re.match(kw_regex, query, re.IGNORECASE)
+    except re.error as exc:
+        return False, None, f"ошибка regex: {exc}"
+    if not (m and m.lastindex and m.lastindex >= 1):
+        return False, None, None
+    extracted = m.group(1).strip()
+    for sp in (strip_prefixes or []):
+        if sp and extracted.lower().startswith(sp.lower()):
+            extracted = extracted[len(sp):].strip()
+            break
+    if not extracted:
+        return False, None, "пустой захват после strip_prefixes"
+    return True, extracted, None
+
+
+async def explain_tier0(
+    *,
+    tenant_id: str,
+    user_query: str,
+    db: AsyncSession,
+    embedding_model: str | None = None,
+    min_tool_score: float = 0.80,
+    max_score_gap: float = 0.15,
+    focus_tool: str | None = None,
+    run_tool: bool = False,
+) -> dict:
+    """Explain why Tier 0 would or would not fire for `user_query`, with a full
+    trace, competing-tool matches, and recommendations (esp. for `focus_tool`)."""
+    from app.models.tenant_tool import TenantTool
+    from sqlalchemy import select as _select
+
+    user_query = (user_query or "").strip()
+    steps: list[dict] = []
+    recs: list[dict] = []
+
+    entities = extract_entities(user_query)
+    ent_dict = entities.as_dict()
+
+    # ── Semantic ranking (a bit wider than runtime for visibility) ──────────
+    ranking: list[dict] = []
+    topk_ids: set = set()
+    try:
+        top = await search_tools(
+            tenant_id=tenant_id, query=user_query, db=db,
+            embedding_model=embedding_model, top_k=8,
+        )
+    except Exception as exc:
+        top = []
+        steps.append({"label": "Семантический поиск", "status": "fail",
+                      "detail": f"ошибка: {exc}"})
+    for rank, t in enumerate(top):
+        raw = float(getattr(t, "_semantic_score", 0.0) or 0.0)
+        bonus, matched = _compute_entity_boost(t, entities)
+        t0 = _extract_tier0_config(t)
+        topk_ids.add(t.id)
+        ranking.append({
+            "name": t.name,
+            "raw_score": round(raw, 3),
+            "entity_boost": round(bonus, 2),
+            "total_score": round(raw + bonus, 3),
+            "rank": rank,
+            "has_tier0": t0 is not None,
+            "required_entity": (t0 or {}).get("required_entity"),
+            "matched_entities": matched,
+        })
+
+    # ── Competing regex matches across ALL tier0 keyword_extract tools ──────
+    all_tools = (await db.execute(
+        _select(TenantTool).where(TenantTool.tenant_id == uuid_or(tenant_id))
+    )).scalars().all()
+    score_by_id = {t.id: float(getattr(t, "_semantic_score", 0.0) or 0.0) for t in top}
+    rank_by_id = {t.id: i for i, t in enumerate(top)}
+    regex_matches: list[dict] = []
+    for t in all_tools:
+        t0 = _extract_tier0_config(t)
+        if not t0 or t0.get("required_entity") != "keyword_extract":
+            continue
+        uq_lower = user_query.lower()
+        blocked = next((bk for bk in (t0.get("block_keywords") or [])
+                        if bk and bk.lower() in uq_lower), None)
+        matched, extracted, err = _regex_match(
+            t0.get("keyword_regex") or "", user_query, t0.get("strip_prefixes"))
+        if matched:
+            regex_matches.append({
+                "name": t.name,
+                "extracted": extracted,
+                "in_topk": t.id in topk_ids,
+                "rank": rank_by_id.get(t.id),
+                "score": round(score_by_id.get(t.id, 0.0), 3) if t.id in score_by_id else None,
+                "blocked_by": blocked,
+            })
+    # Order competitors by semantic score desc (None last)
+    regex_matches.sort(key=lambda r: (r["score"] is None, -(r["score"] or 0.0)))
+
+    # ── Replicate the decision ──────────────────────────────────────────────
+    decision: dict = {"fired": False, "tool": None, "path": "none",
+                      "reason": "", "extracted_keyword": None,
+                      "arguments": None, "tool_output": None, "rendered": None}
+
+    eligible = [t for t in top if _extract_tier0_config(t) is not None]
+    if not top:
+        decision["reason"] = "семантический поиск не вернул инструментов"
+        steps.append({"label": "Кандидаты", "status": "fail", "detail": "top-K пуст"})
+    elif not eligible:
+        decision["reason"] = "ни один из top-K инструментов не имеет tier0_template"
+        steps.append({"label": "Кандидаты Tier 0", "status": "fail",
+                      "detail": "в top-K нет инструментов с настроенным Tier 0"})
+    else:
+        steps.append({"label": "Кандидаты Tier 0", "status": "ok",
+                      "detail": f"{len(eligible)} из {len(top)} инструментов с tier0_template"})
+
+    REGEX_SANITY_FLOOR = 0.25
+    winner = None
+    win_t0 = None
+    win_kw = None
+    win_path = None
+
+    # Tier A — regex-first over eligible keyword_extract tools (score order)
+    boosted = []
+    for t in eligible:
+        raw = float(getattr(t, "_semantic_score", 0.0) or 0.0)
+        bonus, _ = _compute_entity_boost(t, entities)
+        boosted.append((t, raw + bonus))
+    boosted.sort(key=lambda x: -x[1])
+
+    for t, score in boosted:
+        t0 = _extract_tier0_config(t)
+        if t0.get("required_entity") != "keyword_extract":
+            continue
+        if score < REGEX_SANITY_FLOOR:
+            continue
+        uq_lower = user_query.lower()
+        blocked = next((bk for bk in (t0.get("block_keywords") or [])
+                        if bk and bk.lower() in uq_lower), None)
+        if blocked:
+            continue
+        matched, extracted, err = _regex_match(
+            t0.get("keyword_regex") or "", user_query, t0.get("strip_prefixes"))
+        if matched:
+            winner, win_t0, win_kw, win_path = t, t0, extracted, "regex-first"
+            break
+
+    # Tier B — semantic gate (only if no regex winner)
+    if winner is None and eligible:
+        boosted_full = []
+        for t in top:
+            raw = float(getattr(t, "_semantic_score", 0.0) or 0.0)
+            bonus, _ = _compute_entity_boost(t, entities)
+            boosted_full.append((t, raw + bonus))
+        boosted_full.sort(key=lambda x: -x[1])
+        elig_sorted = [(t, s) for t, s in boosted_full if _extract_tier0_config(t) is not None]
+        if elig_sorted:
+            top_tool, top_score = elig_sorted[0]
+            competitors = [s for t, s in boosted_full if t.id != top_tool.id]
+            second = competitors[0] if competitors else 0.0
+            if top_score < min_tool_score:
+                steps.append({"label": "Семантический гейт", "status": "fail",
+                              "detail": f"score топа {top_score:.3f} < порога {min_tool_score:.2f}"})
+                decision["reason"] = (f"лучший Tier 0 инструмент «{top_tool.name}» имеет score "
+                                      f"{top_score:.3f}, что ниже порога {min_tool_score:.2f}")
+            elif (top_score - second) < max_score_gap:
+                steps.append({"label": "Семантический гейт", "status": "fail",
+                              "detail": f"разрыв до 2-го мал: {top_score:.3f}−{second:.3f} < {max_score_gap:.2f}"})
+                decision["reason"] = (f"«{top_tool.name}» недостаточно оторвался от конкурента "
+                                      f"(разрыв {top_score - second:.3f} < {max_score_gap:.2f})")
+            else:
+                winner, win_t0, win_path = top_tool, _extract_tier0_config(top_tool), "semantic-gate"
+
+    if winner is not None:
+        decision["tool"] = winner.name
+        decision["path"] = win_path
+        decision["extracted_keyword"] = win_kw
+        steps.append({"label": "Выбран инструмент", "status": "ok",
+                      "detail": f"«{winner.name}» через {win_path}"
+                                + (f", извлечено: {win_kw!r}" if win_kw else "")})
+
+        # Step — assemble arguments (this is where many configs silently die)
+        attempts = win_t0.get("param_maps") if isinstance(win_t0.get("param_maps"), list) and win_t0.get("param_maps") \
+            else [win_t0.get("param_map") or {}]
+        extra = {"keyword_extract": win_kw} if win_kw else None
+        assembled = None
+        arg_fail = None
+        for ai, pmap in enumerate(attempts):
+            if not isinstance(pmap, dict):
+                continue
+            args: dict = {}
+            bad = None
+            for path, ref in pmap.items():
+                val = (_entity_value(entities, ref, extra=extra)
+                       if isinstance(ref, str) and ref.startswith("$") else ref)
+                if val is None:
+                    bad = (path, ref)
+                    break
+                _set_at_path(args, path, val)
+            if bad is None:
+                assembled = args
+                break
+            arg_fail = bad
+        if not any(isinstance(p, dict) and p for p in attempts):
+            steps.append({"label": "Сборка аргументов", "status": "fail",
+                          "detail": "param_maps не заданы — инструмент будет вызван без аргументов"})
+            decision["reason"] = "не настроен param_maps: нечего передать инструменту"
+            recs.append({"severity": "error",
+                         "text": _suggest_param_map(winner, win_t0)})
+        elif assembled is None and arg_fail is not None:
+            path, ref = arg_fail
+            steps.append({"label": "Сборка аргументов", "status": "fail",
+                          "detail": f"параметр {path} ← {ref} не разрешился (нет такой сущности в запросе)"})
+            decision["reason"] = (f"param_maps ссылается на {ref}, но в запросе нет этой сущности — "
+                                  f"аргумент {path} не собран")
+            if win_t0.get("required_entity") == "keyword_extract" and isinstance(ref, str) and "keyword_extract" not in ref:
+                recs.append({"severity": "error",
+                             "text": _suggest_param_map(winner, win_t0,
+                                     note=f"сейчас стоит {path} ← {ref}, а сущность инструмента — keyword_extract")})
+        else:
+            decision["arguments"] = assembled
+            steps.append({"label": "Сборка аргументов", "status": "ok",
+                          "detail": json.dumps(assembled, ensure_ascii=False)})
+            if run_tool:
+                try:
+                    result = await execute_tool(winner.name, assembled, winner.config_json)
+                except Exception as exc:
+                    steps.append({"label": "Вызов инструмента", "status": "fail", "detail": f"исключение: {exc}"})
+                    decision["reason"] = f"инструмент упал при вызове: {exc}"
+                    result = None
+                if result is not None:
+                    if not result.success or not result.output:
+                        steps.append({"label": "Вызов инструмента", "status": "fail",
+                                      "detail": "инструмент вернул ошибку/пусто"})
+                        decision["reason"] = "инструмент вернул неуспех или пустой ответ"
+                    else:
+                        decision["tool_output"] = (result.output or "")[:4000]
+                        steps.append({"label": "Вызов инструмента", "status": "ok",
+                                      "detail": "успех"})
+                        if win_t0.get("raw_output"):
+                            rendered = (result.output or "").strip() or None
+                        else:
+                            try:
+                                data = json.loads(result.output)
+                                rendered = _render_template(
+                                    win_t0.get("template") or "", data,
+                                    win_t0.get("required_fields") or [],
+                                    table_defs=win_t0.get("table_defs"))
+                            except (ValueError, TypeError):
+                                rendered = None
+                                steps.append({"label": "Шаблон", "status": "fail",
+                                              "detail": "вывод инструмента — не JSON"})
+                        if rendered is None:
+                            steps.append({"label": "Шаблон", "status": "fail",
+                                          "detail": "не отрендерился (проверьте поля шаблона / required_fields)"})
+                            decision["reason"] = "шаблон не отрендерился (поля не совпали с выводом)"
+                            recs.append({"severity": "warning",
+                                         "text": "Поля шаблона/required_fields не совпадают с реальным выводом "
+                                                 "инструмента — сверьте пути с JSON выше."})
+                        else:
+                            decision["rendered"] = rendered
+                            decision["fired"] = True
+                            decision["reason"] = "Tier 0 сработал бы и отрендерил ответ"
+                            steps.append({"label": "Шаблон", "status": "ok", "detail": "отрендерился"})
+            else:
+                # Not running the tool — args assembled is as far as we go.
+                decision["fired"] = True
+                decision["reason"] = "матчинг и сборка аргументов прошли (инструмент не вызывался)"
+
+    # ── Recommendations: competitors & focus tool ───────────────────────────
+    if len(regex_matches) > 1:
+        others = [r["name"] for r in regex_matches if r["name"] != (decision["tool"] or "")]
+        if others:
+            recs.append({"severity": "warning",
+                         "text": "Этот запрос ловят несколько инструментов: "
+                                 + ", ".join(f"«{n}»" for n in [decision["tool"]] + others if n)
+                                 + ". Победит инструмент с наибольшим семантическим score; "
+                                   "сузьте regex или добавьте block_keywords у лишних, чтобы избежать конфликтов."})
+
+    if focus_tool and decision.get("tool") != focus_tool:
+        ft = next((t for t in all_tools if t.name == focus_tool), None)
+        if ft is not None:
+            ft0 = _extract_tier0_config(ft)
+            if ft0 is None:
+                recs.append({"severity": "info",
+                             "text": f"«{focus_tool}» не имеет валидного tier0_template (нет template?) — "
+                                     "поэтому он не участвует в Tier 0."})
+            else:
+                in_top = ft.id in topk_ids
+                if not in_top:
+                    recs.append({"severity": "warning",
+                                 "text": f"«{focus_tool}» не попал в top-8 семантического поиска для этого запроса. "
+                                         "Tier 0 рассматривает только top-K. Уточните описание/примеры инструмента, "
+                                         "чтобы поднять его релевантность."})
+                else:
+                    matched, extracted, err = _regex_match(
+                        ft0.get("keyword_regex") or "", user_query, ft0.get("strip_prefixes"))
+                    uq_lower = user_query.lower()
+                    blocked = next((bk for bk in (ft0.get("block_keywords") or [])
+                                    if bk and bk.lower() in uq_lower), None)
+                    if ft0.get("required_entity") == "keyword_extract" and not matched:
+                        recs.append({"severity": "warning",
+                                     "text": f"regex «{focus_tool}» не совпал с этим запросом"
+                                             + (f" ({err})" if err else "") + " — доработайте паттерн через визард."})
+                    elif blocked:
+                        recs.append({"severity": "info",
+                                     "text": f"«{focus_tool}» заблокирован своим block_keyword «{blocked}» для этого запроса."})
+                    elif decision.get("tool"):
+                        recs.append({"severity": "info",
+                                     "text": f"«{focus_tool}» совпал, но выиграл «{decision['tool']}» "
+                                             "(выше семантический score). Разведите их regex/описания."})
+
+    return {
+        "tenant_tier0_enabled": True,  # caller checks; informational
+        "min_tool_score": min_tool_score,
+        "max_score_gap": max_score_gap,
+        "query": user_query,
+        "entities": ent_dict,
+        "ranking": ranking,
+        "regex_matches": regex_matches,
+        "decision": decision,
+        "steps": steps,
+        "recommendations": recs,
+        "focus_tool": focus_tool,
+    }
+
+
+def _suggest_param_map(tool, t0: dict, note: str | None = None) -> str:
+    """Heuristic: suggest a param_maps entry mapping the entity to a likely tool arg."""
+    cfg = getattr(tool, "config_json", None) or {}
+    fn = cfg.get("function") or {}
+    props = ((fn.get("parameters") or {}).get("properties") or {})
+    names = list(props.keys())
+    ent = t0.get("required_entity")
+    ref = f"${ent}" if ent else "$keyword_extract"
+    # Prefer an obvious text/search arg name.
+    pref = next((n for n in names if n.lower() in
+                 ("query", "q", "search", "keyword", "name", "text", "value")), None)
+    target = pref or (names[0] if names else "query")
+    base = (f"Добавьте param_maps: {{\"{target}\": \"{ref}\"}} "
+            f"(доступные параметры инструмента: {', '.join(names) or '—'}).")
+    return (note + ". " + base) if note else base
+
+
+def uuid_or(v):
+    """Accept str or UUID for tenant_id filters."""
+    import uuid as _uuid
+    return v if isinstance(v, _uuid.UUID) else _uuid.UUID(str(v))

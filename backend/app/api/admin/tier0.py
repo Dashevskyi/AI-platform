@@ -839,3 +839,128 @@ async def tier0_wizard(
         "validation": validation,
         "raw": raw,
     }
+
+
+# ---------------------------------------------------------------------------
+# Tier 0 test bench — explain decision + run full LLM pipeline
+# ---------------------------------------------------------------------------
+
+class Tier0ExplainRequest(BaseModel):
+    query: str
+    focus_tool: str | None = None
+    run_tool: bool = True
+
+
+@router.post("/explain")
+async def tier0_explain(
+    tenant_id: uuid.UUID,
+    body: Tier0ExplainRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Full read-only trace of the Tier 0 decision for a query: entity extraction,
+    semantic ranking, competing regex matches, the winning/blocking gate, and
+    recommendations. Optionally executes the matched tool to test rendering."""
+    config = (
+        await db.execute(
+            select(TenantShellConfig).where(TenantShellConfig.tenant_id == tenant_id)
+        )
+    ).scalar_one_or_none()
+    if not config:
+        raise HTTPException(status_code=404, detail="Tenant config not found")
+    if not body.query.strip():
+        raise HTTPException(status_code=400, detail="Пустой запрос.")
+
+    from app.services.llm.tier0_router import explain_tier0
+    trace = await explain_tier0(
+        tenant_id=str(tenant_id),
+        user_query=body.query,
+        db=db,
+        embedding_model=getattr(config, "embedding_model_name", None),
+        min_tool_score=float(getattr(config, "tier0_min_tool_score", 0.80) or 0.80),
+        max_score_gap=float(getattr(config, "tier0_max_score_gap", 0.15) or 0.15),
+        focus_tool=body.focus_tool,
+        run_tool=body.run_tool,
+    )
+    trace["tenant_tier0_enabled"] = bool(getattr(config, "tier0_enabled", False))
+    return trace
+
+
+class Tier0TestLLMRequest(BaseModel):
+    query: str
+
+
+@router.post("/test-llm")
+async def tier0_test_llm(
+    tenant_id: uuid.UUID,
+    body: Tier0TestLLMRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Run the query through the FULL pipeline (Tier 0 → LLM chain) in a scratch
+    chat that is deleted afterwards, so the admin can compare what actually serves
+    the answer (tier0 / model / tools) without polluting real chats or stats."""
+    if not body.query.strip():
+        raise HTTPException(status_code=400, detail="Пустой запрос.")
+
+    from app.models.chat import Chat
+    from app.models.message import Message
+    from app.models.llm_request_log import LLMRequestLog
+    from app.services.llm.pipeline import chat_completion
+
+    # Scratch chat — marked so it never shows in normal lists and is cleaned up.
+    chat = Chat(tenant_id=tenant_id, title="🔧 Tier0 test (scratch)")
+    db.add(chat)
+    await db.flush()
+    user_msg = Message(tenant_id=tenant_id, chat_id=chat.id, role="user",
+                       content=body.query, status="sent")
+    db.add(user_msg)
+    await db.flush()
+    await db.commit()
+
+    events: list[dict] = []
+
+    async def _sink(event_type: str, payload: dict) -> None:
+        events.append({"type": event_type, "payload": payload})
+
+    result: dict = {}
+    error: str | None = None
+    try:
+        result = await chat_completion(
+            tenant_id=str(tenant_id), chat_id=str(chat.id),
+            user_content=body.query, db=db,
+            user_message_id=str(user_msg.id), on_event=_sink,
+        )
+    except Exception as exc:
+        logger.exception("tier0_test_llm: pipeline failed")
+        error = str(exc)
+    finally:
+        # Cleanup: delete scratch chat + messages + any log rows it produced.
+        try:
+            await db.execute(
+                LLMRequestLog.__table__.delete().where(LLMRequestLog.chat_id == chat.id)
+            )
+            await db.execute(Message.__table__.delete().where(Message.chat_id == chat.id))
+            await db.execute(Chat.__table__.delete().where(Chat.id == chat.id))
+            await db.commit()
+        except Exception:
+            logger.warning("tier0_test_llm: scratch cleanup failed", exc_info=True)
+            await db.rollback()
+
+    if error:
+        raise HTTPException(status_code=502, detail=f"Ошибка пайплайна: {error}")
+
+    served_by = "tier0" if (result.get("model_name") == "tier0" or result.get("tier0")) else "llm"
+    tool_events = [e for e in events if e["type"] in ("tool_call", "tool_result", "tier0_hit")]
+    return {
+        "served_by": served_by,
+        "content": result.get("content", ""),
+        "model_name": result.get("model_name"),
+        "provider_type": result.get("provider_type"),
+        "tool_calls_count": result.get("tool_calls_count", 0),
+        "total_tokens": result.get("total_tokens"),
+        "prompt_tokens": result.get("prompt_tokens"),
+        "completion_tokens": result.get("completion_tokens"),
+        "latency_ms": result.get("latency_ms"),
+        "tier0": result.get("tier0"),
+        "reasoning": result.get("reasoning"),
+        "events": tool_events,
+    }
