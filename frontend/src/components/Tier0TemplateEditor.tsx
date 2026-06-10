@@ -50,7 +50,9 @@ import {
   IconWand,
   IconSparkles,
   IconListCheck,
+  IconBulb,
 } from '@tabler/icons-react';
+import { tier0Api, type Tier0ExplainResult, type Tier0TestLLMResult } from '../shared/api/endpoints';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -1753,6 +1755,231 @@ function TableDefsSection({ template, tableDefs, onChange }: TableDefsEditorProp
 
 // ─── Main editor ─────────────────────────────────────────────────────────────
 
+// ─── Test bench: query → Tier 0 explain trace + full LLM run ─────────────────
+function Tier0TestBench({ tenantId, toolName }: { tenantId: string; toolName?: string }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const [explain, setExplain] = useState<Tier0ExplainResult | null>(null);
+  const [llm, setLlm] = useState<Tier0TestLLMResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [llmLoading, setLlmLoading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const sevColor: Record<string, string> = { error: 'red', warning: 'orange', info: 'blue' };
+
+  async function runExplain() {
+    if (!query.trim()) return;
+    setLoading(true); setErr(null); setLlm(null);
+    try {
+      setExplain(await tier0Api.explain(tenantId, query.trim(), toolName, true));
+    } catch (e: unknown) {
+      const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+      setErr(typeof detail === 'string' ? detail : e instanceof Error ? e.message : String(e));
+    } finally { setLoading(false); }
+  }
+
+  async function runLlm() {
+    if (!query.trim()) return;
+    setLlmLoading(true); setErr(null);
+    try {
+      setLlm(await tier0Api.testLlm(tenantId, query.trim()));
+    } catch (e: unknown) {
+      const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+      setErr(typeof detail === 'string' ? detail : e instanceof Error ? e.message : String(e));
+    } finally { setLlmLoading(false); }
+  }
+
+  const d = explain?.decision;
+  const entityChips = explain
+    ? Object.entries(explain.entities).filter(([, v]) => Array.isArray(v) && v.length > 0)
+    : [];
+
+  return (
+    <Card withBorder padding="sm">
+      <Group
+        justify="space-between" align="center"
+        style={{ cursor: 'pointer' }}
+        onClick={() => setOpen((o) => !o)}
+      >
+        <Group gap="xs">
+          {open ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
+          <IconFlask size={16} />
+          <Text fw={600} size="sm">Тест и диагностика</Text>
+          <Text size="xs" c="dimmed">— проверить запрос в Tier 0 и в LLM, увидеть причину</Text>
+        </Group>
+      </Group>
+
+      <Collapse expanded={open}>
+        <Stack gap="sm" mt="sm">
+          <Group align="flex-end" gap="xs" wrap="nowrap">
+            <Textarea
+              label="Тестовый запрос"
+              placeholder="покажи свич косарева 113"
+              autosize minRows={1} maxRows={4}
+              style={{ flex: 1 }}
+              value={query}
+              onChange={(e) => setQuery(e.currentTarget.value)}
+            />
+            <Button leftSection={<IconFlask size={14} />} loading={loading}
+                    disabled={!query.trim()} onClick={runExplain}>
+              Проверить
+            </Button>
+          </Group>
+
+          {err && <Alert color="red" variant="light" p="xs"><Text size="sm">{err}</Text></Alert>}
+
+          {explain && (
+            <Stack gap="sm">
+              {!explain.tenant_tier0_enabled && (
+                <Alert color="yellow" variant="light" p="xs">
+                  <Text size="xs">Tier 0 выключен у тенанта (Настройки оболочки → Tier 0). Трейс показывает,
+                    что произошло бы, если включить.</Text>
+                </Alert>
+              )}
+
+              {/* Decision banner */}
+              <Alert
+                color={d?.fired ? 'green' : 'orange'}
+                variant="light" p="xs"
+                icon={d?.fired ? <IconCheck size={16} /> : <IconX size={16} />}
+              >
+                <Text size="sm" fw={600}>
+                  {d?.fired ? `Tier 0 сработал → ${d?.tool}` : 'Tier 0 не сработал'}
+                </Text>
+                <Text size="xs" style={{ whiteSpace: 'pre-wrap' }}>{d?.reason}</Text>
+              </Alert>
+
+              {/* Recommendations */}
+              {explain.recommendations.length > 0 && (
+                <Stack gap={4}>
+                  {explain.recommendations.map((r, i) => (
+                    <Alert key={i} color={sevColor[r.severity] || 'blue'} variant="light" p="xs"
+                           icon={<IconBulb size={15} />}>
+                      <Text size="xs">{r.text}</Text>
+                    </Alert>
+                  ))}
+                </Stack>
+              )}
+
+              {/* Entities */}
+              <Group gap="xs">
+                <Text size="xs" fw={600} c="dimmed">Сущности:</Text>
+                {entityChips.length === 0
+                  ? <Text size="xs" c="dimmed">— (тел./ip/mac/id/email/дата не найдены)</Text>
+                  : entityChips.map(([k, v]) => (
+                      <Badge key={k} size="xs" variant="light" color="teal">{k}: {(v as string[]).join(', ')}</Badge>
+                    ))}
+              </Group>
+
+              {/* Steps */}
+              {explain.steps.length > 0 && (
+                <Stack gap={2}>
+                  <Text size="xs" fw={600} c="dimmed">Шаги решения:</Text>
+                  {explain.steps.map((s, i) => (
+                    <Group key={i} gap={6} wrap="nowrap" align="flex-start">
+                      {s.status === 'ok'
+                        ? <IconCheck size={14} color="var(--mantine-color-green-6)" style={{ marginTop: 2 }} />
+                        : s.status === 'fail'
+                          ? <IconX size={14} color="var(--mantine-color-red-6)" style={{ marginTop: 2 }} />
+                          : <Text span size="xs" c="dimmed">•</Text>}
+                      <Text size="xs"><b>{s.label}:</b> {s.detail}</Text>
+                    </Group>
+                  ))}
+                </Stack>
+              )}
+
+              {/* Ranking */}
+              {explain.ranking.length > 0 && (
+                <div>
+                  <Text size="xs" fw={600} c="dimmed" mb={2}>Семантическое ранжирование (top-8):</Text>
+                  <Table fz="xs" withTableBorder verticalSpacing={2}>
+                    <Table.Thead>
+                      <Table.Tr>
+                        <Table.Th>Инструмент</Table.Th>
+                        <Table.Th style={{ width: 70 }}>score</Table.Th>
+                        <Table.Th style={{ width: 60 }}>boost</Table.Th>
+                        <Table.Th style={{ width: 60 }}>Tier 0</Table.Th>
+                      </Table.Tr>
+                    </Table.Thead>
+                    <Table.Tbody>
+                      {explain.ranking.map((r) => (
+                        <Table.Tr key={r.name}
+                                  style={r.name === toolName ? { background: 'var(--mantine-color-blue-light)' } : undefined}>
+                          <Table.Td>{r.name}{r.name === toolName && ' ⭐'}</Table.Td>
+                          <Table.Td>{r.total_score.toFixed(3)}</Table.Td>
+                          <Table.Td>{r.entity_boost ? `+${r.entity_boost.toFixed(2)}` : '—'}</Table.Td>
+                          <Table.Td>{r.has_tier0
+                            ? <Badge size="xs" color="grape" variant="light">{r.required_entity || 'Y'}</Badge>
+                            : <Text span size="xs" c="dimmed">—</Text>}</Table.Td>
+                        </Table.Tr>
+                      ))}
+                    </Table.Tbody>
+                  </Table>
+                </div>
+              )}
+
+              {/* Competing regex matches */}
+              {explain.regex_matches.length > 0 && (
+                <div>
+                  <Text size="xs" fw={600} c="dimmed" mb={2}>
+                    Конкурирующие совпадения regex ({explain.regex_matches.length}):
+                  </Text>
+                  <Stack gap={2}>
+                    {explain.regex_matches.map((r) => (
+                      <Group key={r.name} gap={6} wrap="nowrap">
+                        <Badge size="xs" variant="light"
+                               color={r.name === d?.tool ? 'green' : 'gray'}>{r.name}</Badge>
+                        <Text size="xs" c="dimmed">→ {r.extracted}</Text>
+                        {!r.in_topk && <Badge size="xs" color="orange" variant="outline">не в top-8</Badge>}
+                        {r.blocked_by && <Badge size="xs" color="red" variant="outline">block: {r.blocked_by}</Badge>}
+                      </Group>
+                    ))}
+                  </Stack>
+                </div>
+              )}
+
+              {/* Rendered output (if tool ran) */}
+              {d?.rendered && (
+                <div>
+                  <Text size="xs" fw={600} c="dimmed" mb={2}>Ответ Tier 0 (отрендерено):</Text>
+                  <Box style={{ background: 'var(--mantine-color-dark-8)', borderRadius: 6, padding: '8px 10px',
+                               fontSize: 12, whiteSpace: 'pre-wrap', maxHeight: 200, overflowY: 'auto' }}>
+                    {d.rendered}
+                  </Box>
+                </div>
+              )}
+
+              <Divider label="Полный пайплайн" labelPosition="center" />
+              <Group justify="space-between" align="center">
+                <Text size="xs" c="dimmed">Прогнать тот же запрос через всю цепочку (Tier 0 → LLM), не засоряя чаты.</Text>
+                <Button size="xs" variant="light" color="blue" leftSection={<IconWand size={13} />}
+                        loading={llmLoading} onClick={runLlm}>
+                  Прогнать через LLM
+                </Button>
+              </Group>
+
+              {llm && (
+                <Alert color={llm.served_by === 'tier0' ? 'grape' : 'blue'} variant="light" p="xs">
+                  <Group gap="xs" mb={4}>
+                    <Badge size="sm" color={llm.served_by === 'tier0' ? 'grape' : 'blue'}>
+                      {llm.served_by === 'tier0' ? 'Ответил Tier 0' : 'Ответил LLM'}
+                    </Badge>
+                    {llm.model_name && <Badge size="sm" variant="light" color="gray">{llm.model_name}</Badge>}
+                    {!!llm.tool_calls_count && <Badge size="sm" variant="light" color="cyan">tools: {llm.tool_calls_count}</Badge>}
+                    {llm.total_tokens != null && <Text size="xs" c="dimmed">{llm.total_tokens} ток.</Text>}
+                    {llm.latency_ms != null && <Text size="xs" c="dimmed">{Math.round(llm.latency_ms)} мс</Text>}
+                  </Group>
+                  <Text size="sm" style={{ whiteSpace: 'pre-wrap' }}>{llm.content}</Text>
+                </Alert>
+              )}
+            </Stack>
+          )}
+        </Stack>
+      </Collapse>
+    </Card>
+  );
+}
+
 export function Tier0TemplateEditor({ value, onChange, tenantId, toolName, toolDescription }: Tier0TemplateEditorProps) {
   const enabled = value !== null;
   const tpl = value ?? { template: '', required_entity: null, keyword_regex: null, param_maps: [], required_fields: [] };
@@ -2525,6 +2752,8 @@ export function Tier0TemplateEditor({ value, onChange, tenantId, toolName, toolD
 
       </Stack>
     </Card>
+
+    {tenantId && <Tier0TestBench tenantId={tenantId} toolName={toolName} />}
 
     {/* ── LLM Assist Modal ─────────────────────────────────────────────────── */}
     <Modal

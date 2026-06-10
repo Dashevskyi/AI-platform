@@ -630,6 +630,71 @@ export interface Tier0AuditResponse {
   total_rows_analyzed: number;
 }
 
+export interface Tier0RankRow {
+  name: string;
+  raw_score: number;
+  entity_boost: number;
+  total_score: number;
+  rank: number;
+  has_tier0: boolean;
+  required_entity: string | null;
+  matched_entities: string[];
+}
+export interface Tier0RegexMatch {
+  name: string;
+  extracted: string | null;
+  in_topk: boolean;
+  rank: number | null;
+  score: number | null;
+  blocked_by: string | null;
+}
+export interface Tier0Step {
+  label: string;
+  status: 'ok' | 'fail' | 'info';
+  detail: string;
+}
+export interface Tier0Decision {
+  fired: boolean;
+  tool: string | null;
+  path: 'regex-first' | 'semantic-gate' | 'none';
+  reason: string;
+  extracted_keyword: string | null;
+  arguments: Record<string, unknown> | null;
+  tool_output: string | null;
+  rendered: string | null;
+}
+export interface Tier0Recommendation {
+  severity: 'error' | 'warning' | 'info';
+  text: string;
+}
+export interface Tier0ExplainResult {
+  tenant_tier0_enabled: boolean;
+  min_tool_score: number;
+  max_score_gap: number;
+  query: string;
+  entities: Record<string, string[]>;
+  ranking: Tier0RankRow[];
+  regex_matches: Tier0RegexMatch[];
+  decision: Tier0Decision;
+  steps: Tier0Step[];
+  recommendations: Tier0Recommendation[];
+  focus_tool: string | null;
+}
+export interface Tier0TestLLMResult {
+  served_by: 'tier0' | 'llm';
+  content: string;
+  model_name: string | null;
+  provider_type: string | null;
+  tool_calls_count: number;
+  total_tokens: number | null;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  latency_ms: number | null;
+  tier0: unknown;
+  reasoning: string | null;
+  events: { type: string; payload: Record<string, unknown> }[];
+}
+
 export const tier0Api = {
   getStats: async (tenantId: string, days = 7, recentLimit = 20): Promise<Tier0StatsResponse> => {
     const res = await apiClient.get(`/api/admin/tenants/${tenantId}/tier0/stats`, {
@@ -642,6 +707,18 @@ export const tier0Api = {
     const res = await apiClient.get(`/api/admin/tenants/${tenantId}/tier0/audit`, {
       params: { days, min_calls: minCalls },
     });
+    return res.data;
+  },
+
+  explain: async (tenantId: string, query: string, focusTool?: string, runTool = true): Promise<Tier0ExplainResult> => {
+    const res = await apiClient.post(`/api/admin/tenants/${tenantId}/tier0/explain`, {
+      query, focus_tool: focusTool ?? null, run_tool: runTool,
+    });
+    return res.data;
+  },
+
+  testLlm: async (tenantId: string, query: string): Promise<Tier0TestLLMResult> => {
+    const res = await apiClient.post(`/api/admin/tenants/${tenantId}/tier0/test-llm`, { query });
     return res.data;
   },
 };
