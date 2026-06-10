@@ -2333,6 +2333,29 @@ export function Tier0TemplateEditor({ value, onChange, tenantId, toolName, toolD
           {/* ── Tab: Шаблон ─────────────────────────────────────────────────── */}
           <Tabs.Panel value="template" pt="sm">
             <Stack gap="sm">
+              <Alert color="blue" variant="light" p="xs" icon={<IconBulb size={15} />}>
+                <Text size="xs" fw={600} mb={4}>Путь к полю зависит от структуры ответа инструмента:</Text>
+                <Stack gap={4}>
+                  <div>
+                    <Text size="xs">
+                      • Плоский объект <Code>{`{"name": "X", "balance": 10}`}</Code> → пиши <Code>{`{name}`}</Code>, <Code>{`{balance}`}</Code>
+                    </Text>
+                  </div>
+                  <div>
+                    <Text size="xs">
+                      • Массив записей <Code>{`{"items": [{"name": "X"}]}`}</Code> → индекс в массив: <Code>{`{items.0.name}`}</Code> (НЕ <Code>{`{name}`}</Code> и НЕ <Code>{`{items.name}`}</Code>)
+                    </Text>
+                  </div>
+                  <div>
+                    <Text size="xs">
+                      • Чистый массив <Code>{`[{"name": "X"}]`}</Code> → <Code>{`{0.name}`}</Code>
+                    </Text>
+                  </div>
+                  <Text size="xs" c="dimmed">
+                    Не уверен в структуре — открой вкладку «🧪 Тест», проверь запрос: видно JSON-вывод инструмента и подсказку по путям. Индекс <Code>0</Code> = первая запись.
+                  </Text>
+                </Stack>
+              </Alert>
               <Textarea
                 label={
                   <Group gap={4} wrap="nowrap">
