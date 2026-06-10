@@ -108,6 +108,13 @@ export type Tier0Template = {
    * that Tier 0 can't handle.
    */
   block_keywords?: string[];
+  /**
+   * Rendered when the tool succeeds but returns no matching record (empty array
+   * / missing required fields). Placeholders: {keyword_extract}, {phone}, {ip},
+   * {mac}, {id}, {email}, {date}, {query}. Empty → fall through to LLM on no-match.
+   * Example: "Свич {keyword_extract} не найден в базе".
+   */
+  not_found_template?: string | null;
 };
 
 type Tier0TemplateEditorProps = {
@@ -2335,6 +2342,24 @@ export function Tier0TemplateEditor({ value, onChange, tenantId, toolName, toolD
                 ff="monospace"
                 value={tpl.template}
                 onChange={(e) => emit({ template: e.currentTarget.value })}
+              />
+
+              <Textarea
+                label={
+                  <Group gap={6} wrap="nowrap" align="center">
+                    <Text size="sm" fw={500}>Шаблон «не найдено»</Text>
+                    <Text size="xs" c="dimmed">
+                      — когда инструмент вернул пусто. Плейсхолдеры: <Code>{`{keyword_extract}`}</Code>, <Code>{`{phone}`}</Code>, <Code>{`{query}`}</Code>…
+                    </Text>
+                  </Group>
+                }
+                description="Пусто — на пустом результате уходим в LLM (как сейчас). Заполнено — Tier 0 ответит этим текстом."
+                placeholder="Свич {keyword_extract} не найден в базе"
+                autosize
+                minRows={1}
+                maxRows={4}
+                value={tpl.not_found_template ?? ''}
+                onChange={(e) => emit({ not_found_template: e.currentTarget.value || null })}
               />
 
               <Group gap="xs" style={{ cursor: 'pointer' }} onClick={() => setShowPreview((v) => !v)}>

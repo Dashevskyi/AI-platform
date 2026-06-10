@@ -816,6 +816,9 @@ Produce a `tier0_template` that:
 4. Has a `template` referencing only fields that exist in the sample output above,
    and `required_fields` listing the key paths that must be present. If no sample
    output, write a reasonable template and leave required_fields empty.
+5. Provides a `not_found_template` — a short message for when the tool returns no
+   record (empty result). Reference the query value, e.g. `{{keyword_extract}}` /
+   `{{phone}}` / `{{query}}`. Write it in the language of the admin's examples.
 
 Respond ONLY with a JSON object (no markdown wrapper) in exactly this format:
 {{
@@ -826,7 +829,8 @@ Respond ONLY with a JSON object (no markdown wrapper) in exactly this format:
     "block_keywords": [...],
     "param_maps": [{{"<tool_param>": "$<entity>"}}],
     "required_fields": [...],
-    "template": "..."
+    "template": "...",
+    "not_found_template": "..."
   }},
   "explanation": "Brief explanation in the same language as the admin's examples"
 }}"""

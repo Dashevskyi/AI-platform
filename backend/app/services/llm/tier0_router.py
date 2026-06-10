@@ -173,11 +173,13 @@ class _SafeFormatter(string.Formatter):
 
     MISSING = object()
 
-    def __init__(self, table_defs: dict | None = None):
+    def __init__(self, table_defs: dict | None = None, missing_repr: str = "{MISSING}"):
         super().__init__()
         # table_defs: {field_name: {"columns": [{"field":…,"label":…,"values":…,…}]}}
         self._table_defs: dict = table_defs or {}
         self._current_field: str = ""  # set by get_field before format_field
+        self._missing_repr = missing_repr
+        self.missing_count = 0  # how many placeholders resolved to MISSING
 
     def get_field(self, field_name: str, args, kwargs):
         self._current_field = field_name
@@ -256,7 +258,8 @@ class _SafeFormatter(string.Formatter):
     # ------------------------------------------------------------------
     def format_field(self, value, format_spec):
         if value is self.MISSING:
-            return "{MISSING}"
+            self.missing_count += 1
+            return self._missing_repr
 
         # phones → split concatenated 10-char phone numbers
         if format_spec == "phones":
@@ -332,9 +335,56 @@ def _render_template(
             logger.info("[tier0] required field '%s' missing — falling back", path)
             return None
     try:
-        return _SafeFormatter(table_defs=table_defs).format(template, _root=data)
+        fmt = _SafeFormatter(table_defs=table_defs)
+        out = fmt.format(template, _root=data)
     except Exception:
         logger.exception("[tier0] template render failed")
+        return None
+    # Never emit half-rendered output with literal {MISSING} placeholders — that
+    # means the data we expected wasn't there. Signal failure so the caller can
+    # use not_found_template or fall through to the LLM.
+    if fmt.missing_count and "{MISSING}" in out:
+        logger.info("[tier0] template had %d missing field(s) — treating as not rendered", fmt.missing_count)
+        return None
+    return out
+
+
+def _result_is_empty(data, required_fields: list[str]) -> bool:
+    """Heuristic: did the tool succeed but return *no matching record*? Used to
+    pick not_found_template over the normal template. Domain-agnostic."""
+    if required_fields:
+        if any(_get_at_path(data, p) in (None, "") for p in required_fields):
+            return True
+    if isinstance(data, list):
+        return len(data) == 0
+    if isinstance(data, dict):
+        for key in ("items", "results", "data", "rows", "records", "list", "result", "matches"):
+            v = data.get(key)
+            if isinstance(v, list):
+                return len(v) == 0
+        return len(data) == 0
+    return data in (None, "", [])
+
+
+def _render_not_found(template: str, entities: ExtractedEntities,
+                      keyword_extracted: str | None, user_query: str) -> str | None:
+    """Render the 'no record found' template. Placeholders reference the query
+    and extracted entities: {keyword_extract}, {phone}, {ip}, {mac}, {id},
+    {email}, {date}, {query}. Unknown placeholders render empty (not {MISSING})."""
+    root = {
+        "keyword_extract": keyword_extracted or "",
+        "query": user_query,
+        "phone": (entities.phones or [""])[0],
+        "mac": (entities.macs or [""])[0],
+        "ip": (entities.ips or [""])[0],
+        "id": (entities.numeric_ids or [""])[0],
+        "email": (entities.emails or [""])[0],
+        "date": (entities.dates or [""])[0],
+    }
+    try:
+        return (_SafeFormatter(missing_repr="").format(template, _root=root)).strip() or None
+    except Exception:
+        logger.exception("[tier0] not_found_template render failed")
         return None
 
 
@@ -660,8 +710,20 @@ async def try_tier0(
             except (ValueError, TypeError):
                 logger.info("[tier0] attempt %d: non-JSON output", attempt_idx)
                 continue
-            rendered = _render_template(template, data, required_fields,
-                                        table_defs=t0_cfg.get("table_defs"))
+            # No matching record? Use not_found_template (if configured) instead
+            # of either emitting half-rendered {MISSING} junk or bailing to the LLM.
+            not_found_tpl = t0_cfg.get("not_found_template")
+            if _result_is_empty(data, required_fields):
+                rendered = (
+                    _render_not_found(not_found_tpl, entities, keyword_extracted, user_query)
+                    if not_found_tpl else None
+                )
+            else:
+                rendered = _render_template(template, data, required_fields,
+                                            table_defs=t0_cfg.get("table_defs"))
+                # Incomplete render (missing fields) → not_found if available.
+                if rendered is None and not_found_tpl:
+                    rendered = _render_not_found(not_found_tpl, entities, keyword_extracted, user_query)
         if rendered is not None:
             if attempt_idx > 0:
                 logger.info(
@@ -956,31 +1018,55 @@ async def explain_tier0(
                         decision["tool_output"] = (result.output or "")[:4000]
                         steps.append({"label": "Вызов инструмента", "status": "ok",
                                       "detail": "успех"})
+                        not_found_tpl = win_t0.get("not_found_template")
+                        is_empty = False
                         if win_t0.get("raw_output"):
                             rendered = (result.output or "").strip() or None
                         else:
                             try:
                                 data = json.loads(result.output)
-                                rendered = _render_template(
-                                    win_t0.get("template") or "", data,
-                                    win_t0.get("required_fields") or [],
-                                    table_defs=win_t0.get("table_defs"))
                             except (ValueError, TypeError):
+                                data = None
                                 rendered = None
                                 steps.append({"label": "Шаблон", "status": "fail",
                                               "detail": "вывод инструмента — не JSON"})
+                            else:
+                                is_empty = _result_is_empty(data, win_t0.get("required_fields") or [])
+                                if is_empty:
+                                    rendered = (
+                                        _render_not_found(not_found_tpl, entities, win_kw, user_query)
+                                        if not_found_tpl else None
+                                    )
+                                else:
+                                    rendered = _render_template(
+                                        win_t0.get("template") or "", data,
+                                        win_t0.get("required_fields") or [],
+                                        table_defs=win_t0.get("table_defs"))
+                                    if rendered is None and not_found_tpl:
+                                        rendered = _render_not_found(not_found_tpl, entities, win_kw, user_query)
+                                        is_empty = True
                         if rendered is None:
-                            steps.append({"label": "Шаблон", "status": "fail",
-                                          "detail": "не отрендерился (проверьте поля шаблона / required_fields)"})
-                            decision["reason"] = "шаблон не отрендерился (поля не совпали с выводом)"
-                            recs.append({"severity": "warning",
-                                         "text": "Поля шаблона/required_fields не совпадают с реальным выводом "
-                                                 "инструмента — сверьте пути с JSON выше."})
+                            if is_empty and not not_found_tpl:
+                                steps.append({"label": "Результат", "status": "fail",
+                                              "detail": "инструмент вернул пусто (запись не найдена)"})
+                                decision["reason"] = "запись не найдена, и не задан not_found_template — уход в LLM"
+                                recs.append({"severity": "info",
+                                             "text": "Добавьте «Шаблон: не найдено», чтобы Tier 0 отвечал, например, "
+                                                     "«… не найдено», вместо ухода в LLM на пустом результате."})
+                            else:
+                                steps.append({"label": "Шаблон", "status": "fail",
+                                              "detail": "не отрендерился (проверьте поля шаблона / required_fields)"})
+                                decision["reason"] = "шаблон не отрендерился (поля не совпали с выводом)"
+                                recs.append({"severity": "warning",
+                                             "text": "Поля шаблона/required_fields не совпадают с реальным выводом "
+                                                     "инструмента — сверьте пути с JSON выше."})
                         else:
                             decision["rendered"] = rendered
                             decision["fired"] = True
-                            decision["reason"] = "Tier 0 сработал бы и отрендерил ответ"
-                            steps.append({"label": "Шаблон", "status": "ok", "detail": "отрендерился"})
+                            decision["reason"] = ("запись не найдена → ответ по not_found_template"
+                                                  if is_empty else "Tier 0 сработал бы и отрендерил ответ")
+                            steps.append({"label": "Шаблон", "status": "ok",
+                                          "detail": "ответ «не найдено»" if is_empty else "отрендерился"})
             else:
                 # Not running the tool — args assembled is as far as we go.
                 decision["fired"] = True
