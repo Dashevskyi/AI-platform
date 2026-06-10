@@ -1025,22 +1025,6 @@ async def _chat_completion_inner(self) -> dict:
         temperature; tool rounds drop to the deterministic floor."""
         return tool_routing_temperature if td else effective_temperature
 
-    def _estimate_round_tokens(msgs: list[dict], tool_defs_arg: list[dict] | None) -> int:
-        """Approx prompt size at the moment of an LLM call. Used by the
-        auto-router to decide whether to escalate to the heavy model."""
-        parts: list[str] = []
-        for m in msgs:
-            parts.append(_message_content_text(m.get("content", "")))
-            tcs = m.get("tool_calls") or []
-            if tcs:
-                try:
-                    parts.append(json.dumps(tcs, ensure_ascii=False))
-                except Exception:
-                    pass
-        body = "\n".join(parts)
-        tools_text = json.dumps(tool_defs_arg, ensure_ascii=False) if tool_defs_arg else ""
-        return _ct(body) + _ct(tools_text)
-
     async def _route_for_round(round_num: int) -> None:
         """If we're in auto mode, ask the router whether to swap models for
         this round. Mutates `provider`/`model_name` via the resolved holder
@@ -2936,6 +2920,23 @@ def _format_current_user_request(user_content: str, *, for_tools: bool) -> str:
         "Нужно ответить и при необходимости вызывать tools только по запросу ниже.\n"
         f"{user_content}"
     )
+
+
+def _estimate_round_tokens(msgs: list[dict], tool_defs_arg: list[dict] | None) -> int:
+    """Approx prompt size at the moment of an LLM call — used by the auto-router
+    to decide whether to escalate to the heavy model. Pure."""
+    parts: list[str] = []
+    for m in msgs:
+        parts.append(_message_content_text(m.get("content", "")))
+        tcs = m.get("tool_calls") or []
+        if tcs:
+            try:
+                parts.append(json.dumps(tcs, ensure_ascii=False))
+            except Exception:
+                pass
+    body = "\n".join(parts)
+    tools_text = json.dumps(tool_defs_arg, ensure_ascii=False) if tool_defs_arg else ""
+    return _ct(body) + _ct(tools_text)
 
 
 def _message_content_text(content) -> str:
