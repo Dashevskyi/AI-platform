@@ -35,24 +35,29 @@ class RecordingProvider(BaseProvider):
         return ["mock"]
 
 
-def _seed(db, tenant_id, chat_id, suffix, system_prompt):
-    return [
-        db.execute(text(
-            "INSERT INTO tenants (id,name,slug,is_active,created_at,updated_at) "
-            "VALUES (:id,:n,:s,true,now(),now())"), {"id": tenant_id, "n": f"ph-{suffix}", "s": f"ph-{suffix}"}),
-        db.execute(text(
-            "INSERT INTO tenant_shell_configs "
-            "(id,tenant_id,provider_type,model_name,temperature,max_context_messages,max_tokens,"
-            " memory_enabled,knowledge_base_enabled,tools_policy,context_mode,system_prompt,created_at,updated_at) "
-            "VALUES (gen_random_uuid(),:t,'openai_compatible','mock',0.2,20,256,"
-            " false,false,'never','recent_only',:sp,now(),now())"), {"t": tenant_id, "sp": system_prompt}),
-        db.execute(text(
-            "INSERT INTO chats (id,tenant_id,title,status,created_at,updated_at) "
-            "VALUES (:id,:t,'ph','active',now(),now())"), {"id": chat_id, "t": tenant_id}),
-    ]
+async def _seed(db, tenant_id, chat_id, suffix, system_prompt, *, memory_enabled=False, pinned_memory=None):
+    await db.execute(text(
+        "INSERT INTO tenants (id,name,slug,is_active,created_at,updated_at) "
+        "VALUES (:id,:n,:s,true,now(),now())"), {"id": tenant_id, "n": f"ph-{suffix}", "s": f"ph-{suffix}"})
+    await db.execute(text(
+        "INSERT INTO tenant_shell_configs "
+        "(id,tenant_id,provider_type,model_name,temperature,max_context_messages,max_tokens,"
+        " memory_enabled,knowledge_base_enabled,tools_policy,context_mode,system_prompt,created_at,updated_at) "
+        "VALUES (gen_random_uuid(),:t,'openai_compatible','mock',0.2,20,256,"
+        " :mem,false,'never','recent_only',:sp,now(),now())"),
+        {"t": tenant_id, "sp": system_prompt, "mem": memory_enabled})
+    await db.execute(text(
+        "INSERT INTO chats (id,tenant_id,title,status,created_at,updated_at) "
+        "VALUES (:id,:t,'ph','active',now(),now())"), {"id": chat_id, "t": tenant_id})
+    if pinned_memory:
+        await db.execute(text(
+            "INSERT INTO memory_entries (id,tenant_id,chat_id,memory_type,content,priority,is_pinned,created_at,updated_at) "
+            "VALUES (gen_random_uuid(),:t,NULL,'long_term',:c,100,true,now(),now())"),
+            {"t": tenant_id, "c": pinned_memory})
 
 
-def run_pipeline(event_loop, user_content, *, system_prompt="Ты — тестовый ассистент.", reply="Готовый ответ."):
+def run_pipeline(event_loop, user_content, *, system_prompt="Ты — тестовый ассистент.", reply="Готовый ответ.",
+                 memory_enabled=False, pinned_memory=None):
     """Seed a tenant+chat, run chat_completion with a recording provider, clean up.
     Returns (result_dict, provider)."""
     tid, cid = uuid.uuid4(), uuid.uuid4()
@@ -68,8 +73,7 @@ def run_pipeline(event_loop, user_content, *, system_prompt="Ты — тесто
 
     async def _scenario():
         async with async_session() as db:
-            for stmt in _seed(db, tid, cid, suffix, system_prompt):
-                await stmt
+            await _seed(db, tid, cid, suffix, system_prompt, memory_enabled=memory_enabled, pinned_memory=pinned_memory)
             await db.commit()
         try:
             async with async_session() as db:
@@ -78,6 +82,7 @@ def run_pipeline(event_loop, user_content, *, system_prompt="Ты — тесто
             async with async_session() as db:
                 await db.execute(text("DELETE FROM llm_request_logs WHERE tenant_id=:t"), {"t": tid})
                 await db.execute(text("DELETE FROM background_jobs WHERE tenant_id=:t"), {"t": tid})
+                await db.execute(text("DELETE FROM memory_entries WHERE tenant_id=:t"), {"t": tid})
                 await db.execute(text("DELETE FROM messages WHERE tenant_id=:t"), {"t": tid})
                 await db.execute(text("DELETE FROM chats WHERE id=:c"), {"c": cid})
                 await db.execute(text("DELETE FROM tenant_shell_configs WHERE tenant_id=:t"), {"t": tid})
@@ -115,3 +120,14 @@ def test_response_payload_shape(event_loop):
     result, _provider = run_pipeline(event_loop, "Вопрос")
     for key in ("content", "prompt_tokens", "completion_tokens", "total_tokens", "model_name", "correlation_id"):
         assert key in result, f"missing {key} in pipeline result"
+
+
+def test_pinned_memory_reaches_prompt(event_loop):
+    """BLOCK-MEMORY-B: a pinned tenant-wide memory fact is injected into the
+    system prompt (no embedding search needed for pinned entries)."""
+    _result, provider = run_pipeline(
+        event_loop, "Любой вопрос",
+        memory_enabled=True, pinned_memory="ВАЖНЫЙ-ФАКТ-О-КЛИЕНТЕ-777",
+    )
+    system_text = provider.calls[0]["messages"][0]["content"]
+    assert "ВАЖНЫЙ-ФАКТ-О-КЛИЕНТЕ-777" in system_text

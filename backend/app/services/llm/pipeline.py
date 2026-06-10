@@ -190,6 +190,21 @@ def _compute_context_breakdown(messages, config, memory_entries, kb_chunks, tool
     return breakdown
 
 
+def _build_pinned_memory_block(memory_entries) -> str | None:
+    """The '## Закреплённая память' system block. Only PINNED entries land in the
+    prompt — non-pinned stay out and are reachable via the recall_memory tool, so
+    the block doesn't balloon (and attention isn't self-poisoned) as memory grows."""
+    pinned_only = [m for m in memory_entries if getattr(m, "is_pinned", False)]
+    if not pinned_only:
+        return None
+    mem_lines = [f"- [{m.memory_type}] {m.content}" for m in pinned_only]
+    return (
+        "## Закреплённая память (always-on facts)\n"
+        + "\n".join(mem_lines)
+        + "\n\nДля поиска по остальной памяти — вызови tool `recall_memory(query=...)`."
+    )
+
+
 def _build_datetime_block(config, correlation_id: str) -> str | None:
     """The '## Текущая дата и время' system block, in the tenant's timezone.
     Non-fatal: returns None if the date can't be computed. Pure (no DB)."""
@@ -966,22 +981,10 @@ async def _chat_completion_inner(
     _memory_block_text: str | None = None
     _kb_block_text: str | None = None
     _attachments_block_text: str | None = None
-    if True:  # === [BLOCK-MEMORY-B] PINNED memory entries from DB ===
-        # Only pinned entries land here — they're explicit "always remember
-        # this" facts. Non-pinned entries stay out of the system prompt and
-        # are reachable on-demand via the `recall_memory` tool (semantic
-        # search). This keeps the system block from ballooning as memory
-        # grows, and avoids the self-poisoning risk where every save_memory
-        # entry permanently lives in attention.
-        pinned_only = [m for m in memory_entries if getattr(m, "is_pinned", False)]
-        if pinned_only:
-            mem_lines = [f"- [{m.memory_type}] {m.content}" for m in pinned_only]
-            _memory_block_text = (
-                "## Закреплённая память (always-on facts)\n"
-                + "\n".join(mem_lines)
-                + "\n\nДля поиска по остальной памяти — вызови tool `recall_memory(query=...)`."
-            )
-            _sys("BLOCK-MEMORY-B pinned facts", _memory_block_text)
+    # === [BLOCK-MEMORY-B] PINNED memory entries from DB ===
+    _memory_block_text = _build_pinned_memory_block(memory_entries)
+    if _memory_block_text:
+        _sys("BLOCK-MEMORY-B pinned facts", _memory_block_text)
 
     if _kb_inject_auto:  # === [BLOCK-KB] knowledge base excerpts ===
         # Semantic top-K KB chunks for the current user message. These are
