@@ -661,7 +661,25 @@ can't handle deterministically (filters, ranges, lists, conjunctions like "and"/
 
 ### `template`
 A Markdown string rendered from the tool's JSON output using `{field.path}` placeholders.
-Reference ONLY field paths that actually exist in the sample output (when provided).
+Reference ONLY field paths that exist in the sample output (when provided).
+For arrays, use an explicit numeric index: if the output is `{"items": [{"name": ...}]}`,
+write `{items.0.name}` (NOT `{items.name}`). The same applies to `required_fields`.
+
+### `param_maps`
+**Critical — without this the tool is called with NO arguments and Tier 0 silently
+fails.** A list of attempts; each attempt is an object mapping a tool parameter path
+to a value. Use `$<entity>` to inject the extracted entity:
+- `$keyword_extract` — the text captured by `keyword_regex`
+- `$phone`, `$email`, `$ip`, `$mac`, `$id`, `$date` — the matched built-in entity
+- a plain string is a literal value
+Dotted paths set nested params: `{"filters.phone": "$phone"}` → `{"filters": {"phone": ...}}`.
+A `|`-suffix runs a format pipeline, e.g. `"$phone|re_sub:^\\\\+38=>"` strips a +38 prefix.
+The param path MUST be one of the tool's actual parameters (listed under Tool context).
+List several attempts only if the first might miss; usually one attempt is enough.
+
+### `required_fields`
+List of dotted paths in the tool output that MUST be non-null for Tier 0 to render
+(otherwise it falls through to the LLM). Reference REAL paths from the sample output.
 
 ## Examples (domain-neutral)
 
@@ -673,9 +691,11 @@ Queries like "find customer John Smith", "lookup user Jane Doe":
   "keyword_regex": "(?:find|lookup|search)\\\\s+(?:customer|user|client)\\\\s+([\\\\w\\\\s\\\\-\\\\.]+?)(?:$|[?!.,;])",
   "strip_prefixes": [],
   "block_keywords": ["all", "list", "between", "and"],
+  "param_maps": [{"query": "$keyword_extract"}],
   "template": "**{name}** — {email}\\n{status}"
 }
 ```
+(here the tool has a `query` parameter; the captured text is passed into it.)
 
 ### B — numeric id (built-in entity)
 Queries like "status of order 10254", "ticket 8841":
@@ -685,6 +705,7 @@ Queries like "status of order 10254", "ticket 8841":
   "keyword_regex": null,
   "strip_prefixes": [],
   "block_keywords": [],
+  "param_maps": [{"filters.id": "$id"}],
   "template": "Order **{id}**: {status}\\nTotal: {total}"
 }
 ```
@@ -696,13 +717,41 @@ Queries like "status of order 10254", "ticket 8841":
   "keyword_regex": null,
   "strip_prefixes": [],
   "block_keywords": [],
+  "param_maps": [{"email": "$email"}],
   "template": "**{user.name}** ({user.email}) — {user.role}"
 }
 ```
 """
 
 
-def _build_tier0_wizard_prompt(body: Tier0WizardRequest, failures: list[dict] | None) -> str:
+def _tool_param_lines(param_schema: dict | None) -> str:
+    """Render a tool's parameter schema as a compact bullet list for the prompt."""
+    if not isinstance(param_schema, dict):
+        return "(schema unavailable — infer a sensible param name like `query`)"
+    props = param_schema.get("properties")
+    if not isinstance(props, dict) or not props:
+        return "(no parameters)"
+    required = set(param_schema.get("required") or [])
+    out = []
+    for name, spec in props.items():
+        spec = spec if isinstance(spec, dict) else {}
+        typ = spec.get("type", "any")
+        desc = spec.get("description", "")
+        req = " (required)" if name in required else ""
+        line = f"  - `{name}`: {typ}{req}"
+        if desc:
+            line += f" — {desc[:120]}"
+        out.append(line)
+        # one nesting level for object params (so filters.* paths are visible)
+        sub = spec.get("properties")
+        if isinstance(sub, dict):
+            for sn in sub:
+                out.append(f"      - `{name}.{sn}`")
+    return "\n".join(out)
+
+
+def _build_tier0_wizard_prompt(body: Tier0WizardRequest, failures: list[dict] | None,
+                               param_schema: dict | None = None) -> str:
     base = _TIER0_WIZARD_GUIDE
 
     pos = "\n".join(f"  - {q}" for q in body.positive_examples if q.strip()) or "  (none)"
@@ -735,6 +784,9 @@ def _build_tier0_wizard_prompt(body: Tier0WizardRequest, failures: list[dict] | 
 **Tool name:** {body.tool_name}
 **Tool description:** {body.tool_description}
 
+**Tool parameters (use these exact paths in `param_maps`):**
+{_tool_param_lines(param_schema)}
+
 ## Wizard inputs
 
 The admin provided concrete examples instead of a single description. Design the
@@ -759,8 +811,11 @@ Produce a `tier0_template` that:
    a `keyword_regex` with ONE capture group that works for ALL positives).
 2. Does NOT match any negative example (use `block_keywords` for surface-similar
    queries that carry extra conditions).
-3. Has a `template` referencing only fields that exist in the sample output above
-   (if provided). If no sample output, write a reasonable template and note it.
+3. **Sets `param_maps`** so the extracted entity is passed into a REAL tool parameter
+   from the list above (this is mandatory — a config without param_maps cannot fire).
+4. Has a `template` referencing only fields that exist in the sample output above,
+   and `required_fields` listing the key paths that must be present. If no sample
+   output, write a reasonable template and leave required_fields empty.
 
 Respond ONLY with a JSON object (no markdown wrapper) in exactly this format:
 {{
@@ -769,6 +824,8 @@ Respond ONLY with a JSON object (no markdown wrapper) in exactly this format:
     "keyword_regex": "...",
     "strip_prefixes": [...],
     "block_keywords": [...],
+    "param_maps": [{{"<tool_param>": "$<entity>"}}],
+    "required_fields": [...],
     "template": "..."
   }},
   "explanation": "Brief explanation in the same language as the admin's examples"
@@ -795,6 +852,18 @@ async def tier0_wizard(
     if not any(q.strip() for q in body.positive_examples):
         raise HTTPException(status_code=400, detail="Нужен хотя бы один пример-запрос.")
 
+    # Tool parameter schema — so the LLM can wire param_maps to real params.
+    param_schema: dict | None = None
+    if body.tool_name:
+        from app.models.tenant_tool import TenantTool
+        tool = (await db.execute(
+            select(TenantTool).where(TenantTool.tenant_id == tenant_id,
+                                     TenantTool.name == body.tool_name)
+        )).scalars().first()
+        if tool and isinstance(tool.config_json, dict):
+            fn = tool.config_json.get("function") or {}
+            param_schema = fn.get("parameters") or tool.config_json.get("parameters")
+
     # Detect a refine pass: caller passes current_tier0 = the previous suggestion
     # and we re-validate it to tell the LLM what to fix.
     failures: list[dict] | None = None
@@ -812,7 +881,7 @@ async def tier0_wizard(
         shell_config=config,
     )
 
-    system_prompt = _build_tier0_wizard_prompt(body, failures)
+    system_prompt = _build_tier0_wizard_prompt(body, failures, param_schema)
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": "Сгенерируй tier0_template по примерам выше."},
