@@ -17,14 +17,20 @@ from app.services.llm.model_resolver import ResolvedModel
 
 
 class RecordingProvider(BaseProvider):
-    """Captures the messages it's asked to complete; returns a canned reply."""
-    def __init__(self, reply="Готовый ответ."):
+    """Captures the messages it's asked to complete and returns scripted replies.
+
+    `scripted` is a list of LLMResponse returned one per call (e.g. a tool_call
+    turn followed by a final answer); once exhausted it falls back to `reply`."""
+    def __init__(self, reply="Готовый ответ.", scripted=None):
         super().__init__("http://mock.test")
         self.calls = []
         self._reply = reply
+        self._scripted = list(scripted or [])
 
     async def chat_completion(self, messages, model, temperature=0.7, max_tokens=4096, tools=None, **kw):
         self.calls.append({"messages": messages, "model": model, "tools": tools})
+        if self._scripted:
+            return self._scripted.pop(0)
         return LLMResponse(content=self._reply, prompt_tokens=10, completion_tokens=5, total_tokens=15,
                            finish_reason="stop", tool_calls=None)
 
@@ -35,7 +41,8 @@ class RecordingProvider(BaseProvider):
         return ["mock"]
 
 
-async def _seed(db, tenant_id, chat_id, suffix, system_prompt, *, memory_enabled=False, pinned_memory=None):
+async def _seed(db, tenant_id, chat_id, suffix, system_prompt, *, memory_enabled=False, pinned_memory=None,
+                tools_policy="never"):
     await db.execute(text(
         "INSERT INTO tenants (id,name,slug,is_active,created_at,updated_at) "
         "VALUES (:id,:n,:s,true,now(),now())"), {"id": tenant_id, "n": f"ph-{suffix}", "s": f"ph-{suffix}"})
@@ -44,8 +51,8 @@ async def _seed(db, tenant_id, chat_id, suffix, system_prompt, *, memory_enabled
         "(id,tenant_id,provider_type,model_name,temperature,max_context_messages,max_tokens,"
         " memory_enabled,knowledge_base_enabled,tools_policy,context_mode,system_prompt,created_at,updated_at) "
         "VALUES (gen_random_uuid(),:t,'openai_compatible','mock',0.2,20,256,"
-        " :mem,false,'never','recent_only',:sp,now(),now())"),
-        {"t": tenant_id, "sp": system_prompt, "mem": memory_enabled})
+        " :mem,false,:tp,'recent_only',:sp,now(),now())"),
+        {"t": tenant_id, "sp": system_prompt, "mem": memory_enabled, "tp": tools_policy})
     await db.execute(text(
         "INSERT INTO chats (id,tenant_id,title,status,created_at,updated_at) "
         "VALUES (:id,:t,'ph','active',now(),now())"), {"id": chat_id, "t": tenant_id})
@@ -57,23 +64,25 @@ async def _seed(db, tenant_id, chat_id, suffix, system_prompt, *, memory_enabled
 
 
 def run_pipeline(event_loop, user_content, *, system_prompt="Ты — тестовый ассистент.", reply="Готовый ответ.",
-                 memory_enabled=False, pinned_memory=None):
+                 memory_enabled=False, pinned_memory=None, tools_policy="never", supports_tools=False,
+                 scripted=None):
     """Seed a tenant+chat, run chat_completion with a recording provider, clean up.
     Returns (result_dict, provider)."""
     tid, cid = uuid.uuid4(), uuid.uuid4()
     suffix = uuid.uuid4().hex[:8]
-    provider = RecordingProvider(reply=reply)
+    provider = RecordingProvider(reply=reply, scripted=scripted)
 
     async def fake_resolve(tenant_id, user_q, db, shell_config):
         return ResolvedModel(provider=provider, provider_type="openai_compatible", model_name="mock",
-                             supports_tools=False, supports_vision=False, source="shell_config")
+                             supports_tools=supports_tools, supports_vision=False, source="shell_config")
 
     orig = pl.resolve_model
     pl.resolve_model = fake_resolve
 
     async def _scenario():
         async with async_session() as db:
-            await _seed(db, tid, cid, suffix, system_prompt, memory_enabled=memory_enabled, pinned_memory=pinned_memory)
+            await _seed(db, tid, cid, suffix, system_prompt, memory_enabled=memory_enabled,
+                        pinned_memory=pinned_memory, tools_policy=tools_policy)
             await db.commit()
         try:
             async with async_session() as db:
@@ -82,6 +91,7 @@ def run_pipeline(event_loop, user_content, *, system_prompt="Ты — тесто
             async with async_session() as db:
                 await db.execute(text("DELETE FROM llm_request_logs WHERE tenant_id=:t"), {"t": tid})
                 await db.execute(text("DELETE FROM background_jobs WHERE tenant_id=:t"), {"t": tid})
+                await db.execute(text("DELETE FROM artifacts WHERE tenant_id=:t"), {"t": tid})
                 await db.execute(text("DELETE FROM memory_entries WHERE tenant_id=:t"), {"t": tid})
                 await db.execute(text("DELETE FROM messages WHERE tenant_id=:t"), {"t": tid})
                 await db.execute(text("DELETE FROM chats WHERE id=:c"), {"c": cid})
@@ -131,3 +141,30 @@ def test_pinned_memory_reaches_prompt(event_loop):
     )
     system_text = provider.calls[0]["messages"][0]["content"]
     assert "ВАЖНЫЙ-ФАКТ-О-КЛИЕНТЕ-777" in system_text
+
+
+def test_tool_loop_executes_then_finalizes(event_loop):
+    """Cover the tool-execution loop: the model emits a `plan` tool_call, the
+    loop runs it and feeds the result back, the model then returns a final
+    answer. Pins: two provider calls, a tool result reaches round 2, and the
+    final content is returned."""
+    plan_call = LLMResponse(
+        content="",
+        tool_calls=[{"id": "c1", "type": "function",
+                     "function": {"name": "plan", "arguments": {"steps": ["шаг один", "шаг два"]}}}],
+        finish_reason="tool_calls",
+    )
+    final = LLMResponse(content="Готово, выполнил план.", prompt_tokens=10, completion_tokens=5, total_tokens=15,
+                        finish_reason="stop")
+    result, provider = run_pipeline(
+        event_loop, "Сделай A потом B",
+        tools_policy="always", supports_tools=True, scripted=[plan_call, final],
+    )
+    # ≥2 calls: tool round + final round (a 3rd call is the auto-title summary).
+    assert len(provider.calls) >= 2
+    assert provider.calls[0]["tools"], "tools should be offered on the first round"
+    assert result["content"] == "Готово, выполнил план."
+    assert result.get("tool_calls_count", 0) >= 1
+    # The plan tool result was fed back into the second (final) call's messages.
+    second_round_msgs = provider.calls[1]["messages"]
+    assert any(m.get("role") == "tool" or "План" in str(m.get("content", "")) for m in second_round_msgs)
