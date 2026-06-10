@@ -719,11 +719,12 @@ async def try_tier0(
                     if not_found_tpl else None
                 )
             else:
+                # Data IS present — render the normal template. If it fails here
+                # the template paths are wrong (a config error), NOT a "not found":
+                # fall through to the LLM so the misconfig surfaces instead of a
+                # misleading "не найдено" on a record that actually exists.
                 rendered = _render_template(template, data, required_fields,
                                             table_defs=t0_cfg.get("table_defs"))
-                # Incomplete render (missing fields) → not_found if available.
-                if rendered is None and not_found_tpl:
-                    rendered = _render_not_found(not_found_tpl, entities, keyword_extracted, user_query)
         if rendered is not None:
             if attempt_idx > 0:
                 logger.info(
@@ -1038,13 +1039,12 @@ async def explain_tier0(
                                         if not_found_tpl else None
                                     )
                                 else:
+                                    # Data present but template failed → wrong
+                                    # paths (config error), not a "not found".
                                     rendered = _render_template(
                                         win_t0.get("template") or "", data,
                                         win_t0.get("required_fields") or [],
                                         table_defs=win_t0.get("table_defs"))
-                                    if rendered is None and not_found_tpl:
-                                        rendered = _render_not_found(not_found_tpl, entities, win_kw, user_query)
-                                        is_empty = True
                         if rendered is None:
                             if is_empty and not not_found_tpl:
                                 steps.append({"label": "Результат", "status": "fail",
@@ -1056,10 +1056,25 @@ async def explain_tier0(
                             else:
                                 steps.append({"label": "Шаблон", "status": "fail",
                                               "detail": "не отрендерился (проверьте поля шаблона / required_fields)"})
-                                decision["reason"] = "шаблон не отрендерился (поля не совпали с выводом)"
-                                recs.append({"severity": "warning",
-                                             "text": "Поля шаблона/required_fields не совпадают с реальным выводом "
-                                                     "инструмента — сверьте пути с JSON выше."})
+                                decision["reason"] = ("данные есть, но шаблон не сошёлся с выводом — "
+                                                      "запись существует, это ошибка путей в шаблоне")
+                                # Smart hint: output wraps rows in an array, template uses bare names.
+                                container = None
+                                if isinstance(data, dict):
+                                    container = next((k for k in ("items", "results", "rows", "records", "data", "list")
+                                                      if isinstance(data.get(k), list) and data.get(k)), None)
+                                tmpl = win_t0.get("template") or ""
+                                if container and container + "." not in tmpl:
+                                    sample_keys = list((data[container][0] or {}).keys())[:4] if isinstance(data[container][0], dict) else []
+                                    recs.append({"severity": "error",
+                                                 "text": f"Запись НАЙДЕНА, но шаблон ссылается на поля без префикса массива. "
+                                                         f"Вывод оборачивает строки в «{container}» — используйте пути вида "
+                                                         f"`{{{container}.0.<поле>}}` (например {{{container}.0.{(sample_keys or ['name'])[0]}}}). "
+                                                         f"Доступные поля: {', '.join(sample_keys) or '—'}."})
+                                else:
+                                    recs.append({"severity": "warning",
+                                                 "text": "Поля шаблона/required_fields не совпадают с реальным выводом "
+                                                         "инструмента — сверьте пути с JSON выше."})
                         else:
                             decision["rendered"] = rendered
                             decision["fired"] = True

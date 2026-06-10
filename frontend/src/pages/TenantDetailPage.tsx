@@ -1247,6 +1247,7 @@ function readTier0Template(
     block_keywords: Array.isArray(t0.block_keywords)
       ? (t0.block_keywords as string[]).filter((s) => typeof s === 'string')
       : undefined,
+    not_found_template: typeof t0.not_found_template === 'string' ? t0.not_found_template : null,
   };
 }
 
@@ -1272,6 +1273,8 @@ function applyTier0TemplateToConfig(
     if (validPrefixes.length) tpl.strip_prefixes = validPrefixes;
     const validBlocks = (template.block_keywords || []).filter((s) => s.trim());
     if (validBlocks.length) tpl.block_keywords = validBlocks;
+    if (template.not_found_template && template.not_found_template.trim())
+      tpl.not_found_template = template.not_found_template.trim();
     // Drop legacy single-map form when we re-save with the new list form.
     runtime.tier0_template = tpl;
   }

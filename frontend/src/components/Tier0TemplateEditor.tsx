@@ -1763,10 +1763,10 @@ function TableDefsSection({ template, tableDefs, onChange }: TableDefsEditorProp
 // ─── Main editor ─────────────────────────────────────────────────────────────
 
 // ─── Test bench: query → Tier 0 explain trace + full LLM run ─────────────────
-function Tier0TestBench({ tenantId, toolName, currentConfig }: {
-  tenantId: string; toolName?: string; currentConfig?: Tier0Template | null;
+function Tier0TestBench({ tenantId, toolName, currentConfig, embedded }: {
+  tenantId: string; toolName?: string; currentConfig?: Tier0Template | null; embedded?: boolean;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(!!embedded);
   const [query, setQuery] = useState('');
   const [explain, setExplain] = useState<Tier0ExplainResult | null>(null);
   const [llm, setLlm] = useState<Tier0TestLLMResult | null>(null);
@@ -1806,24 +1806,13 @@ function Tier0TestBench({ tenantId, toolName, currentConfig }: {
     ? Object.entries(explain.entities).filter(([, v]) => Array.isArray(v) && v.length > 0)
     : [];
 
-  return (
-    <Card withBorder padding="sm">
-      <Group
-        justify="space-between" align="center"
-        style={{ cursor: 'pointer' }}
-        onClick={() => setOpen((o) => !o)}
-      >
-        <Group gap="xs">
-          {open ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
-          <IconFlask size={16} />
-          <Text fw={600} size="sm">Тест и диагностика</Text>
-          <Text size="xs" c="dimmed">— проверить запрос в Tier 0 и в LLM, увидеть причину</Text>
-        </Group>
-        {currentConfig && <Badge size="xs" variant="light" color="grape">текущая настройка (без сохранения)</Badge>}
-      </Group>
-
-      <Collapse expanded={open}>
-        <Stack gap="sm" mt="sm">
+  const body = (
+        <Stack gap="sm" mt={embedded ? 0 : 'sm'}>
+          {embedded && currentConfig && (
+            <Group justify="flex-end">
+              <Badge size="xs" variant="light" color="grape">текущая настройка (без сохранения)</Badge>
+            </Group>
+          )}
           <Group align="flex-end" gap="xs" wrap="nowrap">
             <Textarea
               label="Тестовый запрос"
@@ -1988,7 +1977,26 @@ function Tier0TestBench({ tenantId, toolName, currentConfig }: {
             </Stack>
           )}
         </Stack>
-      </Collapse>
+  );
+
+  if (embedded) return body;
+
+  return (
+    <Card withBorder padding="sm">
+      <Group
+        justify="space-between" align="center"
+        style={{ cursor: 'pointer' }}
+        onClick={() => setOpen((o) => !o)}
+      >
+        <Group gap="xs">
+          {open ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
+          <IconFlask size={16} />
+          <Text fw={600} size="sm">Тест и диагностика</Text>
+          <Text size="xs" c="dimmed">— проверить запрос в Tier 0 и в LLM, увидеть причину</Text>
+        </Group>
+        {currentConfig && <Badge size="xs" variant="light" color="grape">текущая настройка (без сохранения)</Badge>}
+      </Group>
+      <Collapse expanded={open}>{body}</Collapse>
     </Card>
   );
 }
@@ -2318,6 +2326,7 @@ export function Tier0TemplateEditor({ value, onChange, tenantId, toolName, toolD
                 <Badge size="xs" ml={5} color="red" variant="filled">{tpl.block_keywords!.length}</Badge>
               )}
             </Tabs.Tab>
+            {tenantId && <Tabs.Tab value="test">🧪 Тест и диагностика</Tabs.Tab>}
             <Tabs.Tab value="help">📖 Справочник</Tabs.Tab>
           </Tabs.List>
 
@@ -2721,6 +2730,13 @@ export function Tier0TemplateEditor({ value, onChange, tenantId, toolName, toolD
             </div>
           </Tabs.Panel>
 
+          {/* ── Tab: Тест и диагностика ─────────────────────────────────────── */}
+          {tenantId && (
+            <Tabs.Panel value="test" pt="sm">
+              <Tier0TestBench tenantId={tenantId} toolName={toolName} currentConfig={value} embedded />
+            </Tabs.Panel>
+          )}
+
           {/* ── Tab: Справочник ─────────────────────────────────────────────── */}
           <Tabs.Panel value="help" pt="sm">
             <Stack gap="sm">
@@ -2802,8 +2818,6 @@ export function Tier0TemplateEditor({ value, onChange, tenantId, toolName, toolD
 
       </Stack>
     </Card>
-
-    {tenantId && <Tier0TestBench tenantId={tenantId} toolName={toolName} currentConfig={value} />}
 
     {/* ── LLM Assist Modal ─────────────────────────────────────────────────── */}
     <Modal
