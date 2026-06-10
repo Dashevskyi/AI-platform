@@ -156,6 +156,42 @@ def _content_to_text(c) -> str:
     return ""
 
 
+def _snapshot_messages(msgs: list[dict]) -> list[dict]:
+    """Compact per-message summary (role, chars, est_tokens, brief) for the
+    debug trace, so the UI can show what was sent into each round. Pure."""
+    out: list[dict] = []
+    for m in msgs:
+        role = m.get("role", "?")
+        raw = m.get("content")
+        if isinstance(raw, list):
+            # vision messages: list of parts
+            text = "\n".join(
+                p.get("text") or f"<{p.get('type', 'part')}>" for p in raw if isinstance(p, dict)
+            )
+        else:
+            text = str(raw or "")
+        brief = text[:160].replace("\n", " ⏎ ")
+        if len(text) > 160:
+            brief += " …"
+        entry: dict = {"role": role, "chars": len(text), "est_tokens": _ct(text), "brief": brief}
+        tcs = m.get("tool_calls")
+        if isinstance(tcs, list) and tcs:
+            names = []
+            for tc in tcs:
+                fn = (tc or {}).get("function") or {}
+                n = fn.get("name") if isinstance(fn, dict) else None
+                if isinstance(n, str):
+                    names.append(n)
+            if names:
+                entry["tool_calls"] = names
+        if role == "tool":
+            tcid = m.get("tool_call_id")
+            if tcid:
+                entry["tool_call_id"] = str(tcid)[:50]
+        out.append(entry)
+    return out
+
+
 def _compute_context_breakdown(messages, config, memory_entries, kb_chunks, tool_defs, correlation_id: str) -> dict:
     """Per-section char/token telemetry for the assembled prompt (tiktoken).
     Telemetry only — exact prompt tokens come from the provider. Pure (no DB)."""
@@ -216,6 +252,61 @@ class ToolExecCtx:
     user_message_id: object
     correlation_id: str
     emit: object  # async callable(event_type: str, payload: dict)
+    # Provider-round deps (used by _run_provider_round).
+    model_name: str = ""
+    user_content: str = ""
+    chunk_cb: object = None
+    current_round_ref: dict = None
+    round_breakdown: list = None
+    tool_routing_temperature: float = 0.0
+    effective_temperature: float = 0.3
+
+
+async def _run_provider_round(ctx: ToolExecCtx, round_num: int, *, voice_mode: bool = False):
+    """One LLM call within a turn (round 0 or a tool round) plus its telemetry:
+    emits provider_call_start/done + reasoning, records the round_breakdown entry,
+    and returns the response. Token accumulation stays with the caller."""
+    await ctx.emit("provider_call_start", {"round": round_num, "model": ctx.model_name})
+    t0 = time.time()
+    ctx.current_round_ref["round"] = round_num
+    resp = await ctx.provider.chat_completion(
+        messages=ctx.messages,
+        model=ctx.model_name,
+        temperature=(ctx.tool_routing_temperature if ctx.tool_defs else ctx.effective_temperature),
+        max_tokens=ctx.config.max_tokens,
+        tools=ctx.tool_defs,
+        on_chunk=ctx.chunk_cb,
+        extra_body=_resolve_thinking_kwargs(
+            getattr(ctx.config, "enable_thinking", "on"), ctx.user_content, bool(ctx.tool_defs),
+            voice_mode=voice_mode,
+        ),
+    )
+    latency_ms = int((time.time() - t0) * 1000)
+    pt = int(resp.prompt_tokens or 0)
+    ct = int(resp.completion_tokens or 0)
+    ctx.round_breakdown.append({
+        "round": round_num,
+        "prompt_tokens": pt,
+        "completion_tokens": ct,
+        "latency_ms": latency_ms,
+        "has_tool_calls": bool(resp.tool_calls),
+        "tool_calls_count": len(resp.tool_calls or []) if resp.tool_calls else 0,
+        "messages_snapshot": _snapshot_messages(ctx.messages),
+        "response_content_chars": len(resp.content or ""),
+        "response_reasoning_chars": len(getattr(resp, "reasoning", "") or ""),
+    })
+    await ctx.emit("provider_call_done", {
+        "round": round_num,
+        "latency_ms": latency_ms,
+        "has_tool_calls": bool(resp.tool_calls),
+        "content_chars": len(resp.content or ""),
+        "reasoning_chars": len(resp.reasoning or ""),
+        "prompt_tokens": pt,
+        "completion_tokens": ct,
+    })
+    if resp.reasoning:
+        await ctx.emit("reasoning", {"round": round_num, "text": resp.reasoning})
+    return resp
 
 
 async def _execute_tool_call(ctx: ToolExecCtx, tc, round_num: int) -> None:
@@ -1660,47 +1751,6 @@ async def _chat_completion_inner(
     # carry the freshly-minted artifact_id back to the UI.
     _capture_tasks_by_round: dict[int, list[tuple[str, "asyncio.Task"]]] = {}
 
-    def _snapshot_messages(msgs: list[dict]) -> list[dict]:
-        """Compact per-message summary (role, chars, est_tokens, brief).
-        Used by debug-trace so the UI can show what was sent into each round."""
-        out: list[dict] = []
-        for m in msgs:
-            role = m.get("role", "?")
-            raw = m.get("content")
-            if isinstance(raw, list):
-                # vision messages: list of parts
-                text = "\n".join(
-                    p.get("text") or f"<{p.get('type', 'part')}>" for p in raw if isinstance(p, dict)
-                )
-            else:
-                text = str(raw or "")
-            brief = text[:160].replace("\n", " ⏎ ")
-            if len(text) > 160:
-                brief += " …"
-            entry: dict = {
-                "role": role,
-                "chars": len(text),
-                "est_tokens": _ct(text),
-                "brief": brief,
-            }
-            # Surface tool_call names if present on an assistant turn.
-            tcs = m.get("tool_calls")
-            if isinstance(tcs, list) and tcs:
-                names: list[str] = []
-                for tc in tcs:
-                    fn = (tc or {}).get("function") or {}
-                    n = fn.get("name") if isinstance(fn, dict) else None
-                    if isinstance(n, str):
-                        names.append(n)
-                if names:
-                    entry["tool_calls"] = names
-            if role == "tool":
-                tcid = m.get("tool_call_id")
-                if tcid:
-                    entry["tool_call_id"] = str(tcid)[:50]
-            out.append(entry)
-        return out
-
     start = time.time()
     resp = None
     error_text = None
@@ -1726,59 +1776,8 @@ async def _chat_completion_inner(
     chunk_cb = _on_chunk if on_event is not None else None
 
     try:
-        # Initial LLM call — let the auto-router pick light/heavy first
-        await _route_for_round(0)
-        await _emit("provider_call_start", {"round": 0, "model": model_name})
-        provider_t0 = time.time()
-        current_round_ref["round"] = 0
-        resp = await provider.chat_completion(
-            messages=messages,
-            model=model_name,
-            temperature=_temp_for(tool_defs),
-            max_tokens=config.max_tokens,
-            tools=tool_defs,
-            on_chunk=chunk_cb,
-            extra_body=_resolve_thinking_kwargs(
-                getattr(config, "enable_thinking", "on"),
-                user_content,
-                bool(tool_defs),
-                voice_mode=voice_mode,
-            ),
-        )
-        _round0_latency_ms = int((time.time() - provider_t0) * 1000)
-        _round0_pt = int(resp.prompt_tokens or 0)
-        _round0_ct = int(resp.completion_tokens or 0)
-        round_breakdown.append({
-            "round": 0,
-            "prompt_tokens": _round0_pt,
-            "completion_tokens": _round0_ct,
-            "latency_ms": _round0_latency_ms,
-            "has_tool_calls": bool(resp.tool_calls),
-            "tool_calls_count": len(resp.tool_calls or []) if resp.tool_calls else 0,
-            "messages_snapshot": _snapshot_messages(messages),
-            "response_content_chars": len(resp.content or ""),
-            "response_reasoning_chars": len(getattr(resp, "reasoning", "") or ""),
-        })
-        await _emit("provider_call_done", {
-            "round": 0,
-            "latency_ms": _round0_latency_ms,
-            "has_tool_calls": bool(resp.tool_calls),
-            "content_chars": len(resp.content or ""),
-            "reasoning_chars": len(resp.reasoning or ""),
-            "prompt_tokens": _round0_pt,
-            "completion_tokens": _round0_ct,
-        })
-        if resp.reasoning:
-            await _emit("reasoning", {"round": 0, "text": resp.reasoning})
-
-        total_prompt_tokens += _round0_pt
-        total_completion_tokens += _round0_ct
-
-        # Tool execution loop
-        round_num = 0
-        max_tool_rounds = _resolve_max_tool_rounds(config)
-        # Per-call execution state/deps — mutable structures held by reference and
-        # read back after the loop. Built once; round_num is passed per call.
+        # Per-call + provider-round state/deps — built once, mutated in place,
+        # read back after the loop.
         _tool_ctx = ToolExecCtx(
             messages=messages, tool_outputs=tool_outputs_current_request,
             tool_config_map=tool_config_map, tool_defs=tool_defs,
@@ -1788,7 +1787,20 @@ async def _chat_completion_inner(
             provider=provider, db=db, config=config,
             tenant_id=tenant_id, chat_id=chat_id, user_message_id=user_message_id,
             correlation_id=correlation_id, emit=_emit,
+            model_name=model_name, user_content=user_content, chunk_cb=chunk_cb,
+            current_round_ref=current_round_ref, round_breakdown=round_breakdown,
+            tool_routing_temperature=tool_routing_temperature, effective_temperature=effective_temperature,
         )
+
+        # Initial LLM call — let the auto-router pick light/heavy first
+        await _route_for_round(0)
+        resp = await _run_provider_round(_tool_ctx, 0, voice_mode=voice_mode)
+        total_prompt_tokens += int(resp.prompt_tokens or 0)
+        total_completion_tokens += int(resp.completion_tokens or 0)
+
+        # Tool execution loop
+        round_num = 0
+        max_tool_rounds = _resolve_max_tool_rounds(config)
         while resp.tool_calls and round_num < max_tool_rounds:
             round_num += 1
             tool_calls_total += len(resp.tool_calls)
@@ -1812,51 +1824,10 @@ async def _chat_completion_inner(
             total_prompt_tokens += summary_prompt_tokens
             total_completion_tokens += summary_completion_tokens
 
-            # Call LLM again with tool results
-            await _emit("provider_call_start", {"round": round_num, "model": model_name})
-            provider_t0 = time.time()
-            current_round_ref["round"] = round_num
-            resp = await provider.chat_completion(
-                messages=messages,
-                model=model_name,
-                temperature=_temp_for(tool_defs),
-                max_tokens=config.max_tokens,
-                tools=tool_defs,
-                on_chunk=chunk_cb,
-                extra_body=_resolve_thinking_kwargs(
-                    getattr(config, "enable_thinking", "on"),
-                    user_content,
-                    bool(tool_defs),
-                ),
-            )
-            _rN_latency_ms = int((time.time() - provider_t0) * 1000)
-            _rN_pt = int(resp.prompt_tokens or 0)
-            _rN_ct = int(resp.completion_tokens or 0)
-            round_breakdown.append({
-                "round": round_num,
-                "prompt_tokens": _rN_pt,
-                "completion_tokens": _rN_ct,
-                "latency_ms": _rN_latency_ms,
-                "has_tool_calls": bool(resp.tool_calls),
-                "tool_calls_count": len(resp.tool_calls or []) if resp.tool_calls else 0,
-                "messages_snapshot": _snapshot_messages(messages),
-                "response_content_chars": len(resp.content or ""),
-                "response_reasoning_chars": len(getattr(resp, "reasoning", "") or ""),
-            })
-            await _emit("provider_call_done", {
-                "round": round_num,
-                "latency_ms": _rN_latency_ms,
-                "has_tool_calls": bool(resp.tool_calls),
-                "content_chars": len(resp.content or ""),
-                "reasoning_chars": len(resp.reasoning or ""),
-                "prompt_tokens": _rN_pt,
-                "completion_tokens": _rN_ct,
-            })
-            if resp.reasoning:
-                await _emit("reasoning", {"round": round_num, "text": resp.reasoning})
-
-            total_prompt_tokens += _rN_pt
-            total_completion_tokens += _rN_ct
+            # Call LLM again with the tool results (see _run_provider_round).
+            resp = await _run_provider_round(_tool_ctx, round_num)
+            total_prompt_tokens += int(resp.prompt_tokens or 0)
+            total_completion_tokens += int(resp.completion_tokens or 0)
 
         # ANTI-LAZY auto-nudge: model promised an action ("сейчас проверю / подождите")
         # but did not call any tool. Disabled by default for DeepSeek/Qwen2.5 —
