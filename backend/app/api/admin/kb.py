@@ -208,6 +208,38 @@ async def upload_document(
     return _doc_to_response(doc)
 
 
+class KBChunkRow(BaseModel):
+    chunk_index: int
+    chars: int
+    has_embedding: bool
+    content: str
+
+
+@router.get("/{doc_id}/chunks", response_model=list[KBChunkRow])
+async def list_document_chunks(
+    tenant_id: uuid.UUID,
+    doc_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """How a document was split for retrieval — its chunks in order, with size
+    and whether each got an embedding."""
+    await _verify_tenant(tenant_id, db)
+    rows = (await db.execute(
+        select(KBChunk)
+        .where(KBChunk.tenant_id == tenant_id, KBChunk.document_id == doc_id)
+        .order_by(KBChunk.chunk_index)
+    )).scalars().all()
+    return [
+        KBChunkRow(
+            chunk_index=c.chunk_index,
+            chars=len(c.content or ""),
+            has_embedding=c.embedding is not None,
+            content=c.content or "",
+        )
+        for c in rows
+    ]
+
+
 class KBSearchPreviewRequest(BaseModel):
     query: str
     limit: int = 8

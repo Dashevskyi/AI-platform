@@ -469,6 +469,13 @@ export interface LLMLog {
   created_at: string;
 }
 
+export interface KBChunkRow {
+  chunk_index: number;
+  chars: number;
+  has_embedding: boolean;
+  content: string;
+}
+
 export interface KBPreviewChunk {
   chunk_id: string;
   document_id: string;

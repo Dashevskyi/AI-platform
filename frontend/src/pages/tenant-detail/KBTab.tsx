@@ -19,11 +19,11 @@ import {
   Textarea,
   Tooltip,
 } from '@mantine/core';
-import { IconPlus, IconRefresh, IconTrash } from '@tabler/icons-react';
+import { IconPlus, IconRefresh, IconTrash, IconList } from '@tabler/icons-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { notifications } from '@mantine/notifications';
 import { kbApi } from '../../shared/api/endpoints';
-import type { KBDocument, KBDocumentCreate, KBDocumentUpdate, KBPreviewChunk } from '../../shared/api/types';
+import type { KBDocument, KBDocumentCreate, KBDocumentUpdate, KBPreviewChunk, KBChunkRow } from '../../shared/api/types';
 
 const SOURCE_TYPE_OPTIONS = [
   { value: 'manual', label: 'Ручной ввод' },
@@ -66,6 +66,12 @@ export function KBTab({ tenantId }: KBTabProps) {
   const [filterSourceType, setFilterSourceType] = useState<string | null>(null);
   const [previewQuery, setPreviewQuery] = useState('');
   const [previewResults, setPreviewResults] = useState<KBPreviewChunk[] | null>(null);
+  const [chunksDoc, setChunksDoc] = useState<{ id: string; title: string } | null>(null);
+  const { data: chunksData, isLoading: chunksLoading } = useQuery({
+    queryKey: ['tenants', tenantId, 'kb', chunksDoc?.id, 'chunks'],
+    queryFn: () => kbApi.chunks(tenantId, chunksDoc!.id),
+    enabled: !!chunksDoc,
+  });
 
   const previewMutation = useMutation({
     mutationFn: (q: string) => kbApi.searchPreview(tenantId, q, 8),
@@ -368,7 +374,24 @@ export function KBTab({ tenantId }: KBTabProps) {
                         <Badge color={embStatus.color} size="sm">{embStatus.label}</Badge>
                       </Tooltip>
                     </Table.Td>
-                    <Table.Td>{doc.chunks_count}</Table.Td>
+                    <Table.Td>
+                      {doc.chunks_count ? (
+                        <Tooltip label="Показать чанки">
+                          <ActionIcon
+                            variant="subtle"
+                            size="sm"
+                            onClick={(e) => { e.stopPropagation(); setChunksDoc({ id: doc.id, title: doc.title }); }}
+                          >
+                            <Group gap={4} wrap="nowrap">
+                              <IconList size={14} />
+                              <Text size="sm">{doc.chunks_count}</Text>
+                            </Group>
+                          </ActionIcon>
+                        </Tooltip>
+                      ) : (
+                        <Text size="sm" c="dimmed">{doc.chunks_count ?? 0}</Text>
+                      )}
+                    </Table.Td>
                     <Table.Td>
                       <Badge color={doc.is_active ? 'green' : 'gray'} size="sm">
                         {doc.is_active ? 'Активный' : 'Выкл'}
@@ -496,6 +519,35 @@ export function KBTab({ tenantId }: KBTabProps) {
             </Button>
           </Group>
         </Stack>
+      </Modal>
+
+      <Modal
+        opened={!!chunksDoc}
+        onClose={() => setChunksDoc(null)}
+        title={`Чанки документа: ${chunksDoc?.title || ''}`}
+        size="xl"
+      >
+        {chunksLoading ? (
+          <Center py="md"><Loader /></Center>
+        ) : !chunksData?.length ? (
+          <Text c="dimmed">Чанков нет — документ не проиндексирован.</Text>
+        ) : (
+          <Stack gap="sm">
+            <Text size="sm" c="dimmed">{chunksData.length} чанк(ов)</Text>
+            {chunksData.map((c: KBChunkRow) => (
+              <div key={c.chunk_index}>
+                <Group gap="xs" mb={4}>
+                  <Badge size="sm" variant="light">#{c.chunk_index}</Badge>
+                  <Text size="xs" c="dimmed">{c.chars} симв.</Text>
+                  {!c.has_embedding && <Badge size="xs" color="red" variant="light">нет эмбеддинга</Badge>}
+                </Group>
+                <Code block style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 12 }}>
+                  {c.content}
+                </Code>
+              </div>
+            ))}
+          </Stack>
+        )}
       </Modal>
     </Stack>
   );

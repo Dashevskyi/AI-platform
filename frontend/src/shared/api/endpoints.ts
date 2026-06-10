@@ -30,6 +30,7 @@ import type {
   DataSourceSchema,
   KBDocument,
   KBPreviewChunk,
+  KBChunkRow,
   KBDocumentCreate,
   KBDocumentUpdate,
   MemoryEntry,
@@ -340,6 +341,10 @@ export const kbApi = {
   },
   searchPreview: async (tenantId: string, query: string, limit = 8): Promise<KBPreviewChunk[]> => {
     const res = await apiClient.post(`/api/admin/tenants/${tenantId}/kb/search-preview`, { query, limit });
+    return res.data;
+  },
+  chunks: async (tenantId: string, docId: string): Promise<KBChunkRow[]> => {
+    const res = await apiClient.get(`/api/admin/tenants/${tenantId}/kb/${docId}/chunks`);
     return res.data;
   },
   create: async (tenantId: string, data: KBDocumentCreate): Promise<KBDocument> => {
