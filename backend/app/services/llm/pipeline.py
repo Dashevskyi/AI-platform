@@ -5,6 +5,7 @@ import os
 import re
 import time
 import uuid
+from dataclasses import dataclass
 
 try:
     import tiktoken
@@ -188,6 +189,115 @@ def _compute_context_breakdown(messages, config, memory_entries, kb_chunks, tool
                 f"tools={breakdown['tools']['est_tokens']}t({breakdown['tools']['count']}), "
                 f"TOTAL≈{breakdown['total_est_tokens']}t")
     return breakdown
+
+
+@dataclass
+class ToolExecCtx:
+    """Shared state + dependencies for executing tool calls within the loop.
+
+    The mutable structures (messages, tool_outputs, tool_config_map, tool_defs,
+    capture_tasks_by_round, debug_tool_calls) are held by reference and mutated
+    in place — the orchestrator reads them back after the loop. Built once before
+    the loop; `round_num` varies and is passed per call."""
+    messages: list
+    tool_outputs: list
+    tool_config_map: dict
+    tool_defs: list | None
+    capture_tasks_by_round: dict
+    debug_tool_calls: list
+    allowed_tool_names: set
+    attachment_map: dict
+    all_allowed_tools_for_tenant: dict
+    provider: object
+    db: object
+    config: object
+    tenant_id: object
+    chat_id: object
+    user_message_id: object
+    correlation_id: str
+    emit: object  # async callable(event_type: str, payload: dict)
+
+
+async def _execute_tool_call(ctx: ToolExecCtx, tc, round_num: int) -> None:
+    """Execute one tool_call: dispatch (regular tool or attachment search), emit
+    lifecycle events, record debug + outputs, schedule artifact capture, and
+    append the result turn to messages. Mutates ctx in place; a blocked or
+    unparseable call is skipped."""
+    parsed = _parse_tool_call(tc)
+    if parsed is None:
+        return
+    tool_call_id, func_name, func_args = parsed
+
+    logger.debug(f"[{ctx.correlation_id}] Executing tool: {func_name}({func_args})")
+
+    if func_name not in ctx.allowed_tool_names:
+        logger.warning(f"[{ctx.correlation_id}] Blocked tool call not allowed for tenant/chat: {func_name}")
+        tool_output = f"Ошибка: инструмент '{func_name}' недоступен для этого tenant."
+        ctx.tool_outputs.append({"tool": func_name, "output": tool_output})
+        ctx.messages.append(ctx.provider.format_tool_result_turn(tool_call_id=tool_call_id, content=tool_output))
+        return
+
+    await ctx.emit("tool_call_start", {
+        "name": func_name,
+        "round": round_num,
+        "args_preview": json.dumps(func_args, ensure_ascii=False)[:300],
+    })
+    tool_t0 = time.time()
+    tool_ok = True
+    if func_name in ctx.attachment_map:
+        from app.services.attachments.tool import execute_attachment_search
+        from app.core.config import settings as app_settings
+        att_embed_provider = get_provider("ollama", app_settings.OLLAMA_BASE_URL or "http://localhost:11434")
+        att_query = func_args.get("query", "")
+        tool_output = await execute_attachment_search(
+            attachment_id=ctx.attachment_map[func_name],
+            query=att_query,
+            db=ctx.db,
+            provider=att_embed_provider,
+            embedding_model=ctx.config.embedding_model_name or "nomic-embed-text",
+        )
+    else:
+        # Tool config may come from the semantic-selected payload OR the full
+        # tenant allow-set (model invoked something we didn't send). Use whichever
+        # exists; register it into the payload so later rounds see the real schema.
+        _cfg = ctx.tool_config_map.get(func_name) or ctx.all_allowed_tools_for_tenant.get(func_name)
+        if _cfg is not None and func_name not in ctx.tool_config_map:
+            ctx.tool_config_map[func_name] = _cfg
+            if ctx.tool_defs is not None and _cfg.get("function"):
+                ctx.tool_defs.append({"type": _cfg.get("type", "function"), "function": _cfg["function"]})
+        result = await execute_tool(func_name, func_args, _cfg)
+        tool_ok = result.success
+        tool_output = result.output if result.success else f"Ошибка: {result.error}"
+
+    _tc_latency_ms = int((time.time() - tool_t0) * 1000)
+    await ctx.emit("tool_call_done", {
+        "name": func_name,
+        "round": round_num,
+        "ok": tool_ok,
+        "latency_ms": _tc_latency_ms,
+        "output_chars": len(tool_output or ""),
+        "output_tokens": _ct(tool_output or ""),
+    })
+    ctx.debug_tool_calls.append({
+        "round": round_num,
+        "name": func_name,
+        "args_preview": json.dumps(func_args, ensure_ascii=False)[:300],
+        "ok": tool_ok,
+        "latency_ms": _tc_latency_ms,
+        "output_chars": len(tool_output or ""),
+    })
+    logger.debug(f"[{ctx.correlation_id}] Tool result ({len(tool_output)} chars): {tool_output[:200]}")
+    ctx.tool_outputs.append({"tool": func_name, "output": tool_output})
+
+    if tool_ok:
+        _schedule_tool_result_capture(
+            ctx.capture_tasks_by_round, round_num,
+            tenant_id=ctx.tenant_id, chat_id=ctx.chat_id, user_message_id=ctx.user_message_id,
+            tool_name=func_name, arguments=func_args, output=tool_output or "",
+            correlation_id=ctx.correlation_id,
+        )
+
+    ctx.messages.append(ctx.provider.format_tool_result_turn(tool_call_id=tool_call_id, content=tool_output))
 
 
 def _schedule_tool_result_capture(
@@ -1667,6 +1777,18 @@ async def _chat_completion_inner(
         # Tool execution loop
         round_num = 0
         max_tool_rounds = _resolve_max_tool_rounds(config)
+        # Per-call execution state/deps — mutable structures held by reference and
+        # read back after the loop. Built once; round_num is passed per call.
+        _tool_ctx = ToolExecCtx(
+            messages=messages, tool_outputs=tool_outputs_current_request,
+            tool_config_map=tool_config_map, tool_defs=tool_defs,
+            capture_tasks_by_round=_capture_tasks_by_round, debug_tool_calls=debug_trace["tool_calls"],
+            allowed_tool_names=allowed_tool_names, attachment_map=attachment_map,
+            all_allowed_tools_for_tenant=all_allowed_tools_for_tenant,
+            provider=provider, db=db, config=config,
+            tenant_id=tenant_id, chat_id=chat_id, user_message_id=user_message_id,
+            correlation_id=correlation_id, emit=_emit,
+        )
         while resp.tool_calls and round_num < max_tool_rounds:
             round_num += 1
             tool_calls_total += len(resp.tool_calls)
@@ -1677,98 +1799,9 @@ async def _chat_completion_inner(
             # provider decides what extra fields (reasoning_content, etc.) to echo.
             messages.append(provider.format_assistant_turn(resp))
 
-            # Execute each tool call and add results
+            # Execute each tool call and add results (see _execute_tool_call).
             for tc in resp.tool_calls:
-                parsed = _parse_tool_call(tc)
-                if parsed is None:
-                    continue
-                tool_call_id, func_name, func_args = parsed
-
-                logger.debug(f"[{correlation_id}] Executing tool: {func_name}({func_args})")
-
-                if func_name not in allowed_tool_names:
-                    logger.warning(f"[{correlation_id}] Blocked tool call not allowed for tenant/chat: {func_name}")
-                    tool_output = f"Ошибка: инструмент '{func_name}' недоступен для этого tenant."
-                    tool_outputs_current_request.append({"tool": func_name, "output": tool_output})
-                    messages.append(provider.format_tool_result_turn(
-                        tool_call_id=tool_call_id,
-                        content=tool_output,
-                    ))
-                    continue
-
-                # Check if this is an attachment search tool
-                await _emit("tool_call_start", {
-                    "name": func_name,
-                    "round": round_num,
-                    "args_preview": json.dumps(func_args, ensure_ascii=False)[:300],
-                })
-                tool_t0 = time.time()
-                tool_ok = True
-                if func_name in attachment_map:
-                    from app.services.attachments.tool import execute_attachment_search
-                    from app.core.config import settings as app_settings
-                    att_embed_provider = get_provider("ollama", app_settings.OLLAMA_BASE_URL or "http://localhost:11434")
-                    att_query = func_args.get("query", "")
-                    tool_output = await execute_attachment_search(
-                        attachment_id=attachment_map[func_name],
-                        query=att_query,
-                        db=db,
-                        provider=att_embed_provider,
-                        embedding_model=config.embedding_model_name or "nomic-embed-text",
-                    )
-                else:
-                    # Execute regular tool
-                    # Tool config may come from the semantic-selected payload OR
-                    # from the full tenant allow-set (model invoked something we didn't
-                    # send). Use whichever exists; also register it into the payload
-                    # for subsequent rounds so the model sees the real schema.
-                    _cfg = tool_config_map.get(func_name) or all_allowed_tools_for_tenant.get(func_name)
-                    if _cfg is not None and func_name not in tool_config_map:
-                        tool_config_map[func_name] = _cfg
-                        if tool_defs is not None and _cfg.get("function"):
-                            tool_defs.append({"type": _cfg.get("type", "function"), "function": _cfg["function"]})
-                    result = await execute_tool(func_name, func_args, _cfg)
-                    tool_ok = result.success
-                    tool_output = result.output if result.success else f"Ошибка: {result.error}"
-
-                _tc_latency_ms = int((time.time() - tool_t0) * 1000)
-                await _emit("tool_call_done", {
-                    "name": func_name,
-                    "round": round_num,
-                    "ok": tool_ok,
-                    "latency_ms": _tc_latency_ms,
-                    "output_chars": len(tool_output or ""),
-                    "output_tokens": _ct(tool_output or ""),
-                })
-                debug_trace["tool_calls"].append({
-                    "round": round_num,
-                    "name": func_name,
-                    "args_preview": json.dumps(func_args, ensure_ascii=False)[:300],
-                    "ok": tool_ok,
-                    "latency_ms": _tc_latency_ms,
-                    "output_chars": len(tool_output or ""),
-                })
-                logger.debug(f"[{correlation_id}] Tool result ({len(tool_output)} chars): {tool_output[:200]}")
-                tool_outputs_current_request.append({"tool": func_name, "output": tool_output})
-
-                # Promote successful, substantial tool results to first-class
-                # artifacts. Without this, results die at the end of this round
-                # and the next user turn ("оформи это в таблицу") has nothing
-                # to ground on — leading to hallucinated values.
-                if tool_ok:
-                    _schedule_tool_result_capture(
-                        _capture_tasks_by_round, round_num,
-                        tenant_id=tenant_id, chat_id=chat_id, user_message_id=user_message_id,
-                        tool_name=func_name, arguments=func_args, output=tool_output or "",
-                        correlation_id=correlation_id,
-                    )
-
-                # Add tool result to messages (full content for current round) —
-                # provider decides shape (Ollama omits tool_call_id, OpenAI includes it).
-                messages.append(provider.format_tool_result_turn(
-                    tool_call_id=tool_call_id,
-                    content=tool_output,
-                ))
+                await _execute_tool_call(_tool_ctx, tc, round_num)
 
             # Summarize large tool results from PREVIOUS rounds to save tokens.
             # Current round results stay full so LLM can process them now.
