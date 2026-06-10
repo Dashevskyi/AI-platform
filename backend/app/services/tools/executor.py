@@ -1694,8 +1694,20 @@ def _truncate_output(text: str, limit: int = MAX_CMD_OUTPUT) -> str:
     return text
 
 
-def _resolve_command(runtime: dict, arguments: dict) -> str:
-    """Resolve whitelisted command template from arguments."""
+@dataclass
+class ResolvedCommand:
+    text: str          # fully-substituted command to run
+    name: str          # command_name from the whitelist
+    is_write: bool     # mutates device state (config/reboot/etc.) — guarded
+
+
+def _resolve_command(runtime: dict, arguments: dict) -> ResolvedCommand:
+    """Resolve whitelisted command template from arguments.
+
+    A command may be marked `"write": true` in the tool's commands config; such
+    commands change device state and are gated by `allow_write` (see the SSH /
+    Telnet handlers).
+    """
     commands = runtime.get("commands")
     if not isinstance(commands, dict) or not commands:
         raise ValueError("В конфигурации инструмента не указан commands")
@@ -1726,7 +1738,46 @@ def _resolve_command(runtime: dict, arguments: dict) -> str:
             safe_value = _validate_cmd_param(param_name, str(raw_value))
             template = template.replace(placeholder, safe_value)
 
-    return template
+    return ResolvedCommand(text=template, name=cmd_name, is_write=bool(cmd_cfg.get("write")))
+
+
+async def _audit_write_command(
+    tool_config: dict | None, tool_name: str, host: str, resolved: ResolvedCommand, outcome: str,
+) -> None:
+    """Record a state-changing command attempt to the admin audit log.
+
+    `outcome` ∈ {executed, blocked, failed}. Best-effort: a failed audit must
+    never block the tool. Runs in its own session (RLS bypass on insert)."""
+    import uuid as _uuid
+    ctx = (tool_config or {}).get("_context") or {}
+    tid = ctx.get("tenant_id")
+    akid = ctx.get("api_key_id")
+    try:
+        from app.core.database import async_session
+        from app.models.admin_audit_log import AdminAuditLog
+        async with async_session() as db:
+            db.add(AdminAuditLog(
+                actor_id=_uuid.UUID(akid) if akid else None,
+                actor_role="tenant_api_key",
+                action="tool.write_command",
+                resource_type=tool_name,
+                resource_id=(host or "")[:255],
+                tenant_id=_uuid.UUID(tid) if tid else None,
+                after_json={
+                    "command_name": resolved.name,
+                    "command": resolved.text,
+                    "outcome": outcome,
+                    "chat_id": ctx.get("chat_id"),
+                },
+            ))
+            await db.commit()
+    except Exception:
+        logger.exception("write-command audit failed (non-fatal) for %s/%s", tool_name, resolved.name)
+
+
+def _write_blocked(runtime: dict, resolved: ResolvedCommand) -> bool:
+    """A write command runs only if the tool opts in with allow_write=true."""
+    return resolved.is_write and not bool(runtime.get("allow_write"))
 
 
 async def _resolve_net_credentials(runtime: dict) -> dict:
@@ -1772,11 +1823,12 @@ async def tool_ssh_exec(arguments: dict, tool_config: dict | None = None) -> Too
     runtime = _extract_runtime_config(tool_config)
 
     try:
-        command = _resolve_command(runtime, arguments)
+        resolved = _resolve_command(runtime, arguments)
         creds = await _resolve_net_credentials(runtime)
     except ValueError as e:
         return ToolResult(success=False, output="", error=str(e))
 
+    command = resolved.text
     host = creds["host"]
     port = int(creds.get("port") or 22)
     username = creds.get("username")
@@ -1788,6 +1840,16 @@ async def tool_ssh_exec(arguments: dict, tool_config: dict | None = None) -> Too
         return ToolResult(success=False, output="", error="Не указан host")
     if not username:
         return ToolResult(success=False, output="", error="Не указан username")
+
+    # Write-command guardrail: state-changing commands are blocked unless the
+    # tool explicitly opts in (allow_write). Every write attempt is audited.
+    if _write_blocked(runtime, resolved):
+        await _audit_write_command(tool_config, "ssh_exec", host, resolved, "blocked")
+        return ToolResult(
+            success=False, output="",
+            error=(f"Команда '{resolved.name}' изменяет состояние устройства и заблокирована. "
+                   "Для выполнения write-команд включите allow_write в конфигурации инструмента."),
+        )
 
     try:
         import asyncssh
@@ -1824,6 +1886,8 @@ async def tool_ssh_exec(arguments: dict, tool_config: dict | None = None) -> Too
         if runtime.get("strip_ansi", True):
             output = _strip_ansi(output)
 
+        if resolved.is_write:
+            await _audit_write_command(tool_config, "ssh_exec", host, resolved, "executed")
         return ToolResult(success=True, output=_truncate_output(output))
 
     except asyncssh.Error as e:
@@ -1859,16 +1923,27 @@ async def tool_telnet_exec(arguments: dict, tool_config: dict | None = None) -> 
     runtime = _extract_runtime_config(tool_config)
 
     try:
-        command = _resolve_command(runtime, arguments)
+        resolved = _resolve_command(runtime, arguments)
         creds = await _resolve_net_credentials(runtime)
     except ValueError as e:
         return ToolResult(success=False, output="", error=str(e))
 
+    command = resolved.text
     host = creds["host"]
     port = int(creds.get("port") or 23)
     username = creds.get("username") or ""
     password = creds.get("password") or ""
     timeout = min(int(runtime.get("timeout_seconds") or TELNET_EXEC_TIMEOUT), 30)
+
+    # Write-command guardrail (see ssh_exec): block state-changing commands
+    # unless allow_write is set; audit every write attempt.
+    if _write_blocked(runtime, resolved):
+        await _audit_write_command(tool_config, "telnet_exec", host, resolved, "blocked")
+        return ToolResult(
+            success=False, output="",
+            error=(f"Команда '{resolved.name}' изменяет состояние устройства и заблокирована. "
+                   "Для выполнения write-команд включите allow_write в конфигурации инструмента."),
+        )
 
     vendor = str(runtime.get("vendor") or "generic").strip().lower()
     prompt_pattern = str(runtime.get("prompt_pattern") or _TELNET_PROMPTS.get(vendor) or _TELNET_PROMPTS["generic"])
@@ -1960,6 +2035,8 @@ async def tool_telnet_exec(arguments: dict, tool_config: dict | None = None) -> 
         if runtime.get("strip_ansi", True):
             output = _strip_ansi(output)
 
+        if resolved.is_write:
+            await _audit_write_command(tool_config, "telnet_exec", host, resolved, "executed")
         return ToolResult(success=True, output=_truncate_output(output))
 
     except asyncio.TimeoutError:
