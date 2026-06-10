@@ -49,6 +49,8 @@ from app.api.tenant.chats import router as tenant_chats_router
 from app.api.tenant.custom_models import router as tenant_custom_models_router
 from app.api.tenant.voice import router as tenant_voice_router
 from app.api.admin.voice import router as admin_voice_router
+from app.api.tenant.pending_actions import router as tenant_pending_router
+from app.api.admin.pending_actions import router as admin_pending_router
 
 
 async def seed_admin():
@@ -197,6 +199,8 @@ app.include_router(tenant_chats_router)
 app.include_router(tenant_custom_models_router)
 app.include_router(tenant_voice_router)
 app.include_router(admin_voice_router)
+app.include_router(tenant_pending_router)
+app.include_router(admin_pending_router)
 
 
 @app.get("/health", response_model=HealthResponse)

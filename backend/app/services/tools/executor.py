@@ -1696,9 +1696,10 @@ def _truncate_output(text: str, limit: int = MAX_CMD_OUTPUT) -> str:
 
 @dataclass
 class ResolvedCommand:
-    text: str          # fully-substituted command to run
-    name: str          # command_name from the whitelist
-    is_write: bool     # mutates device state (config/reboot/etc.) — guarded
+    text: str                    # fully-substituted command to run
+    name: str                    # command_name from the whitelist
+    is_write: bool               # mutates device state (config/reboot/etc.) — guarded
+    requires_confirmation: bool  # needs human approval before running (HITL)
 
 
 def _resolve_command(runtime: dict, arguments: dict) -> ResolvedCommand:
@@ -1738,7 +1739,50 @@ def _resolve_command(runtime: dict, arguments: dict) -> ResolvedCommand:
             safe_value = _validate_cmd_param(param_name, str(raw_value))
             template = template.replace(placeholder, safe_value)
 
-    return ResolvedCommand(text=template, name=cmd_name, is_write=bool(cmd_cfg.get("write")))
+    return ResolvedCommand(
+        text=template,
+        name=cmd_name,
+        is_write=bool(cmd_cfg.get("write")),
+        requires_confirmation=bool(cmd_cfg.get("requires_confirmation")),
+    )
+
+
+async def _create_pending_action(
+    tool_config: dict | None, handler_name: str, arguments: dict, resolved: ResolvedCommand,
+) -> str | None:
+    """Record a command awaiting human approval. Returns the pending action id
+    (as str) or None if there's no chat context to attach it to.
+
+    Stores the tool's *function* name (e.g. switch_command), not the handler
+    name (ssh_exec), so approval can reload the exact tool config to re-execute.
+    """
+    import uuid as _uuid
+    ctx = (tool_config or {}).get("_context") or {}
+    tid, cid = ctx.get("tenant_id"), ctx.get("chat_id")
+    if not tid or not cid:
+        return None
+    fn = (tool_config or {}).get("function") or {}
+    tool_name = fn.get("name") or handler_name
+    try:
+        from app.core.database import async_session
+        from app.models.pending_tool_action import PendingToolAction
+        action_id = _uuid.uuid4()
+        async with async_session() as db:
+            db.add(PendingToolAction(
+                id=action_id,
+                tenant_id=_uuid.UUID(tid),
+                chat_id=_uuid.UUID(cid),
+                message_id=_uuid.UUID(ctx["user_message_id"]) if ctx.get("user_message_id") else None,
+                tool_name=tool_name,
+                command_name=resolved.name,
+                command_text=resolved.text,
+                arguments=arguments,
+            ))
+            await db.commit()
+        return str(action_id)
+    except Exception:
+        logger.exception("failed to create pending tool action for %s/%s", tool_name, resolved.name)
+        return None
 
 
 async def _audit_write_command(
@@ -1851,6 +1895,18 @@ async def tool_ssh_exec(arguments: dict, tool_config: dict | None = None) -> Too
                    "Для выполнения write-команд включите allow_write в конфигурации инструмента."),
         )
 
+    # Human-in-the-loop: a command marked requires_confirmation is not run by the
+    # model; it's parked for explicit approval (executed later with _approved).
+    if resolved.requires_confirmation and not runtime.get("_approved"):
+        action_id = await _create_pending_action(tool_config, "ssh_exec", arguments, resolved)
+        return ToolResult(
+            success=True,
+            output=(f"⏸ Команда '{resolved.name}' требует подтверждения пользователя"
+                    + (f" (запрос #{action_id})." if action_id else ".")
+                    + " Сообщи пользователю, что нужно подтвердить действие в интерфейсе — "
+                      "оно НЕ выполнено."),
+        )
+
     try:
         import asyncssh
 
@@ -1943,6 +1999,17 @@ async def tool_telnet_exec(arguments: dict, tool_config: dict | None = None) -> 
             success=False, output="",
             error=(f"Команда '{resolved.name}' изменяет состояние устройства и заблокирована. "
                    "Для выполнения write-команд включите allow_write в конфигурации инструмента."),
+        )
+
+    # Human-in-the-loop confirmation (see ssh_exec).
+    if resolved.requires_confirmation and not runtime.get("_approved"):
+        action_id = await _create_pending_action(tool_config, "telnet_exec", arguments, resolved)
+        return ToolResult(
+            success=True,
+            output=(f"⏸ Команда '{resolved.name}' требует подтверждения пользователя"
+                    + (f" (запрос #{action_id})." if action_id else ".")
+                    + " Сообщи пользователю, что нужно подтвердить действие в интерфейсе — "
+                      "оно НЕ выполнено."),
         )
 
     vendor = str(runtime.get("vendor") or "generic").strip().lower()

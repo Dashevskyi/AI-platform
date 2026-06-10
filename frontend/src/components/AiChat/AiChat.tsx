@@ -54,6 +54,7 @@ import {
 } from '../../packages/ai-chat-core';
 import { ArtifactsPanel } from './ArtifactsPanel';
 import { MicButton } from './MicButton';
+import { PendingActions } from './PendingActions';
 import { SpeakButton } from './SpeakButton';
 import { VoiceModeOverlay } from './VoiceModeOverlay';
 import type { AuthMode } from '../../packages/ai-chat-core';
@@ -862,6 +863,18 @@ export function AiChat({
                   })}
                 </Group>
               </Box>
+            )}
+
+            {/* Risky tool commands awaiting human approval */}
+            {activeChatId && (
+              <PendingActions
+                tenantId={tenantId}
+                chatId={activeChatId}
+                mode={mode}
+                apiBase={apiBase}
+                apiKey={apiKey}
+                onResolved={() => onMessageSent?.()}
+              />
             )}
 
             {/* Input */}
