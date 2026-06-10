@@ -462,7 +462,21 @@ export interface LLMLog {
   tool_calls_count: number | null;
   finish_reason: string | null;
   estimated_cost: number | null;
+  served_by: string | null; // 'tier0_template' | 'llm'
   created_at: string;
+}
+
+export interface LLMLogSummary {
+  total: number;
+  errors: number;
+  error_rate: number;
+  avg_latency_ms: number | null;
+  avg_total_tokens: number | null;
+  total_tokens: number;
+  estimated_cost: number;
+  tier0_count: number;
+  tier0_share: number;
+  with_tool_calls: number;
 }
 
 export interface LLMLogDetail extends LLMLog {

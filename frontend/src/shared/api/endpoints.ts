@@ -39,6 +39,7 @@ import type {
   MessageSend,
   LLMLog,
   LLMLogDetail,
+  LLMLogSummary,
   AuditLog,
   PaginatedResponse,
   HealthStatus,
@@ -496,19 +497,41 @@ export const chatsApi = {
 };
 
 // Logs
+export interface LogFilters {
+  chat_id?: string;
+  api_key_id?: string;
+  date_from?: string;
+  date_to?: string;
+  status?: string;     // 'success' | 'error'
+  served_by?: string;  // 'tier0_template' | 'llm'
+  has_tool_calls?: boolean;
+}
+
+function logParams(filters?: LogFilters): Record<string, unknown> {
+  const params: Record<string, unknown> = {};
+  if (filters?.chat_id) params.chat_id = filters.chat_id;
+  if (filters?.api_key_id) params.api_key_id = filters.api_key_id;
+  if (filters?.date_from) params.date_from = filters.date_from;
+  if (filters?.date_to) params.date_to = filters.date_to;
+  if (filters?.status) params.status = filters.status;
+  if (filters?.served_by) params.served_by = filters.served_by;
+  if (filters?.has_tool_calls !== undefined) params.has_tool_calls = filters.has_tool_calls;
+  return params;
+}
+
 export const logsApi = {
   list: async (
     tenantId: string,
     page = 1,
     pageSize = 20,
-    filters?: { chat_id?: string; api_key_id?: string; date_from?: string; date_to?: string },
+    filters?: LogFilters,
   ): Promise<PaginatedResponse<LLMLog>> => {
-    const params: Record<string, unknown> = { page, page_size: pageSize };
-    if (filters?.chat_id) params.chat_id = filters.chat_id;
-    if (filters?.api_key_id) params.api_key_id = filters.api_key_id;
-    if (filters?.date_from) params.date_from = filters.date_from;
-    if (filters?.date_to) params.date_to = filters.date_to;
+    const params = { page, page_size: pageSize, ...logParams(filters) };
     const res = await apiClient.get(`/api/admin/tenants/${tenantId}/logs/`, { params });
+    return res.data;
+  },
+  summary: async (tenantId: string, filters?: LogFilters): Promise<LLMLogSummary> => {
+    const res = await apiClient.get(`/api/admin/tenants/${tenantId}/logs/summary`, { params: logParams(filters) });
     return res.data;
   },
   getDetail: async (tenantId: string, logId: string): Promise<LLMLogDetail> => {

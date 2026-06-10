@@ -46,10 +46,21 @@ type LogFilters = {
   api_key_id?: string;
   date_from?: string;
   date_to?: string;
+  status?: string;
+  served_by?: string;
 };
 
 type ToolExecutionEntry = Record<string, unknown>;
 type JsonObject = Record<string, unknown>;
+
+function LogStat({ label, value, color }: { label: string; value: string | number; color?: string }) {
+  return (
+    <div>
+      <Text size="9px" c="dimmed" tt="uppercase" fw={700}>{label}</Text>
+      <Text size="sm" fw={600} c={color}>{value}</Text>
+    </div>
+  );
+}
 type PromptLayoutSection = {
   kind?: unknown;
   title?: unknown;
@@ -746,6 +757,8 @@ export function LogsTab({ tenantId }: LogsTabProps) {
   const [apiKeyFilter, setApiKeyFilter] = useState<string | null>(null);
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
+  const [statusFilter, setStatusFilter] = useState<string | null>(null);
+  const [servedByFilter, setServedByFilter] = useState<string | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(false);
 
   const filters: LogFilters = {
@@ -753,11 +766,20 @@ export function LogsTab({ tenantId }: LogsTabProps) {
     api_key_id: apiKeyFilter || undefined,
     date_from: dateFrom || undefined,
     date_to: dateTo || undefined,
+    status: statusFilter || undefined,
+    served_by: servedByFilter || undefined,
   };
 
   const { data, isLoading, isFetching, refetch } = useQuery({
-    queryKey: ['tenants', tenantId, 'logs', page, chatFilter, apiKeyFilter, dateFrom, dateTo],
+    queryKey: ['tenants', tenantId, 'logs', page, chatFilter, apiKeyFilter, dateFrom, dateTo, statusFilter, servedByFilter],
     queryFn: () => logsApi.list(tenantId, page, 20, filters),
+    refetchInterval: autoRefresh ? 5000 : false,
+  });
+
+  // Aggregates over the same filter set — drives the stats bar above the table.
+  const { data: summary } = useQuery({
+    queryKey: ['tenants', tenantId, 'logs', 'summary', chatFilter, apiKeyFilter, dateFrom, dateTo, statusFilter, servedByFilter],
+    queryFn: () => logsApi.summary(tenantId, filters),
     refetchInterval: autoRefresh ? 5000 : false,
   });
 
@@ -921,7 +943,31 @@ export function LogsTab({ tenantId }: LogsTabProps) {
               setPage(1);
             }}
           />
-          {(chatFilter || dateFrom || dateTo) && (
+          <Select
+            placeholder="Статус"
+            clearable
+            size="xs"
+            w={120}
+            value={statusFilter}
+            onChange={(value) => { setStatusFilter(value); setPage(1); }}
+            data={[
+              { value: 'success', label: 'Успех' },
+              { value: 'error', label: 'Ошибки' },
+            ]}
+          />
+          <Select
+            placeholder="Tier"
+            clearable
+            size="xs"
+            w={130}
+            value={servedByFilter}
+            onChange={(value) => { setServedByFilter(value); setPage(1); }}
+            data={[
+              { value: 'tier0_template', label: 'Tier 0' },
+              { value: 'llm', label: 'LLM' },
+            ]}
+          />
+          {(chatFilter || dateFrom || dateTo || statusFilter || servedByFilter) && (
             <Button
               variant="subtle"
               size="xs"
@@ -929,6 +975,8 @@ export function LogsTab({ tenantId }: LogsTabProps) {
                 setChatFilter(null);
                 setDateFrom('');
                 setDateTo('');
+                setStatusFilter(null);
+                setServedByFilter(null);
                 setPage(1);
               }}
             >
@@ -949,6 +997,31 @@ export function LogsTab({ tenantId }: LogsTabProps) {
           )}
         </Group>
       </Group>
+
+      {summary && summary.total > 0 && (
+        <Card withBorder padding="xs">
+          <Group gap="xl" wrap="wrap">
+            <LogStat label="Запросов" value={summary.total.toLocaleString('ru-RU')} />
+            <LogStat
+              label="Ошибки"
+              value={`${summary.errors} · ${(summary.error_rate * 100).toFixed(1)}%`}
+              color={summary.errors ? 'red' : undefined}
+            />
+            <LogStat
+              label="Avg задержка"
+              value={summary.avg_latency_ms != null ? `${(summary.avg_latency_ms / 1000).toFixed(1)} с` : '—'}
+            />
+            <LogStat
+              label="Avg токенов"
+              value={summary.avg_total_tokens != null ? Math.round(summary.avg_total_tokens).toLocaleString('ru-RU') : '—'}
+            />
+            <LogStat label="Всего токенов" value={summary.total_tokens.toLocaleString('ru-RU')} />
+            <LogStat label="Стоимость" value={`$${summary.estimated_cost.toFixed(4)}`} />
+            <LogStat label="Tier 0" value={`${(summary.tier0_share * 100).toFixed(0)}%`} />
+            <LogStat label="С tools" value={summary.with_tool_calls.toLocaleString('ru-RU')} />
+          </Group>
+        </Card>
+      )}
 
       {isLoading ? (
         <Center py="md"><Loader /></Center>
@@ -993,7 +1066,14 @@ export function LogsTab({ tenantId }: LogsTabProps) {
                       {log.api_key_id ? (keyMap.get(log.api_key_id) || log.api_key_id.slice(0, 8)) : '-'}
                     </Text>
                   </Table.Td>
-                  <Table.Td><Text size="sm" ff="monospace">{log.model_name}</Text></Table.Td>
+                  <Table.Td>
+                    <Group gap={6} wrap="nowrap">
+                      <Text size="sm" ff="monospace">{log.model_name}</Text>
+                      {log.served_by === 'tier0_template' && (
+                        <Badge size="xs" color="grape" variant="light">T0</Badge>
+                      )}
+                    </Group>
+                  </Table.Td>
                   <Table.Td>
                     <Badge color={log.status === 'success' ? 'green' : 'red'}>
                       {log.status}

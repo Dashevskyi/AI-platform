@@ -12,7 +12,7 @@ from app.core.database import get_db
 from app.models.tenant import Tenant
 from app.models.tenant_api_key import TenantApiKey
 from app.models.llm_request_log import LLMRequestLog
-from app.schemas.log import LLMLogResponse, LLMLogDetailResponse
+from app.schemas.log import LLMLogResponse, LLMLogDetailResponse, LLMLogSummary
 from app.schemas.common import PaginatedResponse
 from app.api.deps import require_role, require_tenant_access, require_permission
 
@@ -43,8 +43,43 @@ def _log_to_response(log: LLMRequestLog) -> LLMLogResponse:
         tool_calls_count=log.tool_calls_count,
         finish_reason=log.finish_reason,
         estimated_cost=log.estimated_cost,
+        served_by=log.served_by,
         created_at=log.created_at,
     )
+
+
+def _log_filters(
+    tenant_id, *, provider_type=None, model_name=None, status_filter=None, served_by=None,
+    chat_id=None, api_key_id=None, date_from=None, date_to=None, has_tool_calls=None,
+):
+    """Shared WHERE clauses so the list and the summary reflect the same view."""
+    clauses = [LLMRequestLog.tenant_id == tenant_id]
+    if provider_type:
+        clauses.append(LLMRequestLog.provider_type == provider_type)
+    if model_name:
+        clauses.append(LLMRequestLog.model_name == model_name)
+    if status_filter == "error":
+        clauses.append(LLMRequestLog.status != "success")
+    elif status_filter:
+        clauses.append(LLMRequestLog.status == status_filter)
+    if served_by == "llm":
+        # NULL (legacy) counts as llm.
+        clauses.append(func.coalesce(LLMRequestLog.served_by, "llm") == "llm")
+    elif served_by:
+        clauses.append(LLMRequestLog.served_by == served_by)
+    if chat_id:
+        clauses.append(LLMRequestLog.chat_id == chat_id)
+    if api_key_id:
+        clauses.append(LLMRequestLog.api_key_id == api_key_id)
+    if date_from:
+        clauses.append(LLMRequestLog.created_at >= date_from)
+    if date_to:
+        clauses.append(LLMRequestLog.created_at <= date_to)
+    if has_tool_calls is True:
+        clauses.append(LLMRequestLog.tool_calls_count > 0)
+    elif has_tool_calls is False:
+        clauses.append((LLMRequestLog.tool_calls_count == 0) | (LLMRequestLog.tool_calls_count.is_(None)))
+    return clauses
 
 
 def _log_to_detail(log: LLMRequestLog) -> LLMLogDetailResponse:
@@ -114,7 +149,8 @@ async def list_logs(
     page_size: int = Query(20, ge=1, le=100),
     provider_type: str | None = Query(None),
     model_name: str | None = Query(None),
-    status_filter: str | None = Query(None, alias="status"),
+    status_filter: str | None = Query(None, alias="status"),  # success | error | <raw status>
+    served_by: str | None = Query(None),  # tier0_template | llm
     chat_id: uuid.UUID | None = Query(None),
     api_key_id: uuid.UUID | None = Query(None),
     date_from: datetime | None = Query(None),
@@ -123,38 +159,17 @@ async def list_logs(
     db: AsyncSession = Depends(get_db),
 ):
     await _verify_tenant(tenant_id, db)
-
-    query = select(LLMRequestLog).where(LLMRequestLog.tenant_id == tenant_id)
-
-    if provider_type:
-        query = query.where(LLMRequestLog.provider_type == provider_type)
-    if model_name:
-        query = query.where(LLMRequestLog.model_name == model_name)
-    if status_filter:
-        query = query.where(LLMRequestLog.status == status_filter)
-    if chat_id:
-        query = query.where(LLMRequestLog.chat_id == chat_id)
     if api_key_id:
         await _verify_api_key(tenant_id, api_key_id, db)
-        query = query.where(LLMRequestLog.api_key_id == api_key_id)
-    if date_from:
-        query = query.where(LLMRequestLog.created_at >= date_from)
-    if date_to:
-        query = query.where(LLMRequestLog.created_at <= date_to)
-    if has_tool_calls is not None:
-        if has_tool_calls:
-            query = query.where(LLMRequestLog.tool_calls_count > 0)
-        else:
-            query = query.where(
-                (LLMRequestLog.tool_calls_count == 0)
-                | (LLMRequestLog.tool_calls_count.is_(None))
-            )
 
-    query = query.order_by(LLMRequestLog.created_at.desc())
+    clauses = _log_filters(
+        tenant_id, provider_type=provider_type, model_name=model_name, status_filter=status_filter,
+        served_by=served_by, chat_id=chat_id, api_key_id=api_key_id, date_from=date_from,
+        date_to=date_to, has_tool_calls=has_tool_calls,
+    )
+    query = select(LLMRequestLog).where(*clauses).order_by(LLMRequestLog.created_at.desc())
 
-    count_q = select(func.count()).select_from(query.subquery())
-    total = (await db.execute(count_q)).scalar()
-
+    total = (await db.execute(select(func.count()).select_from(query.subquery()))).scalar()
     rows = (await db.execute(query.offset((page - 1) * page_size).limit(page_size))).scalars().all()
 
     return PaginatedResponse[LLMLogResponse](
@@ -162,6 +177,53 @@ async def list_logs(
         total_count=total,
         page=page,
         page_size=page_size,
+    )
+
+
+@router.get("/summary", response_model=LLMLogSummary)
+async def logs_summary(
+    tenant_id: uuid.UUID,
+    provider_type: str | None = Query(None),
+    model_name: str | None = Query(None),
+    status_filter: str | None = Query(None, alias="status"),
+    served_by: str | None = Query(None),
+    chat_id: uuid.UUID | None = Query(None),
+    api_key_id: uuid.UUID | None = Query(None),
+    date_from: datetime | None = Query(None),
+    date_to: datetime | None = Query(None),
+    has_tool_calls: bool | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Aggregates over the same filter set as the list — drives the stats bar."""
+    await _verify_tenant(tenant_id, db)
+    clauses = _log_filters(
+        tenant_id, provider_type=provider_type, model_name=model_name, status_filter=status_filter,
+        served_by=served_by, chat_id=chat_id, api_key_id=api_key_id, date_from=date_from,
+        date_to=date_to, has_tool_calls=has_tool_calls,
+    )
+    row = (await db.execute(select(
+        func.count().label("total"),
+        func.count().filter(LLMRequestLog.status != "success").label("errors"),
+        func.avg(LLMRequestLog.latency_ms).label("avg_latency"),
+        func.avg(LLMRequestLog.total_tokens).label("avg_tokens"),
+        func.coalesce(func.sum(LLMRequestLog.total_tokens), 0).label("total_tokens"),
+        func.coalesce(func.sum(LLMRequestLog.estimated_cost), 0).label("total_cost"),
+        func.count().filter(LLMRequestLog.served_by == "tier0_template").label("tier0"),
+        func.count().filter(LLMRequestLog.tool_calls_count > 0).label("with_tools"),
+    ).where(*clauses))).one()
+
+    total = row.total or 0
+    return LLMLogSummary(
+        total=total,
+        errors=row.errors or 0,
+        error_rate=(row.errors / total) if total else 0.0,
+        avg_latency_ms=float(row.avg_latency) if row.avg_latency is not None else None,
+        avg_total_tokens=float(row.avg_tokens) if row.avg_tokens is not None else None,
+        total_tokens=int(row.total_tokens or 0),
+        estimated_cost=float(row.total_cost or 0),
+        tier0_count=row.tier0 or 0,
+        tier0_share=(row.tier0 / total) if total else 0.0,
+        with_tool_calls=row.with_tools or 0,
     )
 
 

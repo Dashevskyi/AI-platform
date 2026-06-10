@@ -21,9 +21,24 @@ class LLMLogResponse(BaseModel):
     tool_calls_count: int | None
     finish_reason: str | None
     estimated_cost: float | None
+    served_by: str | None = None  # 'tier0_template' | 'llm'
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class LLMLogSummary(BaseModel):
+    """Aggregates over the currently-filtered logs — shown above the table."""
+    total: int
+    errors: int
+    error_rate: float
+    avg_latency_ms: float | None
+    avg_total_tokens: float | None
+    total_tokens: int
+    estimated_cost: float
+    tier0_count: int
+    tier0_share: float
+    with_tool_calls: int
 
 
 class LLMLogDetailResponse(LLMLogResponse):
