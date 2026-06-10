@@ -194,6 +194,35 @@ def test_parse_tool_call_non_dict_is_none():
     assert p._parse_tool_call(None) is None
 
 
+# ── _build_normalized_response ──────────────────────────────────────────────
+class _Resp:
+    def __init__(self, content): self.content = content
+
+
+def test_normalized_response_no_tools_just_length():
+    norm = p._build_normalized_response(_Resp("hello"), [], 0)
+    assert norm == {"content_length": 5}
+    assert "tool_execution" not in norm
+
+
+def test_normalized_response_truncates_large_table():
+    import json as _json
+    rows = [{"i": i} for i in range(50)]
+    messages = [{"role": "tool", "content": _json.dumps(rows)}]
+    norm = p._build_normalized_response(_Resp("x"), messages, 1)
+    entry = norm["tool_execution"][0]["content"]
+    assert entry["count"] == 50
+    assert entry["log_truncated"] is True
+    assert len(entry["items"]) == 20
+
+
+def test_normalized_response_records_tool_calls():
+    messages = [{"role": "assistant", "tool_calls": [{"function": {"name": "ping", "arguments": {"ip": "1.1.1.1"}}}]}]
+    norm = p._build_normalized_response(_Resp("x"), messages, 1)
+    assert norm["tool_execution"][0]["role"] == "assistant_tool_calls"
+    assert norm["tool_execution"][0]["calls"][0]["name"] == "ping"
+
+
 # ── _ct (tiktoken token count) ──────────────────────────────────────────────
 def test_ct_empty_is_zero():
     assert p._ct("") == 0

@@ -156,6 +156,93 @@ def _content_to_text(c) -> str:
     return ""
 
 
+async def _collect_capture_artifacts(capture_tasks_by_round: dict, round_breakdown: list, correlation_id: str) -> None:
+    """Briefly await the background artifact-capture tasks and attribute the new
+    artifact_ids to their round in round_breakdown[].artifacts_captured. Tightly
+    time-boxed (5s) so a hung embed never blocks the response. Best-effort."""
+    if not capture_tasks_by_round:
+        return
+    try:
+        for r_num, items in capture_tasks_by_round.items():
+            tasks = [t for _, t in items]
+            done = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=5.0)
+            arts: list[dict] = []
+            for (t_name, _t), result in zip(items, done):
+                aid = str(result) if (not isinstance(result, Exception) and result is not None) else None
+                arts.append({"tool_name": t_name, "artifact_id": aid})
+            for r_entry in round_breakdown:
+                if r_entry.get("round") == r_num:
+                    r_entry["artifacts_captured"] = arts
+                    break
+    except asyncio.TimeoutError:
+        logger.warning("[%s] artifact-capture tasks timed out (5s); debug.artifacts_captured may be incomplete", correlation_id)
+    except Exception:
+        logger.exception("[%s] failed to collect artifact-capture results (non-fatal)", correlation_id)
+
+
+def _build_normalized_response(resp, messages: list[dict], tool_calls_total: int) -> dict:
+    """Normalized response for the request log: content length plus, when tools
+    ran, a compact tool-execution trail. JSON tool results are parsed and large
+    tables truncated to TOOL_LOG_MAX_ROWS (real count preserved) so the UI can
+    render them without truncation breaking JSON.parse. Pure (no DB)."""
+    norm: dict = {"content_length": len(resp.content) if resp else 0}
+    if tool_calls_total <= 0:
+        return norm
+
+    TOOL_LOG_RAW_LIMIT = 20000
+    TOOL_LOG_MAX_ROWS = 20
+
+    def _truncate_table_payload(obj):
+        if isinstance(obj, list) and obj and all(isinstance(x, dict) for x in obj):
+            if len(obj) <= TOOL_LOG_MAX_ROWS:
+                return obj
+            return {
+                "count": len(obj),
+                "items": obj[:TOOL_LOG_MAX_ROWS],
+                "log_truncated": True,
+                "log_shown_rows": TOOL_LOG_MAX_ROWS,
+            }
+        if isinstance(obj, dict) and isinstance(obj.get("items"), list):
+            items = obj["items"]
+            if all(isinstance(x, dict) for x in items) and len(items) > TOOL_LOG_MAX_ROWS:
+                truncated = dict(obj)
+                truncated["items"] = items[:TOOL_LOG_MAX_ROWS]
+                truncated["log_truncated"] = True
+                truncated["log_shown_rows"] = TOOL_LOG_MAX_ROWS
+                if "count" not in truncated:
+                    truncated["count"] = len(items)
+                return truncated
+        return obj
+
+    def _store_tool_content(raw):
+        if not isinstance(raw, str) or not raw:
+            return raw
+        stripped = raw.lstrip()
+        if stripped.startswith("{") or stripped.startswith("["):
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, (dict, list)):
+                    return _truncate_table_payload(parsed)
+            except (ValueError, TypeError):
+                pass
+        if len(raw) > TOOL_LOG_RAW_LIMIT:
+            return raw[:TOOL_LOG_RAW_LIMIT] + "\n... [обрезано в логе]"
+        return raw
+
+    tool_log = []
+    for m in messages:
+        if m.get("role") == "tool":
+            tool_log.append({"role": "tool", "content": _store_tool_content(m.get("content", ""))})
+        elif m.get("role") == "assistant" and m.get("tool_calls"):
+            calls = []
+            for tc in m["tool_calls"]:
+                func = tc.get("function", tc)
+                calls.append({"name": func.get("name"), "arguments": func.get("arguments")})
+            tool_log.append({"role": "assistant_tool_calls", "calls": calls})
+    norm["tool_execution"] = tool_log
+    return norm
+
+
 def _snapshot_messages(msgs: list[dict]) -> list[dict]:
     """Compact per-message summary (role, chars, est_tokens, brief) for the
     debug trace, so the UI can show what was sent into each round. Pure."""
@@ -2093,63 +2180,7 @@ async def _chat_completion_inner(
             system_block_contents=system_parts,
         ),
     }
-    norm_resp: dict = {"content_length": len(resp.content) if resp else 0}
-    if tool_calls_total > 0:
-        # Include tool call details in normalized response.
-        # If the result is JSON, store the parsed object so the UI can render it
-        # as a table without truncation breaking JSON.parse.
-        # For tabular results — keep first TOOL_LOG_MAX_ROWS rows; preserve real count.
-        TOOL_LOG_RAW_LIMIT = 20000
-        TOOL_LOG_MAX_ROWS = 20
-
-        def _truncate_table_payload(obj):
-            if isinstance(obj, list) and obj and all(isinstance(x, dict) for x in obj):
-                if len(obj) <= TOOL_LOG_MAX_ROWS:
-                    return obj
-                return {
-                    "count": len(obj),
-                    "items": obj[:TOOL_LOG_MAX_ROWS],
-                    "log_truncated": True,
-                    "log_shown_rows": TOOL_LOG_MAX_ROWS,
-                }
-            if isinstance(obj, dict) and isinstance(obj.get("items"), list):
-                items = obj["items"]
-                if all(isinstance(x, dict) for x in items) and len(items) > TOOL_LOG_MAX_ROWS:
-                    truncated = dict(obj)
-                    truncated["items"] = items[:TOOL_LOG_MAX_ROWS]
-                    truncated["log_truncated"] = True
-                    truncated["log_shown_rows"] = TOOL_LOG_MAX_ROWS
-                    if "count" not in truncated:
-                        truncated["count"] = len(items)
-                    return truncated
-            return obj
-
-        def _store_tool_content(raw: str):
-            if not isinstance(raw, str) or not raw:
-                return raw
-            stripped = raw.lstrip()
-            if stripped.startswith("{") or stripped.startswith("["):
-                try:
-                    parsed = json.loads(raw)
-                    if isinstance(parsed, (dict, list)):
-                        return _truncate_table_payload(parsed)
-                except (ValueError, TypeError):
-                    pass
-            if len(raw) > TOOL_LOG_RAW_LIMIT:
-                return raw[:TOOL_LOG_RAW_LIMIT] + "\n... [обрезано в логе]"
-            return raw
-
-        tool_log = []
-        for m in messages:
-            if m.get("role") == "tool":
-                tool_log.append({"role": "tool", "content": _store_tool_content(m.get("content", ""))})
-            elif m.get("role") == "assistant" and m.get("tool_calls"):
-                calls = []
-                for tc in m["tool_calls"]:
-                    func = tc.get("function", tc)
-                    calls.append({"name": func.get("name"), "arguments": func.get("arguments")})
-                tool_log.append({"role": "assistant_tool_calls", "calls": calls})
-        norm_resp["tool_execution"] = tool_log
+    norm_resp = _build_normalized_response(resp, messages, tool_calls_total)
 
     message_uuid = None
     if user_message_id:
@@ -2158,33 +2189,8 @@ async def _chat_completion_inner(
         except (ValueError, TypeError):
             message_uuid = None
 
-    # Await artifact-capture tasks so we can attribute the new artifact_ids
-    # back to their round in debug.rounds[].artifacts_captured. Tasks were
-    # fired as background; we briefly wait (with a tight cap so we don't
-    # block the response if some hang). Embedder failures inside capture
-    # already log and return None — we just collect the ids.
-    if _capture_tasks_by_round:
-        try:
-            for r_num, items in _capture_tasks_by_round.items():
-                tasks = [t for _, t in items]
-                done = await asyncio.wait_for(
-                    asyncio.gather(*tasks, return_exceptions=True),
-                    timeout=5.0,
-                )
-                arts: list[dict] = []
-                for (t_name, _t), result in zip(items, done):
-                    aid: str | None = None
-                    if not isinstance(result, Exception) and result is not None:
-                        aid = str(result)
-                    arts.append({"tool_name": t_name, "artifact_id": aid})
-                for r_entry in round_breakdown:
-                    if r_entry.get("round") == r_num:
-                        r_entry["artifacts_captured"] = arts
-                        break
-        except asyncio.TimeoutError:
-            logger.warning("[%s] artifact-capture tasks timed out (5s); debug.artifacts_captured may be incomplete", correlation_id)
-        except Exception:
-            logger.exception("[%s] failed to collect artifact-capture results (non-fatal)", correlation_id)
+    # Attribute background-captured artifact ids back to their round (see helper).
+    await _collect_capture_artifacts(_capture_tasks_by_round, round_breakdown, correlation_id)
 
     # Finalize debug trace before persisting.
     debug_trace["rounds"] = round_breakdown
