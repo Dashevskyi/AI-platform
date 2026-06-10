@@ -33,6 +33,34 @@ def _tool_errors_count(debug) -> int | None:
     return sum(1 for tc in tcs if isinstance(tc, dict) and tc.get("ok") is False)
 
 
+def _request_preview(log: LLMRequestLog, limit: int = 160) -> str | None:
+    """Pull the last user message out of the logged request so the logs table
+    can show *what* was asked, not just the chat title. Checks normalized then
+    raw request; tolerant of both {'messages': [...]} and bare list shapes."""
+    for src in (log.normalized_request, log.raw_request):
+        if not isinstance(src, dict):
+            continue
+        msgs = src.get("messages")
+        if not isinstance(msgs, list):
+            continue
+        for m in reversed(msgs):
+            if not isinstance(m, dict) or m.get("role") != "user":
+                continue
+            content = m.get("content")
+            text = None
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                # multimodal: concatenate text parts
+                parts = [p.get("text") for p in content
+                         if isinstance(p, dict) and p.get("type") == "text" and p.get("text")]
+                text = " ".join(parts) if parts else None
+            if text and text.strip():
+                t = " ".join(text.split())
+                return t[:limit] + ("…" if len(t) > limit else "")
+    return None
+
+
 def _log_to_response(log: LLMRequestLog) -> LLMLogResponse:
     return LLMLogResponse(
         id=str(log.id),
@@ -55,6 +83,7 @@ def _log_to_response(log: LLMRequestLog) -> LLMLogResponse:
         finish_reason=log.finish_reason,
         estimated_cost=log.estimated_cost,
         served_by=log.served_by,
+        request_preview=_request_preview(log),
         created_at=log.created_at,
     )
 

@@ -23,6 +23,7 @@ class LLMLogResponse(BaseModel):
     finish_reason: str | None
     estimated_cost: float | None
     served_by: str | None = None  # 'tier0_template' | 'llm'
+    request_preview: str | None = None  # short snippet of the user's prompt
     created_at: datetime
 
     model_config = {"from_attributes": True}

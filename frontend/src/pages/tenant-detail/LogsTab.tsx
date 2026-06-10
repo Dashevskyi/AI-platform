@@ -1059,10 +1059,15 @@ export function LogsTab({ tenantId }: LogsTabProps) {
                   <Table.Td>
                     <Text size="sm">{new Date(log.created_at).toLocaleString()}</Text>
                   </Table.Td>
-                  <Table.Td>
+                  <Table.Td style={{ maxWidth: 260 }}>
                     <Text size="sm" lineClamp={1}>
                       {log.chat_id ? (chatMap.get(log.chat_id) || log.chat_id.slice(0, 8)) : '-'}
                     </Text>
+                    {log.request_preview && (
+                      <Text size="xs" c="dimmed" lineClamp={1} title={log.request_preview}>
+                        {log.request_preview}
+                      </Text>
+                    )}
                   </Table.Td>
                   <Table.Td>
                     <Text size="sm" lineClamp={1}>

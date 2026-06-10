@@ -466,6 +466,7 @@ export interface LLMLog {
   finish_reason: string | null;
   estimated_cost: number | null;
   served_by: string | null; // 'tier0_template' | 'llm'
+  request_preview: string | null; // short snippet of the user's prompt
   created_at: string;
 }
 
