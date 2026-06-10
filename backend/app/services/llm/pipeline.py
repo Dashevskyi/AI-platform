@@ -724,6 +724,17 @@ class PipelineRun:
         self.on_event = on_event
         self.merged_message_ids = merged_message_ids
         self.voice_mode = voice_mode
+        self.correlation_id = ""  # set at the start of run()
+
+    async def _emit(self, event_type: str, payload: dict) -> None:
+        """Forward a lifecycle event to the caller's on_event sink (if any),
+        stamped with the run's correlation_id. Never lets a sink error escape."""
+        if self.on_event is None:
+            return
+        try:
+            await self.on_event(event_type, {"correlation_id": self.correlation_id, **payload})
+        except Exception:
+            logger.warning(f"[{self.correlation_id}] on_event raised; ignoring", exc_info=True)
 
 
 async def _chat_completion_inner(self) -> dict:
@@ -750,7 +761,7 @@ async def _chat_completion_inner(self) -> dict:
     on_event = self.on_event
     merged_message_ids = self.merged_message_ids
     voice_mode = self.voice_mode
-    correlation_id = str(uuid.uuid4())
+    self.correlation_id = correlation_id = str(uuid.uuid4())
 
     # Per-turn debug trace — accumulated through the pipeline, written to
     # LLMRequestLog.debug at the end. Temporary instrumentation for the
@@ -770,13 +781,7 @@ async def _chat_completion_inner(self) -> dict:
         "blocks_present": [],
     }
 
-    async def _emit(event_type: str, payload: dict) -> None:
-        if on_event is None:
-            return
-        try:
-            await on_event(event_type, {"correlation_id": correlation_id, **payload})
-        except Exception:
-            logger.warning(f"[{correlation_id}] on_event raised; ignoring", exc_info=True)
+    _emit = self._emit  # method; bound to a local so body call sites read unchanged
 
     await _emit("pipeline_start", {"chat_id": chat_id})
 
