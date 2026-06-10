@@ -177,6 +177,70 @@ async def delete_data_source(
     await db.flush()
 
 
+@router.post("/{data_source_id}/test")
+async def test_data_source(
+    tenant_id: uuid.UUID,
+    data_source_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Lightweight connectivity check for a data source. Returns {ok, detail,
+    latency_ms}. ok=null means the test isn't supported for that kind."""
+    import asyncio
+    import time
+
+    await _verify_tenant(tenant_id, db)
+    ds = await _get_data_source_or_404(tenant_id, data_source_id, db)
+    cfg = ds.config_json or {}
+    secret = {}
+    if ds.secret_json_encrypted:
+        try:
+            secret = json.loads(decrypt_value(ds.secret_json_encrypted))
+        except Exception:
+            secret = {}
+
+    t0 = time.time()
+    try:
+        if ds.kind in ("postgresql", "mysql", "mariadb"):
+            from app.services.tools.executor import _build_db_url_from_data_source, _get_db_engine
+            url = _build_db_url_from_data_source({"kind": ds.kind, "config_json": cfg, "secret_json": secret})
+            engine = _get_db_engine(url)
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+            detail = "Подключение к БД успешно (SELECT 1)."
+        elif ds.kind == "http_api":
+            import httpx
+            base = (cfg.get("base_url") or "").rstrip("/")
+            if not base:
+                raise ValueError("base_url не задан в конфигурации.")
+            async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as c:
+                r = await c.get(base)
+            detail = f"Хост доступен (HTTP {r.status_code})."
+        elif ds.kind == "ssh":
+            import asyncssh
+            host = cfg.get("host")
+            port = int(cfg.get("port") or 22)
+            username = cfg.get("username") or secret.get("username")
+            kwargs: dict = {"host": host, "port": port, "username": username, "known_hosts": None, "connect_timeout": 8}
+            if secret.get("private_key"):
+                kwargs["client_keys"] = [asyncssh.import_private_key(secret["private_key"])]
+            elif secret.get("password"):
+                kwargs["password"] = secret["password"]
+            async with asyncssh.connect(**kwargs):
+                pass
+            detail = f"SSH подключение успешно ({host}:{port})."
+        elif ds.kind == "telnet":
+            host = cfg.get("host")
+            port = int(cfg.get("port") or 23)
+            _, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=8)
+            writer.close()
+            detail = f"TCP подключение успешно ({host}:{port})."
+        else:
+            return {"ok": None, "detail": f"Тест для типа «{ds.kind}» пока не поддержан.", "latency_ms": 0}
+        return {"ok": True, "detail": detail, "latency_ms": int((time.time() - t0) * 1000)}
+    except Exception as e:
+        return {"ok": False, "detail": str(e)[:300] or type(e).__name__, "latency_ms": int((time.time() - t0) * 1000)}
+
+
 @router.get("/{data_source_id}/schema")
 async def get_data_source_schema(
     tenant_id: uuid.UUID,

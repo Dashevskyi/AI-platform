@@ -20,6 +20,7 @@ import {
   Text,
   TextInput,
   Textarea,
+  Tooltip,
 } from '@mantine/core';
 import { IconPlus, IconTrash } from '@tabler/icons-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -47,9 +48,24 @@ type DataSourcesTabProps = {
   tenantId: string;
 };
 
+type TestResult = { ok: boolean | null; detail: string; latency_ms: number };
+
 export function DataSourcesTab({ tenantId }: DataSourcesTabProps) {
   const queryClient = useQueryClient();
   const [page, setPage] = useState(1);
+  const [testResults, setTestResults] = useState<Record<string, TestResult>>({});
+  const [testingId, setTestingId] = useState<string | null>(null);
+  const runTest = async (id: string) => {
+    setTestingId(id);
+    try {
+      const res = await dataSourcesApi.test(tenantId, id);
+      setTestResults((prev) => ({ ...prev, [id]: res }));
+    } catch {
+      setTestResults((prev) => ({ ...prev, [id]: { ok: false, detail: 'Ошибка запроса', latency_ms: 0 } }));
+    } finally {
+      setTestingId(null);
+    }
+  };
   const [modalOpen, setModalOpen] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
   const [name, setName] = useState('');
@@ -339,18 +355,39 @@ export function DataSourcesTab({ tenantId }: DataSourcesTabProps) {
                       </Badge>
                     </Table.Td>
                     <Table.Td>
-                      <ActionIcon
-                        variant="subtle"
-                        color="red"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (window.confirm(`Удалить источник данных "${ds.name}"?`)) {
-                            deleteMutation.mutate(ds.id);
-                          }
-                        }}
-                      >
-                        <IconTrash size={16} />
-                      </ActionIcon>
+                      <Group gap={6} wrap="nowrap">
+                        <Button
+                          size="compact-xs"
+                          variant="light"
+                          loading={testingId === ds.id}
+                          onClick={(e) => { e.stopPropagation(); runTest(ds.id); }}
+                        >
+                          Проверить
+                        </Button>
+                        {testResults[ds.id] && (
+                          <Tooltip label={`${testResults[ds.id].detail} · ${testResults[ds.id].latency_ms} мс`} multiline w={320} withArrow>
+                            <Badge
+                              size="sm"
+                              variant="light"
+                              color={testResults[ds.id].ok === true ? 'green' : testResults[ds.id].ok === false ? 'red' : 'gray'}
+                            >
+                              {testResults[ds.id].ok === true ? '✓ OK' : testResults[ds.id].ok === false ? '✗ ошибка' : '—'}
+                            </Badge>
+                          </Tooltip>
+                        )}
+                        <ActionIcon
+                          variant="subtle"
+                          color="red"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (window.confirm(`Удалить источник данных "${ds.name}"?`)) {
+                              deleteMutation.mutate(ds.id);
+                            }
+                          }}
+                        >
+                          <IconTrash size={16} />
+                        </ActionIcon>
+                      </Group>
                     </Table.Td>
                   </Table.Tr>
                 );

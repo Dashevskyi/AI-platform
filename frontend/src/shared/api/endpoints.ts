@@ -319,6 +319,10 @@ export const dataSourcesApi = {
     const res = await apiClient.get(`/api/admin/tenants/${tenantId}/data-sources/${dataSourceId}/schema`);
     return res.data;
   },
+  test: async (tenantId: string, dataSourceId: string): Promise<{ ok: boolean | null; detail: string; latency_ms: number }> => {
+    const res = await apiClient.post(`/api/admin/tenants/${tenantId}/data-sources/${dataSourceId}/test`);
+    return res.data;
+  },
 };
 
 // Knowledge Base
