@@ -138,6 +138,38 @@ def test_datetime_block_bad_tz_falls_back():
     assert out is not None and "Сейчас" in out
 
 
+# ── _compute_context_breakdown ──────────────────────────────────────────────
+class _BdCfg:
+    system_prompt = "system here"
+    rules_text = "rules here"
+
+
+class _Mem:
+    def __init__(self, c): self.content = c
+
+
+def test_context_breakdown_counts_sections():
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hello world"},
+        {"role": "assistant", "content": "hi"},
+    ]
+    bd = p._compute_context_breakdown(messages, _BdCfg(), [_Mem("fact")], [], None, "cid")
+    assert bd["system_prompt"]["est_tokens"] > 0
+    assert bd["memory"]["entries"] == 1
+    assert bd["history"]["messages"] == 2          # user + assistant, not system
+    assert bd["tools"]["count"] == 0
+    assert bd["total_est_tokens"] == sum(
+        v["est_tokens"] for k, v in bd.items() if k != "total_est_tokens"
+    )
+
+
+def test_content_to_text_flattens_parts():
+    assert p._content_to_text("plain") == "plain"
+    assert p._content_to_text([{"type": "text", "text": "a"}, {"type": "image", "x": 1}]) == "a"
+    assert p._content_to_text(None) == ""
+
+
 # ── _ct (tiktoken token count) ──────────────────────────────────────────────
 def test_ct_empty_is_zero():
     assert p._ct("") == 0

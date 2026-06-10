@@ -146,6 +146,50 @@ def _is_lazy_response(content: str) -> bool:
     return bool(_LAZY_INTENT_RE.search(content))
 
 
+def _content_to_text(c) -> str:
+    """Flatten a message content (str or list-of-parts) to plain text."""
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        return " ".join(p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text")
+    return ""
+
+
+def _compute_context_breakdown(messages, config, memory_entries, kb_chunks, tool_defs, correlation_id: str) -> dict:
+    """Per-section char/token telemetry for the assembled prompt (tiktoken).
+    Telemetry only — exact prompt tokens come from the provider. Pure (no DB)."""
+    history_content = ""
+    for m in messages:
+        if m["role"] in ("user", "assistant"):
+            history_content += _content_to_text(m.get("content", "")) + " "
+
+    system_prompt_text = config.system_prompt or ""
+    rules_text = config.rules_text or ""
+    memory_text = "".join(m.content or "" for m in memory_entries)
+    kb_text = "".join(c.content or "" for c in kb_chunks)
+    tools_text = json.dumps(tool_defs) if tool_defs else ""
+
+    breakdown = {
+        "system_prompt": {"chars": len(system_prompt_text), "est_tokens": _ct(system_prompt_text)},
+        "rules": {"chars": len(rules_text), "est_tokens": _ct(rules_text)},
+        "memory": {"chars": len(memory_text), "entries": len(memory_entries), "est_tokens": _ct(memory_text)},
+        "kb": {"chars": len(kb_text), "chunks": len(kb_chunks), "est_tokens": _ct(kb_text)},
+        "history": {"chars": len(history_content), "messages": len([m for m in messages if m["role"] != "system"]), "est_tokens": _ct(history_content)},
+        "tools": {"chars": len(tools_text), "count": len(tool_defs) if tool_defs else 0, "est_tokens": _ct(tools_text)},
+    }
+    breakdown["total_est_tokens"] = sum(v["est_tokens"] for v in breakdown.values())
+
+    logger.debug(f"[{correlation_id}] Context breakdown: "
+                f"system={breakdown['system_prompt']['est_tokens']}t, "
+                f"rules={breakdown['rules']['est_tokens']}t, "
+                f"memory={breakdown['memory']['est_tokens']}t({len(memory_entries)}), "
+                f"kb={breakdown['kb']['est_tokens']}t({len(kb_chunks)}chunks), "
+                f"history={breakdown['history']['est_tokens']}t({breakdown['history']['messages']}msgs), "
+                f"tools={breakdown['tools']['est_tokens']}t({breakdown['tools']['count']}), "
+                f"TOTAL≈{breakdown['total_est_tokens']}t")
+    return breakdown
+
+
 def _build_datetime_block(config, correlation_id: str) -> str | None:
     """The '## Текущая дата и время' system block, in the tenant's timezone.
     Non-fatal: returns None if the date can't be computed. Pure (no DB)."""
@@ -2010,60 +2054,10 @@ async def _chat_completion_inner(
     total_tokens = (total_prompt_tokens + total_completion_tokens) if (total_prompt_tokens or total_completion_tokens) else None
     time_to_first_token_ms = int((first_chunk_at - start) * 1000) if first_chunk_at is not None else None
 
-    # Build normalized with tool execution details and token breakdown
-    def _content_to_text(c) -> str:
-        if isinstance(c, str):
-            return c
-        if isinstance(c, list):
-            parts = []
-            for p in c:
-                if isinstance(p, dict) and p.get("type") == "text":
-                    parts.append(p.get("text", ""))
-            return " ".join(parts)
-        return ""
-
-    system_content = ""
-    history_content = ""
-    for m in messages:
-        if m["role"] == "system":
-            system_content = _content_to_text(m.get("content", ""))
-        elif m["role"] in ("user", "assistant"):
-            history_content += _content_to_text(m.get("content", "")) + " "
-
-    system_prompt_text = config.system_prompt or ""
-    rules_text = config.rules_text or ""
-    memory_text = "".join(m.content or "" for m in memory_entries)
-    kb_text = "".join(c.content or "" for c in kb_chunks)
-    tools_text = json.dumps(tool_defs) if tool_defs else ""
-
-    system_prompt_chars = len(system_prompt_text)
-    rules_chars = len(rules_text)
-    memory_chars = len(memory_text)
-    kb_chars = len(kb_text)
-    history_chars = len(history_content)
-    tools_chars = len(tools_text)
-
-    # Token counts via tiktoken (cl100k_base). Telemetry only — exact prompt
-    # tokens come from the provider in usage.prompt_tokens.
-    context_breakdown = {
-        "system_prompt": {"chars": system_prompt_chars, "est_tokens": _ct(system_prompt_text)},
-        "rules": {"chars": rules_chars, "est_tokens": _ct(rules_text)},
-        "memory": {"chars": memory_chars, "entries": len(memory_entries), "est_tokens": _ct(memory_text)},
-        "kb": {"chars": kb_chars, "chunks": len(kb_chunks), "est_tokens": _ct(kb_text)},
-        "history": {"chars": history_chars, "messages": len([m for m in messages if m["role"] != "system"]), "est_tokens": _ct(history_content)},
-        "tools": {"chars": tools_chars, "count": len(tool_defs) if tool_defs else 0, "est_tokens": _ct(tools_text)},
-    }
-    total_est_tokens = sum(v["est_tokens"] for v in context_breakdown.values())
-    context_breakdown["total_est_tokens"] = total_est_tokens
-
-    logger.debug(f"[{correlation_id}] Context breakdown: "
-                f"system={context_breakdown['system_prompt']['est_tokens']}t, "
-                f"rules={context_breakdown['rules']['est_tokens']}t, "
-                f"memory={context_breakdown['memory']['est_tokens']}t({len(memory_entries)}), "
-                f"kb={context_breakdown['kb']['est_tokens']}t({len(kb_chunks)}chunks), "
-                f"history={context_breakdown['history']['est_tokens']}t({context_breakdown['history']['messages']}msgs), "
-                f"tools={context_breakdown['tools']['est_tokens']}t({context_breakdown['tools']['count']}), "
-                f"TOTAL≈{total_est_tokens}t")
+    # Per-section token/char telemetry for the assembled prompt.
+    context_breakdown = _compute_context_breakdown(
+        messages, config, memory_entries, kb_chunks, tool_defs, correlation_id
+    )
 
     norm_req = {
         "messages_count": len(messages),
