@@ -19,6 +19,7 @@ import type {
   ShellConfig,
   ShellConfigUpdate,
   Tool,
+  ToolMetric,
   ToolCreate,
   ToolUpdate,
   ToolTestRequest,
@@ -239,6 +240,16 @@ export const toolsApi = {
   },
   semanticTest: async (tenantId: string, query: string, limit = 20): Promise<SemanticTestResponse> => {
     const res = await apiClient.post(`/api/admin/tenants/${tenantId}/tools/semantic-test`, { query, limit });
+    return res.data;
+  },
+  metrics: async (
+    tenantId: string,
+    filters?: { date_from?: string; date_to?: string },
+  ): Promise<ToolMetric[]> => {
+    const params: Record<string, unknown> = {};
+    if (filters?.date_from) params.date_from = filters.date_from;
+    if (filters?.date_to) params.date_to = filters.date_to;
+    const res = await apiClient.get(`/api/admin/tenants/${tenantId}/tools/metrics`, { params });
     return res.data;
   },
   delete: async (tenantId: string, toolId: string): Promise<void> => {

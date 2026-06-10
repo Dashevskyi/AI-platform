@@ -466,6 +466,14 @@ export interface LLMLog {
   created_at: string;
 }
 
+export interface ToolMetric {
+  name: string;
+  calls: number;
+  errors: number;
+  success_rate: number;
+  avg_latency_ms: number | null;
+}
+
 export interface LLMLogSummary {
   total: number;
   errors: number;

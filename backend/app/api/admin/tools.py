@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import select, func
+from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -90,6 +90,54 @@ async def _validate_tool_payload(
                 status_code=409,
                 detail=f"Tool function.name '{function_name}' уже используется у этого tenant.",
             )
+
+
+class ToolMetric(BaseModel):
+    name: str
+    calls: int
+    errors: int
+    success_rate: float
+    avg_latency_ms: float | None
+
+
+@router.get("/metrics", response_model=list[ToolMetric])
+async def tool_metrics(
+    tenant_id: uuid.UUID,
+    date_from: datetime | None = Query(None),
+    date_to: datetime | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Per-tool call counts / success rate / avg latency, aggregated from the
+    tool_calls recorded in each request's debug trace (debug.tool_calls)."""
+    await _verify_tenant(tenant_id, db)
+    rows = (await db.execute(text("""
+        SELECT tc->>'name' AS name,
+               count(*) AS calls,
+               count(*) FILTER (WHERE (tc->>'ok')::boolean IS NOT TRUE) AS errors,
+               avg((tc->>'latency_ms')::numeric) AS avg_latency
+        FROM llm_request_logs l,
+             LATERAL jsonb_array_elements(
+                 CASE WHEN jsonb_typeof(l.debug->'tool_calls') = 'array'
+                      THEN l.debug->'tool_calls' ELSE '[]'::jsonb END
+             ) tc
+        WHERE l.tenant_id = :tid
+          AND (CAST(:date_from AS timestamptz) IS NULL OR l.created_at >= CAST(:date_from AS timestamptz))
+          AND (CAST(:date_to AS timestamptz) IS NULL OR l.created_at <= CAST(:date_to AS timestamptz))
+        GROUP BY tc->>'name'
+        ORDER BY calls DESC
+    """), {"tid": tenant_id, "date_from": date_from, "date_to": date_to})).mappings().all()
+    out = []
+    for r in rows:
+        calls = r["calls"] or 0
+        errors = r["errors"] or 0
+        out.append(ToolMetric(
+            name=r["name"] or "(unknown)",
+            calls=calls,
+            errors=errors,
+            success_rate=((calls - errors) / calls) if calls else 0.0,
+            avg_latency_ms=float(r["avg_latency"]) if r["avg_latency"] is not None else None,
+        ))
+    return out
 
 
 @router.get("/groups", response_model=list[str])

@@ -3081,6 +3081,13 @@ function ToolsTab({ tenantId }: { tenantId: string }) {
     queryKey: ['tenants', tenantId, 'tools', 'groups'],
     queryFn: () => toolsApi.listGroups(tenantId),
   });
+  // Per-tool usage from the request logs (calls / success / latency), keyed by name.
+  const { data: toolMetricsData } = useQuery({
+    queryKey: ['tenants', tenantId, 'tools', 'metrics'],
+    queryFn: () => toolsApi.metrics(tenantId),
+    staleTime: 60_000,
+  });
+  const toolMetrics = new Map((toolMetricsData || []).map((m) => [m.name, m]));
   const { data: dataSourcesData } = useQuery({
     queryKey: ['tenants', tenantId, 'data-sources', 'for-tools'],
     queryFn: () => dataSourcesApi.list(tenantId, 1, 100),
@@ -3784,6 +3791,7 @@ function ToolsTab({ tenantId }: { tenantId: string }) {
                       <Table.Th>Описание</Table.Th>
                       <Table.Th>Протокол</Table.Th>
                       <Table.Th>Метки</Table.Th>
+                      <Table.Th>Использование</Table.Th>
                       <Table.Th>Статус</Table.Th>
                       <Table.Th>Действия</Table.Th>
                     </Table.Tr>
@@ -3818,6 +3826,29 @@ function ToolsTab({ tenantId }: { tenantId: string }) {
                             ) : (
                               <Text size="sm" c="dimmed">—</Text>
                             )}
+                          </Table.Td>
+                          <Table.Td>
+                            {(() => {
+                              const m = toolMetrics.get(tool.name);
+                              if (!m) return <Text size="sm" c="dimmed">—</Text>;
+                              const lat = m.avg_latency_ms;
+                              return (
+                                <Tooltip label={`${m.calls} вызов(ов), ${m.errors} ошиб.`}>
+                                  <Group gap={6} wrap="nowrap">
+                                    <Text size="sm">{m.calls}</Text>
+                                    <Badge size="xs" variant="light"
+                                      color={m.success_rate >= 0.9 ? 'green' : m.success_rate >= 0.7 ? 'yellow' : 'red'}>
+                                      {(m.success_rate * 100).toFixed(0)}%
+                                    </Badge>
+                                    {lat != null && (
+                                      <Text size="xs" c="dimmed">
+                                        {lat >= 1000 ? `${(lat / 1000).toFixed(1)}с` : `${Math.round(lat)}мс`}
+                                      </Text>
+                                    )}
+                                  </Group>
+                                </Tooltip>
+                              );
+                            })()}
                           </Table.Td>
                           <Table.Td>
                             <Group gap={4} wrap="nowrap">
