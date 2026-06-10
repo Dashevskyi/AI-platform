@@ -672,6 +672,17 @@ def _get_db_engine(url: str) -> AsyncEngine:
             pool_size=5,
             max_overflow=5,
         )
+        # SQLAlchemy 2.0's asyncmy adapter exposes ping(self, reconnect) with NO
+        # default, but inherits PyMySQL's do_ping which — because the installed
+        # PyMySQL's Connection.ping defaults reconnect=False — calls ping() with
+        # no args, raising "missing positional argument 'reconnect'" on every
+        # pre-ping. Forcing _send_false_to_ping=True makes do_ping pass ping(False)
+        # explicitly, which the adapter (and the real asyncmy connection) accept.
+        if normalized.startswith("mysql+asyncmy://"):
+            try:
+                engine.sync_engine.dialect._send_false_to_ping = True
+            except Exception:  # pragma: no cover — never let this break engine setup
+                logger.warning("could not force _send_false_to_ping on asyncmy engine", exc_info=True)
         _DB_ENGINES[normalized] = engine
     return engine
 
