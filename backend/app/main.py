@@ -127,18 +127,24 @@ async def lifespan(app: FastAPI):
     import asyncio
     from app.services.gpu_metrics import snapshot_worker
 
+    from app.services.jobs.queue import run_worker
+
     _enforce_secure_config()
     await seed_admin()
     gpu_task = asyncio.create_task(snapshot_worker())
     asyncio.create_task(_warmup_fish_speech())
+    jobs_stop = asyncio.Event()
+    jobs_task = asyncio.create_task(run_worker(jobs_stop))
     try:
         yield
     finally:
+        jobs_stop.set()
         gpu_task.cancel()
-        try:
-            await gpu_task
-        except asyncio.CancelledError:
-            pass
+        for _t in (gpu_task, jobs_task):
+            try:
+                await _t
+            except asyncio.CancelledError:
+                pass
         await engine.dispose()
 
 

@@ -209,6 +209,7 @@ from app.services.llm.model_resolver import resolve_model
 from app.services.llm.context_compressor import RECENT_MESSAGES_FULL, trim_tool_definitions
 from app.services.llm.system_blocks import STATIC_SYSTEM_BLOCKS
 from app.services.throttle import get_or_create_throttle, ThrottleRejected
+from app.services.jobs.queue import enqueue as enqueue_job
 from app.models.tenant import Tenant
 
 logger = logging.getLogger(__name__)
@@ -2253,17 +2254,15 @@ async def _chat_completion_inner(
     if resp:
         summary_model = (getattr(config, "summary_model_name", None) or model_name).strip()
 
+        # Background enrichment is now durable (survives restarts, retries):
+        # enqueue rows commit with this request's session. See app/services/jobs.
         if config.memory_enabled and resolved.provider_type != "ollama" and MEMORY_AUTO_EXTRACT:
-            asyncio.create_task(
-                _extract_memory_background(
-                    provider,
-                    summary_model,
-                    tenant_id,
-                    chat_id,
-                    user_content,
-                    resp.content,
-                )
-            )
+            await enqueue_job(db, "memory_extract", {
+                "tenant_id": str(tenant_id),
+                "chat_id": str(chat_id),
+                "user_content": user_content,
+                "assistant_content": resp.content,
+            }, tenant_id=tenant_id)
 
         history_for_summary = history_dicts + [
             {"role": "user", "content": user_content},
@@ -2271,16 +2270,17 @@ async def _chat_completion_inner(
         ]
         if len(history_for_summary) > RECENT_MESSAGES_FULL:
             summary_target_count = max(total_messages_count + 1 - RECENT_MESSAGES_FULL, 0)
-            asyncio.create_task(
-                _update_history_summary_background(
-                    chat_id=chat_id,
-                    old_messages=history_for_summary[:-RECENT_MESSAGES_FULL],
-                    existing_summary=chat.history_summary if chat else None,
-                    provider=provider,
-                    model_name=summary_model,
-                    message_count_up_to=summary_target_count,
-                )
-            )
+            # Bound the payload: the summarizer only uses role+content of the
+            # last ~30 messages, so trim before persisting the job.
+            _old = history_for_summary[:-RECENT_MESSAGES_FULL]
+            _old_min = [{"role": m.get("role"), "content": (m.get("content") or "")[:600]} for m in _old][-40:]
+            await enqueue_job(db, "history_summary", {
+                "tenant_id": str(tenant_id),
+                "chat_id": str(chat_id),
+                "old_messages": _old_min,
+                "existing_summary": chat.history_summary if chat else None,
+                "message_count_up_to": summary_target_count,
+            }, tenant_id=tenant_id)
 
         if chat and (not chat.title or not chat.description):
             await _auto_summary_background(
@@ -2627,13 +2627,12 @@ async def _extract_memory(
             await db.refresh(entry)
             existing_contents.add(fact_text.lower())
             saved += 1
-            # Schedule background embedding so the entry is searchable next round
+            # Durable embed job — committed together with the entry (2445), so
+            # the worker never races a not-yet-committed row.
             try:
-                import asyncio as _asyncio
-                from app.services.memory.embedder import embed_memory_entry
-                _asyncio.create_task(embed_memory_entry(entry.id))
+                await enqueue_job(db, "embed_memory", {"memory_id": str(entry.id)}, tenant_id=tenant_id)
             except Exception:
-                logger.debug("memory: failed to schedule embed", exc_info=True)
+                logger.debug("memory: failed to enqueue embed", exc_info=True)
 
         if saved:
             logger.debug(f"Auto-extracted {saved} memory fact(s) for tenant {tenant_id}")
