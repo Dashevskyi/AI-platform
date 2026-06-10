@@ -190,6 +190,24 @@ def _compute_context_breakdown(messages, config, memory_entries, kb_chunks, tool
     return breakdown
 
 
+def _parse_tool_call(tc):
+    """Parse one tool_call entry (OpenAI/Ollama dict) into
+    (tool_call_id, func_name, func_args). Returns None for a non-dict entry
+    (which the loop skips). func_args is decoded from a JSON string if needed."""
+    if not isinstance(tc, dict):
+        return None
+    func_info = tc.get("function", tc)
+    tool_call_id = tc.get("id", str(uuid.uuid4()))
+    func_name = func_info.get("name", "")
+    func_args = func_info.get("arguments", {})
+    if isinstance(func_args, str):
+        try:
+            func_args = json.loads(func_args)
+        except json.JSONDecodeError:
+            func_args = {"raw": func_args}
+    return tool_call_id, func_name, func_args
+
+
 def _build_pinned_memory_block(memory_entries) -> str | None:
     """The '## Закреплённая память' system block. Only PINNED entries land in the
     prompt — non-pinned stay out and are reachable via the recall_memory tool, so
@@ -1639,20 +1657,10 @@ async def _chat_completion_inner(
 
             # Execute each tool call and add results
             for tc in resp.tool_calls:
-                # Parse tool call — handle both Ollama and OpenAI formats
-                if isinstance(tc, dict):
-                    # OpenAI format: {"id": "...", "type": "function", "function": {"name": "...", "arguments": "..."}}
-                    func_info = tc.get("function", tc)
-                    tool_call_id = tc.get("id", str(uuid.uuid4()))
-                    func_name = func_info.get("name", "")
-                    func_args = func_info.get("arguments", {})
-                    if isinstance(func_args, str):
-                        try:
-                            func_args = json.loads(func_args)
-                        except json.JSONDecodeError:
-                            func_args = {"raw": func_args}
-                else:
+                parsed = _parse_tool_call(tc)
+                if parsed is None:
                     continue
+                tool_call_id, func_name, func_args = parsed
 
                 logger.debug(f"[{correlation_id}] Executing tool: {func_name}({func_args})")
 

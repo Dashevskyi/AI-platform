@@ -170,6 +170,30 @@ def test_content_to_text_flattens_parts():
     assert p._content_to_text(None) == ""
 
 
+# ── _parse_tool_call ────────────────────────────────────────────────────────
+def test_parse_tool_call_openai_dict_args():
+    tc = {"id": "c1", "type": "function", "function": {"name": "ping", "arguments": {"ip": "8.8.8.8"}}}
+    tid, name, args = p._parse_tool_call(tc)
+    assert tid == "c1" and name == "ping" and args == {"ip": "8.8.8.8"}
+
+
+def test_parse_tool_call_json_string_args():
+    tc = {"id": "c2", "function": {"name": "f", "arguments": '{"x": 1}'}}
+    _tid, name, args = p._parse_tool_call(tc)
+    assert name == "f" and args == {"x": 1}
+
+
+def test_parse_tool_call_bad_json_args_wrapped():
+    tc = {"function": {"name": "f", "arguments": "not json"}}
+    _tid, _name, args = p._parse_tool_call(tc)
+    assert args == {"raw": "not json"}
+
+
+def test_parse_tool_call_non_dict_is_none():
+    assert p._parse_tool_call("nope") is None
+    assert p._parse_tool_call(None) is None
+
+
 # ── _ct (tiktoken token count) ──────────────────────────────────────────────
 def test_ct_empty_is_zero():
     assert p._ct("") == 0
