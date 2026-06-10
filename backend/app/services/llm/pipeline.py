@@ -190,6 +190,28 @@ def _compute_context_breakdown(messages, config, memory_entries, kb_chunks, tool
     return breakdown
 
 
+def _schedule_tool_result_capture(
+    capture_tasks_by_round: dict, round_num: int, *,
+    tenant_id, chat_id, user_message_id, tool_name: str, arguments: dict, output: str, correlation_id: str,
+) -> None:
+    """Promote a successful tool result to a first-class artifact in the
+    background (so a later turn can ground on it). Bucketed by round so the
+    debug trace can list what each round captured. Best-effort: never raises."""
+    try:
+        from app.services.artifacts.tool_result_capture import capture_tool_result_as_artifact
+        task = asyncio.create_task(capture_tool_result_as_artifact(
+            tenant_id=tenant_id,
+            chat_id=chat_id,
+            user_message_id=uuid.UUID(str(user_message_id)) if user_message_id else None,
+            tool_name=tool_name,
+            arguments=arguments,
+            output=output or "",
+        ))
+        capture_tasks_by_round.setdefault(round_num, []).append((tool_name, task))
+    except Exception:
+        logger.exception("[%s] tool-result capture scheduling failed (non-fatal)", correlation_id)
+
+
 def _parse_tool_call(tc):
     """Parse one tool_call entry (OpenAI/Ollama dict) into
     (tool_call_id, func_name, func_args). Returns None for a non-dict entry
@@ -1734,22 +1756,12 @@ async def _chat_completion_inner(
                 # and the next user turn ("оформи это в таблицу") has nothing
                 # to ground on — leading to hallucinated values.
                 if tool_ok:
-                    try:
-                        from app.services.artifacts.tool_result_capture import capture_tool_result_as_artifact
-                        _capture_task = asyncio.create_task(capture_tool_result_as_artifact(
-                            tenant_id=tenant_id,
-                            chat_id=chat_id,
-                            user_message_id=uuid.UUID(str(user_message_id)) if user_message_id else None,
-                            tool_name=func_name,
-                            arguments=func_args,
-                            output=tool_output or "",
-                        ))
-                        # Bucket by ROUND of the tool execution (round_num).
-                        # debug.rounds[round_num].artifacts_captured will list
-                        # everything that became an Artifact this turn.
-                        _capture_tasks_by_round.setdefault(round_num, []).append((func_name, _capture_task))
-                    except Exception:
-                        logger.exception("[%s] tool-result capture scheduling failed (non-fatal)", correlation_id)
+                    _schedule_tool_result_capture(
+                        _capture_tasks_by_round, round_num,
+                        tenant_id=tenant_id, chat_id=chat_id, user_message_id=user_message_id,
+                        tool_name=func_name, arguments=func_args, output=tool_output or "",
+                        correlation_id=correlation_id,
+                    )
 
                 # Add tool result to messages (full content for current round) —
                 # provider decides shape (Ollama omits tool_call_id, OpenAI includes it).
@@ -1913,19 +1925,12 @@ async def _chat_completion_inner(
                     tool_outputs_current_request.append({"tool": func_name, "output": tool_output})
                     # Capture successful tool result as Artifact (auto-grounding ready).
                     if tool_ok:
-                        try:
-                            from app.services.artifacts.tool_result_capture import capture_tool_result_as_artifact
-                            _capture_task = asyncio.create_task(capture_tool_result_as_artifact(
-                                tenant_id=tenant_id,
-                                chat_id=chat_id,
-                                user_message_id=uuid.UUID(str(user_message_id)) if user_message_id else None,
-                                tool_name=func_name,
-                                arguments=func_args,
-                                output=tool_output or "",
-                            ))
-                            _capture_tasks_by_round.setdefault(round_num, []).append((func_name, _capture_task))
-                        except Exception:
-                            logger.exception("[%s] tool-result capture scheduling failed (non-fatal)", correlation_id)
+                        _schedule_tool_result_capture(
+                            _capture_tasks_by_round, round_num,
+                            tenant_id=tenant_id, chat_id=chat_id, user_message_id=user_message_id,
+                            tool_name=func_name, arguments=func_args, output=tool_output or "",
+                            correlation_id=correlation_id,
+                        )
                     messages.append(provider.format_tool_result_turn(
                         tool_call_id=tool_call_id,
                         content=tool_output,
