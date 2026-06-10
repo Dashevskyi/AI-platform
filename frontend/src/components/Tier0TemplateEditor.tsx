@@ -48,6 +48,8 @@ import {
   IconX,
   IconTemplate,
   IconWand,
+  IconSparkles,
+  IconListCheck,
 } from '@tabler/icons-react';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -1819,6 +1821,86 @@ export function Tier0TemplateEditor({ value, onChange, tenantId, toolName, toolD
     setAssistResult(null);
   }
 
+  // ── Wizard modal (multi-example generation + validation) ───────────────────
+  type ValRow = {
+    query: string; matched: boolean; extracted: string | null;
+    blocked: boolean; reason: string; expected: 'match' | 'skip'; ok: boolean;
+  };
+  type WizardResult = {
+    explanation: string;
+    suggestion: Record<string, unknown>;
+    validation: { results: ValRow[]; passed: number; total: number; all_ok: boolean };
+  };
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [wizPos, setWizPos] = useState('');
+  const [wizNeg, setWizNeg] = useState('');
+  const [wizSample, setWizSample] = useState('');
+  const [wizNotes, setWizNotes] = useState('');
+  const [wizLoading, setWizLoading] = useState(false);
+  const [wizResult, setWizResult] = useState<WizardResult | null>(null);
+  const [wizError, setWizError] = useState<string | null>(null);
+
+  const splitLines = (s: string) => s.split('\n').map((l) => l.trim()).filter(Boolean);
+
+  async function runWizard(refine: boolean) {
+    if (!tenantId) return;
+    const positives = splitLines(wizPos);
+    if (positives.length === 0) { setWizError('Добавьте хотя бы один пример-запрос.'); return; }
+    setWizLoading(true);
+    setWizError(null);
+    try {
+      const token = localStorage.getItem('auth_token') || '';
+      const resp = await fetch(`/api/admin/tenants/${tenantId}/tier0/wizard`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          tool_name: toolName || '',
+          tool_description: toolDescription || '',
+          positive_examples: positives,
+          negative_examples: splitLines(wizNeg),
+          sample_output: wizSample.trim() || null,
+          notes: wizNotes.trim() || null,
+          // On refine, hand back the previous suggestion so the backend can
+          // diff its failures and tell the LLM what to fix.
+          current_tier0: refine && wizResult ? wizResult.suggestion : null,
+        }),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        const detail = err.detail;
+        const msg = typeof detail === 'string' ? detail
+          : Array.isArray(detail)
+            ? detail.map((d: Record<string, unknown>) => `${Array.isArray(d.loc) ? d.loc.slice(-1)[0] : ''}: ${d.msg ?? d}`).join('; ')
+            : `HTTP ${resp.status}`;
+        throw new Error(msg);
+      }
+      const data = await resp.json();
+      const rawExp = data.explanation;
+      const explanation: string = typeof rawExp === 'string' ? rawExp
+        : Array.isArray(rawExp) ? rawExp.map((e: unknown) => (typeof e === 'string' ? e : JSON.stringify(e))).join('\n')
+        : rawExp != null ? String(rawExp) : '';
+      setWizResult({
+        explanation,
+        suggestion: data.suggestion || {},
+        validation: data.validation || { results: [], passed: 0, total: 0, all_ok: false },
+      });
+    } catch (e: unknown) {
+      setWizError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setWizLoading(false);
+    }
+  }
+
+  function applyWizardSuggestion() {
+    if (!wizResult) return;
+    onChange({ ...tpl, ...(wizResult.suggestion as Partial<Tier0Template>) });
+    setWizardOpen(false);
+    setWizResult(null);
+  }
+
   const attempts: ParamMapRow[][] = useMemo(
     () => (tpl.param_maps || []).map(mapToRows),
     [tpl.param_maps],
@@ -1911,6 +1993,17 @@ export function Tier0TemplateEditor({ value, onChange, tenantId, toolName, toolD
                 onClick={() => { setAssistOpen(true); setAssistResult(null); setAssistError(null); }}
               >
                 🤖 Помощь
+              </Button>
+            )}
+            {tenantId && (
+              <Button
+                size="xs"
+                variant="light"
+                color="grape"
+                leftSection={<IconSparkles size={13} />}
+                onClick={() => { setWizardOpen(true); setWizError(null); }}
+              >
+                Визард
               </Button>
             )}
             {/* Preset picker */}
@@ -2526,6 +2619,177 @@ export function Tier0TemplateEditor({ value, onChange, tenantId, toolName, toolD
               >
                 Применить
               </Button>
+            </Group>
+          </Stack>
+        )}
+      </Stack>
+    </Modal>
+
+    {/* ── Tier 0 Wizard ───────────────────────────────────────────────── */}
+    <Modal
+      opened={wizardOpen}
+      onClose={() => setWizardOpen(false)}
+      title={
+        <Group gap="xs">
+          <IconSparkles size={18} />
+          <Text fw={600}>Визард настройки Tier 0</Text>
+          {toolName && <Badge color="grape" variant="light" size="sm">{toolName}</Badge>}
+        </Group>
+      }
+      size="xl"
+      styles={{ body: { padding: '16px' } }}
+    >
+      <Stack gap="sm">
+        <Alert variant="light" color="grape" p="xs">
+          <Text size="xs">
+            Дайте несколько реальных примеров запросов — визард сгенерирует полную конфигурацию
+            и сразу прогонит regex/сущность по примерам, показав, что совпало, а что нет.
+            Поля универсальные (телефон, email, IP, MAC, номер, дата, произвольный текст) — не привязаны к домену.
+          </Text>
+        </Alert>
+
+        <Textarea
+          label="Примеры запросов — должны срабатывать (по одному на строку)"
+          placeholder={'find customer John Smith\nlookup user Jane Doe\nстатус заказа 10254'}
+          autosize minRows={3} maxRows={8}
+          value={wizPos}
+          onChange={(e) => setWizPos(e.currentTarget.value)}
+          disabled={wizLoading}
+        />
+        <Textarea
+          label="Контр-примеры — НЕ должны срабатывать (по одному на строку, необязательно)"
+          placeholder={'список всех клиентов\nкак сбросить пароль'}
+          autosize minRows={2} maxRows={6}
+          value={wizNeg}
+          onChange={(e) => setWizNeg(e.currentTarget.value)}
+          disabled={wizLoading}
+        />
+        <Textarea
+          label="Пример JSON-ответа инструмента (необязательно — для точного шаблона рендера)"
+          placeholder={'{"name": "Иван", "email": "ivan@example.com", "status": "active"}'}
+          autosize minRows={2} maxRows={8}
+          value={wizSample}
+          onChange={(e) => setWizSample(e.currentTarget.value)}
+          disabled={wizLoading}
+          styles={{ input: { fontFamily: 'monospace', fontSize: 12 } }}
+        />
+        <Textarea
+          label="Доп. пояснения (необязательно)"
+          placeholder="Инструмент ищет запись по введённому значению и возвращает карточку."
+          autosize minRows={1} maxRows={4}
+          value={wizNotes}
+          onChange={(e) => setWizNotes(e.currentTarget.value)}
+          disabled={wizLoading}
+        />
+
+        <Group justify="flex-end">
+          <Button
+            variant="filled" color="grape"
+            leftSection={<IconSparkles size={14} />}
+            loading={wizLoading}
+            disabled={!wizPos.trim()}
+            onClick={() => runWizard(false)}
+          >
+            Сгенерировать
+          </Button>
+        </Group>
+
+        {wizError && (
+          <Alert color="red" variant="light"><Text size="sm">{wizError}</Text></Alert>
+        )}
+
+        {wizResult && (
+          <Stack gap="sm">
+            <Divider label="Результат" labelPosition="center" />
+
+            {wizResult.explanation && (
+              <Alert variant="light" color="green" p="xs">
+                <Text size="sm" style={{ whiteSpace: 'pre-wrap' }}>{wizResult.explanation}</Text>
+              </Alert>
+            )}
+
+            {/* Validation summary */}
+            <Group gap="xs" align="center">
+              <IconListCheck size={16} />
+              <Text size="sm" fw={600}>Проверка по примерам:</Text>
+              <Badge
+                color={wizResult.validation.all_ok ? 'green' : 'orange'}
+                variant="filled"
+              >
+                {wizResult.validation.passed} / {wizResult.validation.total} OK
+              </Badge>
+            </Group>
+
+            {wizResult.validation.results.length > 0 && (
+              <Table withTableBorder withColumnBorders verticalSpacing={4} fz="xs">
+                <Table.Thead>
+                  <Table.Tr>
+                    <Table.Th style={{ width: 36 }} />
+                    <Table.Th>Запрос</Table.Th>
+                    <Table.Th style={{ width: 90 }}>Ожидаем</Table.Th>
+                    <Table.Th>Извлечено / причина</Table.Th>
+                  </Table.Tr>
+                </Table.Thead>
+                <Table.Tbody>
+                  {wizResult.validation.results.map((r, i) => (
+                    <Table.Tr key={i}>
+                      <Table.Td>
+                        {r.ok
+                          ? <IconCheck size={15} color="var(--mantine-color-green-6)" />
+                          : <IconX size={15} color="var(--mantine-color-red-6)" />}
+                      </Table.Td>
+                      <Table.Td><Text size="xs">{r.query}</Text></Table.Td>
+                      <Table.Td>
+                        <Badge size="xs" variant="light" color={r.expected === 'match' ? 'blue' : 'gray'}>
+                          {r.expected === 'match' ? 'совпасть' : 'пропуск'}
+                        </Badge>
+                      </Table.Td>
+                      <Table.Td>
+                        {r.extracted
+                          ? <Code fz="xs">{r.extracted}</Code>
+                          : <Text size="xs" c="dimmed">{r.reason}</Text>}
+                      </Table.Td>
+                    </Table.Tr>
+                  ))}
+                </Table.Tbody>
+              </Table>
+            )}
+
+            <div>
+              <Text size="xs" fw={600} c="dimmed" mb={4}>Конфигурация:</Text>
+              <Box
+                style={{
+                  background: 'var(--mantine-color-dark-8)', borderRadius: 6,
+                  padding: '10px 12px', fontFamily: 'monospace', fontSize: 12,
+                  whiteSpace: 'pre-wrap', overflowX: 'auto', maxHeight: 260, overflowY: 'auto',
+                }}
+              >
+                {JSON.stringify(wizResult.suggestion, null, 2)}
+              </Box>
+            </div>
+
+            <Group justify="space-between">
+              <Button
+                variant="light" color="orange" size="xs"
+                leftSection={<IconWand size={13} />}
+                loading={wizLoading}
+                disabled={wizResult.validation.all_ok}
+                onClick={() => runWizard(true)}
+              >
+                Доработать с учётом провалов
+              </Button>
+              <Group gap="xs">
+                <Button variant="subtle" color="gray" size="xs" onClick={() => setWizResult(null)}>
+                  Сбросить
+                </Button>
+                <Button
+                  variant="filled" color="green" size="sm"
+                  leftSection={<IconCheck size={14} />}
+                  onClick={applyWizardSuggestion}
+                >
+                  Применить
+                </Button>
+              </Group>
             </Group>
           </Stack>
         )}

@@ -514,3 +514,328 @@ async def tier0_assist(
         "explanation": explanation,
         "raw": raw,
     }
+
+
+# ---------------------------------------------------------------------------
+# Tier 0 wizard — multi-example generation + deterministic validation
+# ---------------------------------------------------------------------------
+
+class Tier0WizardRequest(BaseModel):
+    tool_name: str
+    tool_description: str = ""
+    positive_examples: list[str] = []
+    negative_examples: list[str] = []
+    sample_output: str | None = None        # raw JSON returned by the tool
+    notes: str | None = None                # free-text guidance
+    current_tier0: dict | None = None
+
+
+def _validate_example(cfg: dict, query: str) -> dict:
+    """Replicate the runtime Tier-0 matching against a single query so the
+    wizard's preview matches real behaviour 1:1.
+
+    Returns {query, matched, extracted, blocked, reason}.
+    """
+    from app.services.preprocessing.entities import extract_entities
+
+    query = query.strip()
+    if not query:
+        return {"query": query, "matched": False, "extracted": None,
+                "blocked": False, "reason": "пустой запрос"}
+
+    uq_lower = query.lower()
+    block_keywords = cfg.get("block_keywords") or []
+    hit = next((bk for bk in block_keywords if bk and bk.lower() in uq_lower), None)
+    if hit:
+        return {"query": query, "matched": False, "extracted": None,
+                "blocked": True, "reason": f"block_keyword «{hit}»"}
+
+    required_entity = (cfg.get("required_entity") or "").lower()
+
+    if required_entity == "keyword_extract":
+        kw_regex = cfg.get("keyword_regex") or ""
+        if not kw_regex:
+            return {"query": query, "matched": False, "extracted": None,
+                    "blocked": False, "reason": "keyword_regex не задан"}
+        try:
+            m = re.match(kw_regex, query, re.IGNORECASE)
+        except re.error as exc:
+            return {"query": query, "matched": False, "extracted": None,
+                    "blocked": False, "reason": f"regex error: {exc}"}
+        if not (m and m.lastindex and m.lastindex >= 1):
+            return {"query": query, "matched": False, "extracted": None,
+                    "blocked": False, "reason": "regex не совпал"}
+        extracted = m.group(1).strip()
+        for sp in (cfg.get("strip_prefixes") or []):
+            if sp and extracted.lower().startswith(sp.lower()):
+                extracted = extracted[len(sp):].strip()
+                break
+        if not extracted:
+            return {"query": query, "matched": False, "extracted": None,
+                    "blocked": False, "reason": "пустой захват после strip_prefixes"}
+        return {"query": query, "matched": True, "extracted": extracted,
+                "blocked": False, "reason": "regex совпал"}
+
+    if required_entity:
+        plural_map = {"id": "numeric_ids", "email": "emails", "date": "dates",
+                      "phone": "phones", "mac": "macs", "ip": "ips"}
+        bag_key = plural_map.get(required_entity, required_entity + "s")
+        bag = extract_entities(query).as_dict()
+        vals = bag.get(bag_key) or []
+        if vals:
+            return {"query": query, "matched": True, "extracted": vals[0],
+                    "blocked": False, "reason": f"найден {required_entity}"}
+        return {"query": query, "matched": False, "extracted": None,
+                "blocked": False, "reason": f"{required_entity} не найден"}
+
+    # required_entity is null → tool called with no args; always matches.
+    return {"query": query, "matched": True, "extracted": None,
+            "blocked": False, "reason": "без сущности (вызов без аргументов)"}
+
+
+def _validate_tier0(cfg: dict, positives: list[str], negatives: list[str]) -> dict:
+    """Run cfg against positives (should match) and negatives (should NOT)."""
+    pos = []
+    for q in positives:
+        r = _validate_example(cfg, q)
+        r["expected"] = "match"
+        r["ok"] = r["matched"]
+        pos.append(r)
+    neg = []
+    for q in negatives:
+        r = _validate_example(cfg, q)
+        r["expected"] = "skip"
+        r["ok"] = not r["matched"]
+        neg.append(r)
+    all_rows = pos + neg
+    passed = sum(1 for r in all_rows if r["ok"])
+    return {
+        "results": all_rows,
+        "passed": passed,
+        "total": len(all_rows),
+        "all_ok": passed == len(all_rows) and len(all_rows) > 0,
+    }
+
+
+_TIER0_WIZARD_GUIDE = """You are an expert assistant that configures Tier 0 deterministic routing for an AI platform.
+
+## What is Tier 0?
+
+Tier 0 is a deterministic shortcut that bypasses the LLM for simple, repetitive
+queries. When a user message matches a pattern, the platform extracts an entity,
+calls the tool directly, and renders the result from a markdown template — with no
+LLM call. This is generic infrastructure: it works for ANY domain (support desks,
+e-commerce, internal IT, billing, logistics — not just one industry).
+
+## Configurable fields
+
+### `required_entity`
+What to extract from the query before calling the tool. Supported values (these are
+the ONLY ones the runtime extracts — do not invent others):
+- `"keyword_extract"` — arbitrary text captured by `keyword_regex` (the capture group
+  becomes the tool argument). Use for names, titles, free-text identifiers.
+- `"phone"` — a phone number.
+- `"email"` — an email address.
+- `"ip"` — an IPv4/IPv6 address.
+- `"mac"` — a MAC address.
+- `"id"` — a bare numeric id / number (order #, ticket #, account #, etc.).
+- `"date"` — a date.
+- `null` — extract nothing; the tool is called with no arguments (e.g. "show my balance").
+
+### `keyword_regex`
+A Python regex with **exactly ONE capture group**, used only when
+`required_entity == "keyword_extract"`. It is applied with `re.match` (anchored at the
+START of the query) and `re.IGNORECASE`. The capture group holds the value to extract.
+- Make the capture group non-greedy when followed by optional trailing tokens.
+- If a qualifier noun precedes the value ("order number X", "ticket for X"), include it
+  in the regex so it is consumed: `(?:order(?:\\\\s+number)?|ticket\\\\s+for)\\\\s+([\\\\w\\\\s\\\\-\\\\.#]+?)(?:$|[?!.,;])`
+
+### `strip_prefixes`
+Strings stripped (case-insensitive) from the START of the captured keyword. Use only
+when a preposition/word sits directly before the value and the regex didn't consume it.
+
+### `block_keywords`
+Substrings that, if present anywhere in the query, SKIP Tier 0 and send the query to the
+LLM. Use for queries that look similar on the surface but carry extra conditions the tool
+can't handle deterministically (filters, ranges, lists, conjunctions like "and"/"all").
+
+### `template`
+A Markdown string rendered from the tool's JSON output using `{field.path}` placeholders.
+Reference ONLY field paths that actually exist in the sample output (when provided).
+
+## Examples (domain-neutral)
+
+### A — free-text lookup (keyword_extract)
+Queries like "find customer John Smith", "lookup user Jane Doe":
+```json
+{
+  "required_entity": "keyword_extract",
+  "keyword_regex": "(?:find|lookup|search)\\\\s+(?:customer|user|client)\\\\s+([\\\\w\\\\s\\\\-\\\\.]+?)(?:$|[?!.,;])",
+  "strip_prefixes": [],
+  "block_keywords": ["all", "list", "between", "and"],
+  "template": "**{name}** — {email}\\n{status}"
+}
+```
+
+### B — numeric id (built-in entity)
+Queries like "status of order 10254", "ticket 8841":
+```json
+{
+  "required_entity": "id",
+  "keyword_regex": null,
+  "strip_prefixes": [],
+  "block_keywords": [],
+  "template": "Order **{id}**: {status}\\nTotal: {total}"
+}
+```
+
+### C — email lookup (built-in entity)
+```json
+{
+  "required_entity": "email",
+  "keyword_regex": null,
+  "strip_prefixes": [],
+  "block_keywords": [],
+  "template": "**{user.name}** ({user.email}) — {user.role}"
+}
+```
+"""
+
+
+def _build_tier0_wizard_prompt(body: Tier0WizardRequest, failures: list[dict] | None) -> str:
+    base = _TIER0_WIZARD_GUIDE
+
+    pos = "\n".join(f"  - {q}" for q in body.positive_examples if q.strip()) or "  (none)"
+    neg = "\n".join(f"  - {q}" for q in body.negative_examples if q.strip()) or "  (none)"
+    sample = (body.sample_output or "").strip()
+    sample_block = f"```json\n{sample[:4000]}\n```" if sample else "(not provided)"
+    notes_block = (body.notes or "").strip() or "(none)"
+
+    fail_block = ""
+    if failures:
+        lines = []
+        for f in failures:
+            exp = f.get("expected")
+            q = f.get("query")
+            if exp == "match":
+                lines.append(f"  - SHOULD have matched but did NOT: «{q}» (reason: {f.get('reason')})")
+            else:
+                lines.append(f"  - SHOULD have been skipped but MATCHED: «{q}» (extracted: {f.get('extracted')})")
+        fail_block = (
+            "\n## Previous attempt failed these cases — FIX them\n"
+            "Your last config produced wrong results on the cases below. "
+            "Adjust keyword_regex / required_entity / strip_prefixes / block_keywords "
+            "so EVERY positive example matches and EVERY negative example is skipped:\n"
+            + "\n".join(lines) + "\n"
+        )
+
+    return f"""{base}
+## Tool context
+
+**Tool name:** {body.tool_name}
+**Tool description:** {body.tool_description}
+
+## Wizard inputs
+
+The admin provided concrete examples instead of a single description. Design the
+config so it generalises across ALL positive examples and rejects ALL negatives.
+
+### Positive examples — queries that SHOULD trigger this tool via Tier 0
+{pos}
+
+### Negative examples — queries that must FALL THROUGH to the LLM (skip Tier 0)
+{neg}
+
+### Sample tool output (use REAL field paths from this when writing `template`)
+{sample_block}
+
+### Additional notes from the admin
+{notes_block}
+{fail_block}
+## Your task
+
+Produce a `tier0_template` that:
+1. Matches every positive example (pick `required_entity` and, for keyword_extract,
+   a `keyword_regex` with ONE capture group that works for ALL positives).
+2. Does NOT match any negative example (use `block_keywords` for surface-similar
+   queries that carry extra conditions).
+3. Has a `template` referencing only fields that exist in the sample output above
+   (if provided). If no sample output, write a reasonable template and note it.
+
+Respond ONLY with a JSON object (no markdown wrapper) in exactly this format:
+{{
+  "suggestion": {{
+    "required_entity": "...",
+    "keyword_regex": "...",
+    "strip_prefixes": [...],
+    "block_keywords": [...],
+    "template": "..."
+  }},
+  "explanation": "Brief explanation in the same language as the admin's examples"
+}}"""
+
+
+@router.post("/wizard")
+async def tier0_wizard(
+    tenant_id: uuid.UUID,
+    body: Tier0WizardRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Generate a full tier0_template from worked examples, then deterministically
+    validate the generated regex/entity against those same examples so the admin
+    sees per-example pass/fail before applying."""
+    config = (
+        await db.execute(
+            select(TenantShellConfig).where(TenantShellConfig.tenant_id == tenant_id)
+        )
+    ).scalar_one_or_none()
+    if not config:
+        raise HTTPException(status_code=404, detail="Tenant config not found")
+
+    if not any(q.strip() for q in body.positive_examples):
+        raise HTTPException(status_code=400, detail="Нужен хотя бы один пример-запрос.")
+
+    # Detect a refine pass: caller passes current_tier0 = the previous suggestion
+    # and we re-validate it to tell the LLM what to fix.
+    failures: list[dict] | None = None
+    if body.current_tier0:
+        prev_val = _validate_tier0(
+            body.current_tier0, body.positive_examples, body.negative_examples
+        )
+        failures = [r for r in prev_val["results"] if not r["ok"]] or None
+
+    from app.services.llm.model_resolver import resolve_model
+    resolved = await resolve_model(
+        tenant_id=str(tenant_id),
+        user_content=" ".join(body.positive_examples)[:500],
+        db=db,
+        shell_config=config,
+    )
+
+    system_prompt = _build_tier0_wizard_prompt(body, failures)
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": "Сгенерируй tier0_template по примерам выше."},
+    ]
+
+    try:
+        response = await resolved.provider.chat_completion(
+            messages, resolved.model_name, temperature=0.2, max_tokens=2048,
+        )
+    except Exception as exc:
+        logger.error("tier0_wizard: LLM call failed for tenant %s: %s", tenant_id, exc)
+        raise HTTPException(status_code=502, detail=f"LLM provider error: {exc}") from exc
+
+    raw = response.content or ""
+    suggestion, explanation = _parse_tier0_assist_response(raw)
+
+    validation = _validate_tier0(
+        suggestion or {}, body.positive_examples, body.negative_examples
+    )
+
+    return {
+        "suggestion": suggestion,
+        "explanation": explanation,
+        "validation": validation,
+        "raw": raw,
+    }
