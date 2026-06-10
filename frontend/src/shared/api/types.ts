@@ -467,6 +467,15 @@ export interface LLMLog {
   created_at: string;
 }
 
+export interface KBPreviewChunk {
+  chunk_id: string;
+  document_id: string;
+  doc_title: string | null;
+  chunk_index: number | null;
+  content: string;
+  relevance: number;
+}
+
 export interface ToolMetric {
   name: string;
   calls: number;

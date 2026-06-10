@@ -29,6 +29,7 @@ import type {
   TenantDataSourceUpdate,
   DataSourceSchema,
   KBDocument,
+  KBPreviewChunk,
   KBDocumentCreate,
   KBDocumentUpdate,
   MemoryEntry,
@@ -331,6 +332,10 @@ export const kbApi = {
   },
   get: async (tenantId: string, docId: string): Promise<KBDocument> => {
     const res = await apiClient.get(`/api/admin/tenants/${tenantId}/kb/${docId}`);
+    return res.data;
+  },
+  searchPreview: async (tenantId: string, query: string, limit = 8): Promise<KBPreviewChunk[]> => {
+    const res = await apiClient.post(`/api/admin/tenants/${tenantId}/kb/search-preview`, { query, limit });
     return res.data;
   },
   create: async (tenantId: string, data: KBDocumentCreate): Promise<KBDocument> => {

@@ -3,7 +3,9 @@ import {
   ActionIcon,
   Badge,
   Button,
+  Card,
   Center,
+  Code,
   Group,
   Loader,
   Modal,
@@ -21,7 +23,7 @@ import { IconPlus, IconRefresh, IconTrash } from '@tabler/icons-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { notifications } from '@mantine/notifications';
 import { kbApi } from '../../shared/api/endpoints';
-import type { KBDocument, KBDocumentCreate, KBDocumentUpdate } from '../../shared/api/types';
+import type { KBDocument, KBDocumentCreate, KBDocumentUpdate, KBPreviewChunk } from '../../shared/api/types';
 
 const SOURCE_TYPE_OPTIONS = [
   { value: 'manual', label: 'Ручной ввод' },
@@ -62,6 +64,24 @@ export function KBTab({ tenantId }: KBTabProps) {
   const [docActive, setDocActive] = useState(true);
   const [filterDocType, setFilterDocType] = useState<string | null>(null);
   const [filterSourceType, setFilterSourceType] = useState<string | null>(null);
+  const [previewQuery, setPreviewQuery] = useState('');
+  const [previewResults, setPreviewResults] = useState<KBPreviewChunk[] | null>(null);
+
+  const previewMutation = useMutation({
+    mutationFn: (q: string) => kbApi.searchPreview(tenantId, q, 8),
+    onSuccess: (data) => setPreviewResults(data),
+    onError: (err) => {
+      notifications.show({
+        title: 'Ошибка поиска',
+        message: (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || 'Не удалось выполнить поиск',
+        color: 'red',
+      });
+    },
+  });
+  const runPreview = () => {
+    const q = previewQuery.trim();
+    if (q) previewMutation.mutate(q);
+  };
 
   const { data, isLoading } = useQuery({
     queryKey: ['tenants', tenantId, 'kb', page, filterDocType, filterSourceType],
@@ -228,6 +248,48 @@ export function KBTab({ tenantId }: KBTabProps) {
       <Text size="sm" c="dimmed">
         Релевантные фрагменты документов автоматически подбираются по смыслу запроса пользователя (семантический поиск).
       </Text>
+
+      <Card withBorder padding="sm">
+        <Text size="sm" fw={600} mb="xs">Превью поиска</Text>
+        <Group gap="xs" align="flex-end">
+          <TextInput
+            placeholder="Введите запрос пользователя…"
+            value={previewQuery}
+            onChange={(e) => setPreviewQuery(e.currentTarget.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') runPreview(); }}
+            style={{ flex: 1 }}
+            size="sm"
+          />
+          <Button size="sm" onClick={runPreview} loading={previewMutation.isPending}>
+            Найти
+          </Button>
+        </Group>
+        {previewResults && (
+          previewResults.length ? (
+            <Stack gap="xs" mt="sm">
+              {previewResults.map((c, i) => (
+                <Group key={c.chunk_id} gap="sm" align="flex-start" wrap="nowrap">
+                  <Badge
+                    variant="light"
+                    color={c.relevance >= 0.5 ? 'green' : c.relevance >= 0.35 ? 'yellow' : 'gray'}
+                    style={{ minWidth: 52 }}
+                  >
+                    {(c.relevance * 100).toFixed(0)}%
+                  </Badge>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <Text size="xs" c="dimmed">{i + 1}. {c.doc_title || 'без названия'}</Text>
+                    <Code block style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 12 }}>
+                      {c.content.length > 400 ? c.content.slice(0, 400) + '…' : c.content}
+                    </Code>
+                  </div>
+                </Group>
+              ))}
+            </Stack>
+          ) : (
+            <Text size="sm" c="dimmed" mt="sm">Ничего не найдено — KB пуста или не проиндексирована.</Text>
+          )
+        )}
+      </Card>
 
       <Group gap="xs">
         <Select

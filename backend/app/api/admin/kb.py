@@ -6,14 +6,18 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form, status
+from pydantic import BaseModel
 from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.models.admin_user import AdminUser
 from app.models.tenant import Tenant
+from app.models.tenant_shell_config import TenantShellConfig
 from app.models.kb_document import KnowledgeBaseDocument
 from app.models.kb_chunk import KBChunk
+from app.providers.factory import get_provider
 from app.schemas.kb import KBDocumentCreate, KBDocumentUpdate, KBDocumentResponse
 from app.schemas.common import PaginatedResponse
 from app.api.deps import require_role, require_tenant_access, require_permission
@@ -202,6 +206,72 @@ async def upload_document(
 
     await db.refresh(doc)
     return _doc_to_response(doc)
+
+
+class KBSearchPreviewRequest(BaseModel):
+    query: str
+    limit: int = 8
+
+
+class KBPreviewChunk(BaseModel):
+    chunk_id: str
+    document_id: str
+    doc_title: str | None
+    chunk_index: int | None
+    content: str
+    relevance: float  # 1 - cosine distance (higher = closer)
+
+
+@router.post("/search-preview", response_model=list[KBPreviewChunk])
+async def search_preview(
+    tenant_id: uuid.UUID,
+    body: KBSearchPreviewRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Preview semantic retrieval: embed the query and return the top chunks with
+    a relevance score, exactly as the chat pipeline would rank them."""
+    await _verify_tenant(tenant_id, db)
+    query = (body.query or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Пустой запрос")
+    config = (await db.execute(
+        select(TenantShellConfig).where(TenantShellConfig.tenant_id == tenant_id)
+    )).scalar_one_or_none()
+    model = getattr(config, "embedding_model_name", None) if config else None
+    if not model:
+        raise HTTPException(status_code=400, detail="Embedding-модель не настроена в shell config.")
+    provider = get_provider("ollama", settings.OLLAMA_BASE_URL or "http://localhost:11434")
+    try:
+        embs = await provider.embed(query, model)
+        qvec = embs[0]
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Не удалось получить эмбеддинг запроса: {str(e)[:200]}")
+
+    dist = KBChunk.embedding.cosine_distance(qvec).label("distance")
+    stmt = (
+        select(KBChunk, dist)
+        .join(KnowledgeBaseDocument, KBChunk.document_id == KnowledgeBaseDocument.id)
+        .where(
+            KBChunk.tenant_id == tenant_id,
+            KBChunk.embedding.isnot(None),
+            KnowledgeBaseDocument.is_active == True,  # noqa: E712
+            KnowledgeBaseDocument.deleted_at.is_(None),
+        )
+        .order_by(dist)
+        .limit(max(1, min(body.limit, 20)))
+    )
+    rows = (await db.execute(stmt)).all()
+    return [
+        KBPreviewChunk(
+            chunk_id=str(c.id),
+            document_id=str(c.document_id),
+            doc_title=getattr(c, "doc_title", None),
+            chunk_index=getattr(c, "chunk_index", None),
+            content=(c.content or "")[:1000],
+            relevance=max(0.0, 1.0 - float(d)),
+        )
+        for c, d in rows
+    ]
 
 
 @router.get("/{doc_id}", response_model=KBDocumentResponse)
