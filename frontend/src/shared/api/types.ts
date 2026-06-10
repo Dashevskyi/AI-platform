@@ -460,6 +460,7 @@ export interface LLMLog {
   completion_tokens: number | null;
   total_tokens: number | null;
   tool_calls_count: number | null;
+  tool_errors_count: number | null;
   finish_reason: string | null;
   estimated_cost: number | null;
   served_by: string | null; // 'tier0_template' | 'llm'

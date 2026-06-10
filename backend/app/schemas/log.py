@@ -19,6 +19,7 @@ class LLMLogResponse(BaseModel):
     completion_tokens: int | None
     total_tokens: int | None
     tool_calls_count: int | None
+    tool_errors_count: int | None = None  # failed tool calls within this request
     finish_reason: str | None
     estimated_cost: float | None
     served_by: str | None = None  # 'tier0_template' | 'llm'

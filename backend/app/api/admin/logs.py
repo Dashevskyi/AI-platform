@@ -23,6 +23,16 @@ router = APIRouter(
 )
 
 
+def _tool_errors_count(debug) -> int | None:
+    """Count failed tool calls in a request's debug trace (None if no trace)."""
+    if not isinstance(debug, dict):
+        return None
+    tcs = debug.get("tool_calls")
+    if not isinstance(tcs, list):
+        return None
+    return sum(1 for tc in tcs if isinstance(tc, dict) and tc.get("ok") is False)
+
+
 def _log_to_response(log: LLMRequestLog) -> LLMLogResponse:
     return LLMLogResponse(
         id=str(log.id),
@@ -41,6 +51,7 @@ def _log_to_response(log: LLMRequestLog) -> LLMLogResponse:
         completion_tokens=log.completion_tokens,
         total_tokens=log.total_tokens,
         tool_calls_count=log.tool_calls_count,
+        tool_errors_count=_tool_errors_count(log.debug),
         finish_reason=log.finish_reason,
         estimated_cost=log.estimated_cost,
         served_by=log.served_by,

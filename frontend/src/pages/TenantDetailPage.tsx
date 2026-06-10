@@ -78,6 +78,7 @@ import type {
   ToolUpdate,
 } from '../shared/api/types';
 import { GeneralTab } from './tenant-detail/GeneralTab';
+import { OverviewTab } from './tenant-detail/OverviewTab';
 import { ChatsTab } from './tenant-detail/ChatsTab';
 import { DataSourcesTab } from './tenant-detail/DataSourcesTab';
 import { KBTab } from './tenant-detail/KBTab';
@@ -192,8 +193,9 @@ export function TenantDetailPage() {
         </Badge>
       </Group>
 
-      <Tabs defaultValue="general" keepMounted={false}>
+      <Tabs defaultValue={has('logs') ? 'overview' : 'general'} keepMounted={false}>
         <Tabs.List>
+          {has('logs') && <Tabs.Tab value="overview">Обзор</Tabs.Tab>}
           <Tabs.Tab value="general">Общее</Tabs.Tab>
           {has('keys') && <Tabs.Tab value="keys">API Ключи</Tabs.Tab>}
           {has('model_config') && <Tabs.Tab value="model">Модель</Tabs.Tab>}
@@ -210,6 +212,11 @@ export function TenantDetailPage() {
           {isSuperadmin && <Tabs.Tab value="api-info">API</Tabs.Tab>}
         </Tabs.List>
 
+        {has('logs') && (
+          <Tabs.Panel value="overview" pt="md">
+            <OverviewTab tenantId={tenantId} />
+          </Tabs.Panel>
+        )}
         <Tabs.Panel value="general" pt="md">
           <GeneralTab tenantId={tenantId} />
         </Tabs.Panel>
@@ -3787,10 +3794,8 @@ function ToolsTab({ tenantId }: { tenantId: string }) {
                 <Table striped>
                   <Table.Thead>
                     <Table.Tr>
-                      <Table.Th>Название</Table.Th>
-                      <Table.Th>Описание</Table.Th>
-                      <Table.Th>Протокол</Table.Th>
-                      <Table.Th>Метки</Table.Th>
+                      <Table.Th>Инструмент</Table.Th>
+                      <Table.Th>Тип</Table.Th>
                       <Table.Th>Использование</Table.Th>
                       <Table.Th>Статус</Table.Th>
                       <Table.Th>Действия</Table.Th>
@@ -3803,29 +3808,31 @@ function ToolsTab({ tenantId }: { tenantId: string }) {
                           style={{ cursor: 'pointer' }}
                           onClick={() => openEdit(tool)}
                         >
-                          <Table.Td><Text size="sm" fw={500}>{tool.name}</Text></Table.Td>
-                          <Table.Td><Text size="sm" c="dimmed" lineClamp={1}>{tool.description || '-'}</Text></Table.Td>
-                          <Table.Td>
-                            {(() => {
-                              const info = getToolHandlerInfo(tool.config_json);
-                              const Icon = info.icon;
-                              return (
-                                <Badge variant="light" color={info.color} size="sm" leftSection={<Icon size={12} />}>
-                                  {info.label}
-                                </Badge>
-                              );
-                            })()}
+                          <Table.Td style={{ maxWidth: 360 }}>
+                            <Text size="sm" fw={500}>{tool.name}</Text>
+                            {tool.description && (
+                              <Text size="xs" c="dimmed" lineClamp={2}>{tool.description}</Text>
+                            )}
                           </Table.Td>
                           <Table.Td>
-                            {readToolCapabilityTags(tool.config_json).length ? (
-                              <Group gap={4}>
-                                {readToolCapabilityTags(tool.config_json).map((tag) => (
-                                  <Badge key={tag} variant="light" size="sm">{tag}</Badge>
-                                ))}
-                              </Group>
-                            ) : (
-                              <Text size="sm" c="dimmed">—</Text>
-                            )}
+                            <Stack gap={4} align="flex-start">
+                              {(() => {
+                                const info = getToolHandlerInfo(tool.config_json);
+                                const Icon = info.icon;
+                                return (
+                                  <Badge variant="light" color={info.color} size="sm" leftSection={<Icon size={12} />}>
+                                    {info.label}
+                                  </Badge>
+                                );
+                              })()}
+                              {readToolCapabilityTags(tool.config_json).length > 0 && (
+                                <Group gap={4}>
+                                  {readToolCapabilityTags(tool.config_json).map((tag) => (
+                                    <Badge key={tag} variant="outline" size="xs" color="gray">{tag}</Badge>
+                                  ))}
+                                </Group>
+                              )}
+                            </Stack>
                           </Table.Td>
                           <Table.Td>
                             {(() => {

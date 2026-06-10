@@ -1090,7 +1090,18 @@ export function LogsTab({ tenantId }: LogsTabProps) {
                     </Text>
                   </Table.Td>
                   <Table.Td>
-                    <Text size="sm">{log.tool_calls_count || '-'}</Text>
+                    {log.tool_calls_count ? (
+                      <Group gap={6} wrap="nowrap">
+                        <Text size="sm">{log.tool_calls_count}</Text>
+                        {!!log.tool_errors_count && (
+                          <Tooltip label={`${log.tool_errors_count} вызов(ов) с ошибкой`}>
+                            <Badge size="xs" color="red" variant="light">{log.tool_errors_count} ✕</Badge>
+                          </Tooltip>
+                        )}
+                      </Group>
+                    ) : (
+                      <Text size="sm">-</Text>
+                    )}
                   </Table.Td>
                   <Table.Td>
                     <Text size="sm">
