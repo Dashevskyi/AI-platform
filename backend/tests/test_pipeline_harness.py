@@ -79,6 +79,12 @@ def run_pipeline(event_loop, user_content, *, system_prompt="Ты — тесто
     orig = pl.resolve_model
     pl.resolve_model = fake_resolve
 
+    events: list[str] = []
+    provider.events = events
+
+    async def _on_event(etype, payload):
+        events.append(etype)
+
     async def _scenario():
         async with async_session() as db:
             await _seed(db, tid, cid, suffix, system_prompt, memory_enabled=memory_enabled,
@@ -86,7 +92,7 @@ def run_pipeline(event_loop, user_content, *, system_prompt="Ты — тесто
             await db.commit()
         try:
             async with async_session() as db:
-                return await pl.chat_completion(str(tid), str(cid), user_content, db)
+                return await pl.chat_completion(str(tid), str(cid), user_content, db, on_event=_on_event)
         finally:
             async with async_session() as db:
                 await db.execute(text("DELETE FROM llm_request_logs WHERE tenant_id=:t"), {"t": tid})
@@ -188,6 +194,22 @@ def test_tool_loop_feeds_error_back(event_loop):
     # The tool error text is fed into the next round's messages.
     assert any("шаг" in str(m.get("content", "")).lower() or "ошибк" in str(m.get("content", "")).lower()
                for m in provider.calls[1]["messages"])
+
+
+def test_streaming_events_fire(event_loop):
+    """The on_event streaming path runs and emits the expected lifecycle events
+    during a tool round (provider_call_start/done, tool_call_start/done, done)."""
+    final = LLMResponse(content="Готово.", finish_reason="stop")
+    _result, provider = run_pipeline(
+        event_loop, "Сделай шаги",
+        tools_policy="always", supports_tools=True, scripted=[_plan_call("c1", ["x1", "x2"]), final],
+    )
+    ev = set(provider.events)
+    assert "provider_call_start" in ev
+    assert "provider_call_done" in ev
+    assert "tool_call_start" in ev
+    assert "tool_call_done" in ev
+    assert "done" in ev
 
 
 def test_tool_loop_multi_round(event_loop):
