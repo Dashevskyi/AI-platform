@@ -12,6 +12,8 @@ backend/venv/
 node_modules/
 dist/
 .vite/
+# Built frontend copied here by deploy.sh (npm run build → backend/static)
+backend/static/
 
 # Uploads & backups
 backend/uploads/

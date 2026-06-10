@@ -70,14 +70,18 @@ class BaseProvider(ABC):
         """Generate a short chat title in the user's language."""
         language_clause = ""
         if language_hint:
-            language_clause = f" Write the title in {language_hint}."
+            language_clause = f" Prefer {language_hint} if the user's language is ambiguous."
         resp = await self.chat_completion(
             messages=[
                 {
                     "role": "user",
                     "content": (
-                        "Generate a short chat title based on the user's message. "
-                        "Use 3-7 words. Return ONLY the title, with no quotes, labels, or extra text."
+                        "Generate a short chat title (3-7 words) based on the user's message.\n"
+                        "Write the title in the SAME language as the user's message:\n"
+                        "- If the user wrote in Russian, return Russian.\n"
+                        "- If the user wrote in Ukrainian, return Ukrainian.\n"
+                        "- Otherwise, use the user's own language.\n"
+                        "Return ONLY the title, with no quotes, labels, or extra text."
                         f"{language_clause}\n\n"
                         + text
                     ),
