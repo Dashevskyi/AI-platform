@@ -27,6 +27,7 @@ class ChatResponse(BaseModel):
     updated_at: datetime
     flagged_issue: str | None = None
     flagged_at: datetime | None = None
+    message_count: int | None = None
 
     model_config = {"from_attributes": True}
 

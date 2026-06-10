@@ -35,7 +35,7 @@ router = APIRouter(
 )
 
 
-def _chat_to_response(c: Chat) -> ChatResponse:
+def _chat_to_response(c: Chat, message_count: int | None = None) -> ChatResponse:
     return ChatResponse(
         id=str(c.id),
         tenant_id=str(c.tenant_id),
@@ -48,6 +48,7 @@ def _chat_to_response(c: Chat) -> ChatResponse:
         updated_at=c.updated_at,
         flagged_issue=c.flagged_issue,
         flagged_at=c.flagged_at,
+        message_count=message_count,
     )
 
 
@@ -140,8 +141,19 @@ async def list_chats(
         await db.execute(query.offset((page - 1) * page_size).limit(page_size))
     ).scalars().all()
 
+    # Message counts for this page in one grouped query.
+    counts: dict = {}
+    if items:
+        ids = [c.id for c in items]
+        rows = (await db.execute(
+            select(Message.chat_id, func.count())
+            .where(Message.chat_id.in_(ids))
+            .group_by(Message.chat_id)
+        )).all()
+        counts = {cid: n for cid, n in rows}
+
     return PaginatedResponse[ChatResponse](
-        items=[_chat_to_response(c) for c in items],
+        items=[_chat_to_response(c, counts.get(c.id, 0)) for c in items],
         total_count=total,
         page=page,
         page_size=page_size,

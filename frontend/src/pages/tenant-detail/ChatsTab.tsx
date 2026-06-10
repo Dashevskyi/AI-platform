@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Button, Center, Group, Loader, Pagination, Stack, Table, Text, Badge } from '@mantine/core';
+import { Badge, Button, Center, Group, Loader, Pagination, Select, Stack, Table, Text, TextInput, Tooltip } from '@mantine/core';
 import { IconPlus } from '@tabler/icons-react';
 import { useQuery } from '@tanstack/react-query';
 import { chatsApi, keysApi } from '../../shared/api/endpoints';
@@ -13,10 +13,20 @@ type ChatsTabProps = {
 export function ChatsTab({ tenantId }: ChatsTabProps) {
   const navigate = useNavigate();
   const [page, setPage] = useState(1);
+  const [searchInput, setSearchInput] = useState('');
+  const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState<string | null>(null);
+  useEffect(() => {
+    const t = setTimeout(() => { setSearch(searchInput); setPage(1); }, 300);
+    return () => clearTimeout(t);
+  }, [searchInput]);
 
   const { data, isLoading } = useQuery({
-    queryKey: ['tenants', tenantId, 'chats', 'admin', page],
-    queryFn: () => chatsApi.listAdmin(tenantId, page),
+    queryKey: ['tenants', tenantId, 'chats', 'admin', page, search, statusFilter],
+    queryFn: () => chatsApi.listAdmin(tenantId, page, 20, {
+      search: search || undefined,
+      status: statusFilter || undefined,
+    }),
   });
   const { data: keysData } = useQuery({
     queryKey: ['tenants', tenantId, 'keys', 'all-for-chat-groups'],
@@ -43,7 +53,16 @@ export function ChatsTab({ tenantId }: ChatsTabProps) {
       style={{ cursor: 'pointer' }}
       onClick={() => navigate(`/tenants/${tenantId}/chat/${chat.id}`)}
     >
-      <Table.Td fw={500}>{chat.title}</Table.Td>
+      <Table.Td fw={500}>
+        <Group gap={6} wrap="nowrap">
+          <Text size="sm" fw={500} lineClamp={1}>{chat.title || '(без названия)'}</Text>
+          {chat.flagged_issue && (
+            <Tooltip label={chat.flagged_issue} multiline w={280}>
+              <Badge size="xs" color="orange" variant="light">⚑</Badge>
+            </Tooltip>
+          )}
+        </Group>
+      </Table.Td>
       <Table.Td>
         <Text size="sm" c="dimmed" lineClamp={1}>
           {chat.description || '-'}
@@ -62,6 +81,7 @@ export function ChatsTab({ tenantId }: ChatsTabProps) {
           {chat.status}
         </Badge>
       </Table.Td>
+      <Table.Td><Text size="sm">{chat.message_count ?? '-'}</Text></Table.Td>
       <Table.Td>{new Date(chat.created_at).toLocaleString()}</Table.Td>
     </Table.Tr>
   ));
@@ -69,7 +89,29 @@ export function ChatsTab({ tenantId }: ChatsTabProps) {
   return (
     <Stack gap="md">
       <Group justify="space-between">
-        <Text fw={500}>Чаты</Text>
+        <Group gap="xs">
+          <Text fw={500}>Чаты</Text>
+          <TextInput
+            placeholder="Поиск по названию…"
+            size="xs"
+            w={220}
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.currentTarget.value)}
+          />
+          <Select
+            placeholder="Статус"
+            clearable
+            size="xs"
+            w={140}
+            value={statusFilter}
+            onChange={(v) => { setStatusFilter(v); setPage(1); }}
+            data={[
+              { value: 'active', label: 'Активные' },
+              { value: 'closed', label: 'Закрытые' },
+              { value: 'archived', label: 'Архив' },
+            ]}
+          />
+        </Group>
         <Button
           leftSection={<IconPlus size={16} />}
           size="sm"
@@ -103,6 +145,7 @@ export function ChatsTab({ tenantId }: ChatsTabProps) {
                         <Table.Th>Заголовок</Table.Th>
                         <Table.Th>Описание</Table.Th>
                         <Table.Th>Статус</Table.Th>
+                        <Table.Th>Сообщений</Table.Th>
                         <Table.Th>Создан</Table.Th>
                       </Table.Tr>
                     </Table.Thead>
@@ -118,6 +161,7 @@ export function ChatsTab({ tenantId }: ChatsTabProps) {
                   <Table.Th>Заголовок</Table.Th>
                   <Table.Th>Описание</Table.Th>
                   <Table.Th>Статус</Table.Th>
+                  <Table.Th>Сообщений</Table.Th>
                   <Table.Th>Создан</Table.Th>
                 </Table.Tr>
               </Table.Thead>

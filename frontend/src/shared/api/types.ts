@@ -410,6 +410,8 @@ export interface Chat {
   created_by: string | null;
   created_at: string;
   updated_at: string;
+  flagged_issue?: string | null;
+  message_count?: number | null;
 }
 
 export interface ChatCreate {
