@@ -698,27 +698,35 @@ async def chat_completion(
             overflow_policy=tenant.throttle_overflow_policy,
         )
         async with throttle.slot():
-            return await _chat_completion_inner(
+            return await PipelineRun(
                 tenant_id, chat_id, user_content, db, user_message_id, api_key_id, on_event,
                 merged_message_ids, voice_mode=voice_mode,
-            )
-    return await _chat_completion_inner(
+            ).run()
+    return await PipelineRun(
         tenant_id, chat_id, user_content, db, user_message_id, api_key_id, on_event,
         merged_message_ids, voice_mode=voice_mode,
-    )
+    ).run()
 
 
-async def _chat_completion_inner(
-    tenant_id: str,
-    chat_id: str,
-    user_content: str,
-    db: AsyncSession,
-    user_message_id: str | None = None,
-    api_key_id: str | None = None,
-    on_event=None,
-    merged_message_ids: list[str] | None = None,
-    voice_mode: bool = False,
-) -> dict:
+class PipelineRun:
+    """One chat-completion run. Inputs live on the instance; `run` (the
+    orchestrator, assigned below) and — incrementally — the nested closures
+    become methods. ToolExecCtx is the per-loop slice of this same state."""
+
+    def __init__(self, tenant_id, chat_id, user_content, db, user_message_id=None,
+                 api_key_id=None, on_event=None, merged_message_ids=None, voice_mode=False):
+        self.tenant_id = tenant_id
+        self.chat_id = chat_id
+        self.user_content = user_content
+        self.db = db
+        self.user_message_id = user_message_id
+        self.api_key_id = api_key_id
+        self.on_event = on_event
+        self.merged_message_ids = merged_message_ids
+        self.voice_mode = voice_mode
+
+
+async def _chat_completion_inner(self) -> dict:
     """
     Full LLM pipeline with tool execution support:
     1. Load shell config
@@ -731,6 +739,17 @@ async def _chat_completion_inner(
     8. Auto-summary
     9. Return response
     """
+    # Inputs re-bound from the instance so the body below reads unchanged; the
+    # nested closures are migrated to methods over subsequent steps.
+    tenant_id = self.tenant_id
+    chat_id = self.chat_id
+    user_content = self.user_content
+    db = self.db
+    user_message_id = self.user_message_id
+    api_key_id = self.api_key_id
+    on_event = self.on_event
+    merged_message_ids = self.merged_message_ids
+    voice_mode = self.voice_mode
     correlation_id = str(uuid.uuid4())
 
     # Per-turn debug trace — accumulated through the pipeline, written to
@@ -2393,6 +2412,11 @@ async def _chat_completion_inner(
         "model_name": model_name,
     })
     return final_payload
+
+
+# The orchestrator above is the PipelineRun.run method (kept at module scope to
+# avoid re-indenting the body; nested closures migrate to methods incrementally).
+PipelineRun.run = _chat_completion_inner
 
 
 HISTORY_SUMMARY_PROMPT = """Сожми историю диалога в краткое резюме (максимум 5-6 предложений).
