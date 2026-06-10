@@ -1248,6 +1248,7 @@ function readTier0Template(
       ? (t0.block_keywords as string[]).filter((s) => typeof s === 'string')
       : undefined,
     not_found_template: typeof t0.not_found_template === 'string' ? t0.not_found_template : null,
+    value_maps: isRecord(t0.value_maps) ? (t0.value_maps as Record<string, Record<string, string>>) : undefined,
   };
 }
 
@@ -1275,6 +1276,8 @@ function applyTier0TemplateToConfig(
     if (validBlocks.length) tpl.block_keywords = validBlocks;
     if (template.not_found_template && template.not_found_template.trim())
       tpl.not_found_template = template.not_found_template.trim();
+    if (template.value_maps && Object.keys(template.value_maps).length)
+      tpl.value_maps = template.value_maps;
     // Drop legacy single-map form when we re-save with the new list form.
     runtime.tier0_template = tpl;
   }

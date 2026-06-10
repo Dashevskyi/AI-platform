@@ -819,6 +819,11 @@ Produce a `tier0_template` that:
 5. Provides a `not_found_template` — a short message for when the tool returns no
    record (empty result). Reference the query value, e.g. `{{keyword_extract}}` /
    `{{phone}}` / `{{query}}`. Write it in the language of the admin's examples.
+6. Optionally provides `value_maps` to humanise coded fields and uses the `:map`
+   spec for them in the template. If the sample output / column descriptions reveal
+   codes (e.g. state 1=available/0=down, a type id), map them:
+   `"value_maps": {{"state": {{"1": "Включен", "0": "Отключен"}}}}` and write
+   `{{items.0.state:map}}` in the template. Keys are the field's leaf name.
 
 Respond ONLY with a JSON object (no markdown wrapper) in exactly this format:
 {{
@@ -830,7 +835,8 @@ Respond ONLY with a JSON object (no markdown wrapper) in exactly this format:
     "param_maps": [{{"<tool_param>": "$<entity>"}}],
     "required_fields": [...],
     "template": "...",
-    "not_found_template": "..."
+    "not_found_template": "...",
+    "value_maps": {{"<field_leaf>": {{"<raw>": "<display>"}}}}
   }},
   "explanation": "Brief explanation in the same language as the admin's examples"
 }}"""

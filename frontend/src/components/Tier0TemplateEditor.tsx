@@ -115,6 +115,12 @@ export type Tier0Template = {
    * Example: "Свич {keyword_extract} не найден в базе".
    */
   not_found_template?: string | null;
+  /**
+   * Value normalizers for the `{field:map}` spec. Key = field path or leaf name
+   * ("state" or "items.0.state"); value = raw→display map.
+   * Example: { "state": { "1": "Включен", "0": "Отключен" } }.
+   */
+  value_maps?: Record<string, Record<string, string>>;
 };
 
 type Tier0TemplateEditorProps = {
@@ -187,14 +193,27 @@ type RenderResult = {
 };
 
 /** Client-side mirror of backend _render_template. */
-function renderTemplate(template: string, data: unknown): RenderResult {
+function renderTemplate(
+  template: string,
+  data: unknown,
+  valueMaps?: Record<string, Record<string, string>>,
+): RenderResult {
   const missing: string[] = [];
-  const rendered = template.replace(/\{([^}]+)\}/g, (_match, rawPath: string) => {
-    const path = rawPath.trim();
+  const rendered = template.replace(/\{([^}]+)\}/g, (_match, rawInner: string) => {
+    // Split off the format spec ("items.0.state:map" → path + "map").
+    const inner = rawInner.trim();
+    const ci = inner.indexOf(':');
+    const path = (ci >= 0 ? inner.slice(0, ci) : inner).trim();
+    const spec = ci >= 0 ? inner.slice(ci + 1).trim() : '';
     const val = getAtPath(data, path);
     if (val === null || val === undefined || val === '') {
       missing.push(path);
       return `⚠{${path}}`;
+    }
+    if (spec === 'map' && valueMaps) {
+      const leaf = path.split('.').pop() || path;
+      const m = valueMaps[path] || valueMaps[leaf];
+      if (m) return m[String(val)] ?? String(val);
     }
     return String(val);
   });
@@ -1317,7 +1336,9 @@ const PRESETS: Preset[] = [
 
 // ─── Live preview panel ──────────────────────────────────────────────────────
 
-function PreviewPanel({ template, requiredFields }: { template: string; requiredFields: string[] }) {
+function PreviewPanel({ template, requiredFields, valueMaps }: {
+  template: string; requiredFields: string[]; valueMaps?: Record<string, Record<string, string>>;
+}) {
   const [sampleJson, setSampleJson] = useState('');
   const [jsonError, setJsonError] = useState<string | null>(null);
 
@@ -1335,8 +1356,8 @@ function PreviewPanel({ template, requiredFields }: { template: string; required
 
   const paths = useMemo(() => parsed !== null ? collectPaths(parsed) : [], [parsed]);
   const renderResult = useMemo(
-    () => parsed !== null && template ? renderTemplate(template, parsed) : null,
-    [parsed, template],
+    () => parsed !== null && template ? renderTemplate(template, parsed, valueMaps) : null,
+    [parsed, template, valueMaps],
   );
 
   const reqFieldResults = useMemo(() => {
@@ -1756,6 +1777,99 @@ function TableDefsSection({ template, tableDefs, onChange }: TableDefsEditorProp
           );
         })}
       </Stack>
+    </div>
+  );
+}
+
+// ─── Value maps editor: {field:map} normalizers ─────────────────────────────
+function ValueMapsSection({
+  value,
+  onChange,
+}: {
+  value: Record<string, Record<string, string>> | undefined;
+  onChange: (next: Record<string, Record<string, string>> | undefined) => void;
+}) {
+  const entries = Object.entries(value || {});
+
+  // Serialize one field's map to "raw=display" lines and back.
+  const mapToText = (m: Record<string, string>) =>
+    Object.entries(m).map(([k, v]) => `${k}=${v}`).join('\n');
+  const textToMap = (t: string): Record<string, string> => {
+    const out: Record<string, string> = {};
+    for (const line of t.split('\n')) {
+      const i = line.indexOf('=');
+      if (i < 0) continue;
+      const k = line.slice(0, i).trim();
+      if (k) out[k] = line.slice(i + 1).trim();
+    }
+    return out;
+  };
+
+  const setField = (oldName: string, newName: string, m: Record<string, string>) => {
+    const next: Record<string, Record<string, string>> = {};
+    for (const [f, mm] of Object.entries(value || {})) {
+      if (f === oldName) continue;
+      next[f] = mm;
+    }
+    if (newName.trim()) next[newName.trim()] = m;
+    onChange(Object.keys(next).length ? next : undefined);
+  };
+  const removeField = (name: string) => {
+    const next = { ...(value || {}) };
+    delete next[name];
+    onChange(Object.keys(next).length ? next : undefined);
+  };
+  const addField = () => {
+    const base = 'field';
+    let name = base;
+    let n = 1;
+    while ((value || {})[name]) name = `${base}${++n}`;
+    onChange({ ...(value || {}), [name]: {} });
+  };
+
+  return (
+    <div>
+      <Group justify="space-between" mb={4}>
+        <div>
+          <Text size="sm" fw={500}>Нормализация значений <Code>{`{поле:map}`}</Code></Text>
+          <Text size="xs" c="dimmed">1/0 → Включен/Отключен и т.п. Применяется только к плейсхолдерам со спецом <Code>:map</Code>.</Text>
+        </div>
+        <Button size="compact-xs" variant="light" leftSection={<IconPlus size={12} />} onClick={addField}>
+          Поле
+        </Button>
+      </Group>
+      {entries.length === 0 ? (
+        <Text size="xs" c="dimmed">Нет карт значений. «Поле» → добавить (имя = последний сегмент пути, напр. <Code>state</Code>).</Text>
+      ) : (
+        <Stack gap="xs">
+          {entries.map(([field, m]) => (
+            <Card key={field} withBorder padding="xs">
+              <Group gap="xs" mb={4} align="center" wrap="nowrap">
+                <TextInput
+                  size="xs"
+                  label="Поле (имя или путь)"
+                  value={field}
+                  onChange={(e) => setField(field, e.currentTarget.value, m)}
+                  placeholder="state"
+                  style={{ flex: 1 }}
+                />
+                <ActionIcon variant="subtle" color="red" size="sm" mt={18} onClick={() => removeField(field)}>
+                  <IconTrash size={14} />
+                </ActionIcon>
+              </Group>
+              <Textarea
+                size="xs"
+                label="Карта: одна пара на строку, формат raw=display"
+                placeholder={'1=Включен\n0=Отключен'}
+                autosize minRows={2} maxRows={8}
+                ff="monospace"
+                value={mapToText(m)}
+                onChange={(e) => setField(field, field, textToMap(e.currentTarget.value))}
+              />
+            </Card>
+          ))}
+        </Stack>
+      )}
     </div>
   );
 }
@@ -2376,6 +2490,9 @@ export function Tier0TemplateEditor({ value, onChange, tenantId, toolName, toolD
                   <Text size="xs" c="dimmed">
                     Не уверен в структуре — открой вкладку «🧪 Тест», проверь запрос: видно JSON-вывод инструмента и подсказку по путям. Индекс <Code>0</Code> = первая запись.
                   </Text>
+                  <Text size="xs">
+                    • Спецы значений: <Code>{`{x:money}`}</Code>, <Code>{`{x:int}`}</Code>, <Code>{`{x:phones}`}</Code>, <Code>{`{x:map}`}</Code> (нормализация 1→Включен — настраивается ниже в «Нормализация значений»).
+                  </Text>
                 </Stack>
               </Alert>
               <Textarea
@@ -2423,8 +2540,13 @@ export function Tier0TemplateEditor({ value, onChange, tenantId, toolName, toolD
                 </Text>
               </Group>
               <Collapse expanded={showPreview}>
-                <PreviewPanel template={tpl.template} requiredFields={tpl.required_fields || []} />
+                <PreviewPanel template={tpl.template} requiredFields={tpl.required_fields || []} valueMaps={tpl.value_maps} />
               </Collapse>
+
+              <ValueMapsSection
+                value={tpl.value_maps}
+                onChange={(next) => emit({ value_maps: next })}
+              />
 
               <TableDefsSection
                 template={tpl.template}

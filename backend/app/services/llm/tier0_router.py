@@ -173,10 +173,13 @@ class _SafeFormatter(string.Formatter):
 
     MISSING = object()
 
-    def __init__(self, table_defs: dict | None = None, missing_repr: str = "{MISSING}"):
+    def __init__(self, table_defs: dict | None = None, missing_repr: str = "{MISSING}",
+                 value_maps: dict | None = None):
         super().__init__()
         # table_defs: {field_name: {"columns": [{"field":…,"label":…,"values":…,…}]}}
         self._table_defs: dict = table_defs or {}
+        # value_maps: {field_path_or_leaf: {raw_value: display}} for the `:map` spec
+        self._value_maps: dict = value_maps or {}
         self._current_field: str = ""  # set by get_field before format_field
         self._missing_repr = missing_repr
         self.missing_count = 0  # how many placeholders resolved to MISSING
@@ -282,6 +285,15 @@ class _SafeFormatter(string.Formatter):
             except (ValueError, TypeError):
                 return str(value)
 
+        # map → value_maps lookup: 1 → "Включен", "up" → "🟢", etc.
+        # Keyed by full path ("items.0.state") or the leaf segment ("state").
+        if format_spec == "map":
+            fld = self._current_field
+            m = self._value_maps.get(fld) or self._value_maps.get(fld.split(".")[-1])
+            if isinstance(m, dict):
+                return m.get(str(value), str(value))
+            return str(value)
+
         # table / table:c1,c2  → markdown table
         #
         # Column definitions come from table_defs[current_field].columns.
@@ -315,6 +327,7 @@ def _render_template(
     data: dict,
     required_fields: list[str],
     table_defs: dict | None = None,
+    value_maps: dict | None = None,
 ) -> str | None:
     """Render `{a.b}`-style placeholders. Returns None if any required field
     is missing — caller falls back to LLM in that case.
@@ -335,7 +348,7 @@ def _render_template(
             logger.info("[tier0] required field '%s' missing — falling back", path)
             return None
     try:
-        fmt = _SafeFormatter(table_defs=table_defs)
+        fmt = _SafeFormatter(table_defs=table_defs, value_maps=value_maps)
         out = fmt.format(template, _root=data)
     except Exception:
         logger.exception("[tier0] template render failed")
@@ -724,7 +737,8 @@ async def try_tier0(
                 # fall through to the LLM so the misconfig surfaces instead of a
                 # misleading "не найдено" on a record that actually exists.
                 rendered = _render_template(template, data, required_fields,
-                                            table_defs=t0_cfg.get("table_defs"))
+                                            table_defs=t0_cfg.get("table_defs"),
+                                            value_maps=t0_cfg.get("value_maps"))
         if rendered is not None:
             if attempt_idx > 0:
                 logger.info(
@@ -1044,7 +1058,8 @@ async def explain_tier0(
                                     rendered = _render_template(
                                         win_t0.get("template") or "", data,
                                         win_t0.get("required_fields") or [],
-                                        table_defs=win_t0.get("table_defs"))
+                                        table_defs=win_t0.get("table_defs"),
+                                        value_maps=win_t0.get("value_maps"))
                         if rendered is None:
                             if is_empty and not not_found_tpl:
                                 steps.append({"label": "Результат", "status": "fail",
