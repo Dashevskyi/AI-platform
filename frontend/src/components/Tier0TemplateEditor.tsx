@@ -87,6 +87,11 @@ export type Tier0Template = {
    * Example: "(?:свич|switch|коммутатор)\\s+(.+?)$"
    */
   keyword_regex?: string | null;
+  /**
+   * Saved state of the visual «Конструктор keyword_regex» so it reopens with the
+   * same settings (the generated regex can't be reliably reverse-parsed).
+   */
+  keyword_builder_state?: BuilderState;
   /** Each attempt is a flat dict: parameter dotted-path → entity-ref OR literal. */
   param_maps?: Record<string, unknown>[];
   required_fields?: string[];
@@ -586,20 +591,26 @@ function buildRegexFromBuilder(state: BuilderState): string {
 type KeywordRegexBuilderProps = {
   opened: boolean;
   onClose: () => void;
-  onApply: (regex: string) => void;
+  onApply: (regex: string, builderState: BuilderState) => void;
   currentRegex?: string | null;
+  initialState?: BuilderState;
 };
 
-function KeywordRegexBuilder({ opened, onClose, onApply, currentRegex }: KeywordRegexBuilderProps) {
+function KeywordRegexBuilder({ opened, onClose, onApply, currentRegex, initialState }: KeywordRegexBuilderProps) {
   const [state, setState] = useState<BuilderState>(DEFAULT_BUILDER_STATE);
   const [newWord, setNewWord] = useState('');
   const [testInput, setTestInput] = useState('');
 
-  // When modal opens — populate builder from currentRegex (best-effort parse)
+  // When modal opens — restore the saved builder state if we have one (the
+  // generated regex can't be reliably reverse-parsed); otherwise best-effort
+  // parse it back from the current regex.
   useEffect(() => {
     if (opened) {
-      const parsed = parseBuilderStateFromRegex(currentRegex ?? '');
-      setState(parsed);
+      if (initialState) {
+        setState(initialState);
+      } else {
+        setState(parseBuilderStateFromRegex(currentRegex ?? ''));
+      }
     }
   }, [opened]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1208,7 +1219,7 @@ function KeywordRegexBuilder({ opened, onClose, onApply, currentRegex }: Keyword
           <Button
             color="blue"
             leftSection={<IconCheck size={14} />}
-            onClick={() => { onApply(generatedRegex); onClose(); }}
+            onClick={() => { onApply(generatedRegex, state); onClose(); }}
             disabled={!isValid}
           >
             Применить regex
@@ -2563,8 +2574,9 @@ export function Tier0TemplateEditor({ value, onChange, tenantId, toolName, toolD
               <KeywordRegexBuilder
                 opened={builderOpen}
                 onClose={() => setBuilderOpen(false)}
-                onApply={(regex) => emit({ keyword_regex: regex || null })}
+                onApply={(regex, builderState) => emit({ keyword_regex: regex || null, keyword_builder_state: builderState })}
                 currentRegex={tpl.keyword_regex}
+                initialState={tpl.keyword_builder_state}
               />
 
               <Group align="flex-end" gap="sm" wrap="wrap">
