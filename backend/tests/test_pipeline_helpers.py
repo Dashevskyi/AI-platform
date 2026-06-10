@@ -120,6 +120,24 @@ def test_lazy_response_false_on_plain_answer():
     assert not p._is_lazy_response("Ваш баланс составляет 150 гривен.")
 
 
+# ── _build_datetime_block ───────────────────────────────────────────────────
+class _TzCfg:
+    def __init__(self, tz):
+        self.timezone = tz
+
+
+def test_datetime_block_includes_header():
+    out = p._build_datetime_block(_TzCfg("Europe/Kyiv"), "cid")
+    assert out is not None
+    assert "Текущая дата и время" in out
+
+
+def test_datetime_block_bad_tz_falls_back():
+    # A bogus timezone must not raise — falls back to server local.
+    out = p._build_datetime_block(_TzCfg("Not/AZone"), "cid")
+    assert out is not None and "Сейчас" in out
+
+
 # ── _ct (tiktoken token count) ──────────────────────────────────────────────
 def test_ct_empty_is_zero():
     assert p._ct("") == 0

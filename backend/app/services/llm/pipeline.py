@@ -146,6 +146,35 @@ def _is_lazy_response(content: str) -> bool:
     return bool(_LAZY_INTENT_RE.search(content))
 
 
+def _build_datetime_block(config, correlation_id: str) -> str | None:
+    """The '## Текущая дата и время' system block, in the tenant's timezone.
+    Non-fatal: returns None if the date can't be computed. Pure (no DB)."""
+    try:
+        from datetime import datetime
+        now = None
+        tz_label = "local"
+        cfg_tz = (getattr(config, "timezone", None) or "").strip()
+        if cfg_tz:
+            try:
+                from zoneinfo import ZoneInfo
+                now = datetime.now(ZoneInfo(cfg_tz))
+                tz_label = cfg_tz
+            except Exception:
+                logger.warning("[%s] bad tenant timezone %r — falling back to server local", correlation_id, cfg_tz)
+        if now is None:
+            now = datetime.now().astimezone()
+            tz_label = str(now.tzinfo) if now.tzinfo else "local"
+        return (
+            f"## Текущая дата и время\n"
+            f"Сейчас: **{now.strftime('%Y-%m-%d %H:%M')}** "
+            f"({now.strftime('%A')}, {tz_label}).\n"
+            f"Используй для арифметики дат («завтра», «через N дней», «в этом месяце»)."
+        )
+    except Exception:
+        logger.exception("[pipeline] failed to compute current date (non-fatal)")
+        return None
+
+
 def _resolve_thinking_kwargs(
     mode: str | None,
     user_content: str,
@@ -831,34 +860,9 @@ async def _chat_completion_inner(
     # === [HARDCODED-0] current date/time — computed here, injected LAST ===
     # KV-cache optimisation: date/time changes every minute — putting it first
     # invalidates the cache for ALL subsequent static blocks on every request.
-    # We compute _now here (available to downstream code) but defer _sys() to
-    # just before the history section so the long static prefix (rules, tools,
-    # KB, memory) stays perfectly cacheable. See injection point below.
-    _hc0_date_text: str | None = None
-    try:
-        from datetime import datetime
-        _now = None
-        _tz_label = "local"
-        _cfg_tz = (getattr(config, "timezone", None) or "").strip()
-        if _cfg_tz:
-            try:
-                from zoneinfo import ZoneInfo
-                _now = datetime.now(ZoneInfo(_cfg_tz))
-                _tz_label = _cfg_tz
-            except Exception:
-                logger.warning("[%s] bad tenant timezone %r — falling back to server local", correlation_id, _cfg_tz)
-        if _now is None:
-            _now = datetime.now().astimezone()
-            _tz_label = str(_now.tzinfo) if _now.tzinfo else "local"
-        _hc0_date_text = (
-            f"## Текущая дата и время\n"
-            f"Сейчас: **{_now.strftime('%Y-%m-%d %H:%M')}** "
-            f"({_now.strftime('%A')}, {_tz_label}).\n"
-            f"Используй для арифметики дат («завтра», «через N дней», "
-            f"«в этом месяце»)."
-        )
-    except Exception:
-        logger.exception("[pipeline] failed to compute current date (non-fatal)")
+    # So we compute it here but defer _sys() to just before the history section,
+    # keeping the long static prefix (rules, tools, KB, memory) cacheable.
+    _hc0_date_text = _build_datetime_block(config, correlation_id)
 
     if config.system_prompt:
         _sys("Tenant system_prompt", config.system_prompt)
