@@ -823,8 +823,10 @@ async def text_to_speech(
         )
         # Silero v4 doesn't expand numbers itself — normalize before synthesis
         text_silero = _normalize_numbers_for_silero(text, silero_lang)
+        out_fmt = "mp3" if (body.format or "").lower() == "mp3" else "wav"
         silero_payload = {"text": text_silero, "lang": silero_lang, "speaker": speaker, "sample_rate": 48000,
-                          "speed": tts_cfg.speed or 1.0, "pitch": getattr(tts_cfg, "pitch", None)}
+                          "speed": tts_cfg.speed or 1.0, "pitch": getattr(tts_cfg, "pitch", None),
+                          "format": out_fmt}
         logger.debug("TTS: Silero %d→%d chars, lang=%s, speaker=%s, url=%s",
                      len(text), len(text_silero), silero_lang, speaker, silero_base)
 
@@ -839,7 +841,7 @@ async def text_to_speech(
             except Exception as exc:
                 logger.error("Silero TTS failed: %s", exc)
 
-        return StreamingResponse(_silero_gen(), media_type="audio/wav")
+        return StreamingResponse(_silero_gen(), media_type="audio/mpeg" if out_fmt == "mp3" else "audio/wav")
 
     # ── Local Fish Speech 1.5 path (sentence-chunked, MsgPack binary API) ──────
     # Fish Speech 1.5 uses ormsgpack serialization, not JSON.

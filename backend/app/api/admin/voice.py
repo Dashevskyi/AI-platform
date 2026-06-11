@@ -143,8 +143,10 @@ async def text_to_speech_admin(
             settings.SILERO_SPEAKER_UA if silero_lang == "ua" else settings.SILERO_SPEAKER_RU
         )
         text_silero = _normalize_numbers_for_silero(text, silero_lang)
+        out_fmt = "mp3" if (body.format or "").lower() == "mp3" else "wav"
         silero_payload = {"text": text_silero, "lang": silero_lang, "speaker": speaker, "sample_rate": 48000,
-                          "speed": tts_cfg.speed or 1.0, "pitch": getattr(tts_cfg, "pitch", None)}
+                          "speed": tts_cfg.speed or 1.0, "pitch": getattr(tts_cfg, "pitch", None),
+                          "format": out_fmt}
         logger.debug("TTS(admin): Silero %d chars, lang=%s, speaker=%s", len(text_silero), silero_lang, speaker)
 
         async def _silero_gen():
@@ -158,7 +160,7 @@ async def text_to_speech_admin(
             except Exception as exc:
                 logger.error("Silero TTS (admin) failed: %s", exc)
 
-        return StreamingResponse(_silero_gen(), media_type="audio/wav")
+        return StreamingResponse(_silero_gen(), media_type="audio/mpeg" if out_fmt == "mp3" else "audio/wav")
 
     # ── Fish Speech ─────────────────────────────────────────────────────────
     import ormsgpack as _msgpack  # type: ignore[import]

@@ -177,7 +177,7 @@ class TTSReq(BaseModel):
     lang: str = "ru"           # ru | ua (compat with v4 wrapper)
     speaker: str | None = None
     sample_rate: int = 48000   # 48k: noticeably better than 24k
-    format: str = "wav"        # wav | asterisk (8kHz mono 16-bit, normalized)
+    format: str = "wav"        # wav | mp3 | asterisk (8kHz mono 16-bit, normalized)
     accent: bool = True        # run the accentuator before synthesis
     speed: float = 1.0         # speech rate (0.5–2.0) via SSML prosody
     pitch: str | None = None   # x-low | low | medium | high | x-high
@@ -215,5 +215,9 @@ def tts(r: TTSReq):
         peak = float(np.max(np.abs(data))) or 1.0
         data = data * (0.7079 / peak)
     buf = io.BytesIO()
+    if r.format.lower() == "mp3":
+        # ~12x smaller than WAV — critical for time-to-first-audio over WAN.
+        sf.write(buf, data, sr, format="MP3")
+        return Response(content=buf.getvalue(), media_type="audio/mpeg")
     sf.write(buf, data, sr, format="WAV", subtype="PCM_16")
     return Response(content=buf.getvalue(), media_type="audio/wav")
