@@ -281,7 +281,7 @@ function TTSSection({
     <Stack gap="md">
       <Alert icon={<IconAlertCircle size={14} />} color="blue" variant="light" py={6}>
         Выбери провайдера TTS. <strong>Системный</strong> — использует настройки платформы из <code>.env</code>.
-        <strong> ElevenLabs</strong> — облачный, высокое качество (~300 ms). <strong>Fish Speech</strong> — локальный, бесплатно.
+        <strong> ElevenLabs</strong> — облачный, высокое качество (~300 ms).
       </Alert>
 
       <Fieldset legend="Провайдер голоса" variant="filled">
@@ -296,7 +296,6 @@ function TTSSection({
               { value: 'system', label: '🖥 Системный (по умолчанию платформы)' },
               { value: 'silero', label: '⚡ Silero v5 (локальный, MIT, быстрый)' },
               { value: 'elevenlabs', label: '☁️ ElevenLabs (свой ключ)' },
-              { value: 'fish_speech', label: '🐟 Fish Speech (локальный)' },
             ]}
             value={provider}
             onChange={(val) => updateField('tts_provider', val || 'system')}
@@ -433,38 +432,6 @@ function TTSSection({
         </Fieldset>
       )}
 
-      {provider === 'fish_speech' && (
-        <Fieldset legend="Fish Speech" variant="filled">
-          <Stack gap="sm">
-            <Alert color="yellow" variant="light" py={6}>
-              Fish Speech — локальный GPU-синтез. Задержка ~2 с + 0.1 с/символ. Для коротких фраз (~10–15 слов) приемлемо, для длинных ответов — медленно.
-            </Alert>
-            <SimpleGrid cols={{ base: 1, md: 2 }} spacing="sm">
-              <TextInput
-                label={
-                  <Hint hint="Базовый URL Fish Speech сервера. Пусто — используется системный адрес из .env (TTS_URL). Пример: http://172.10.100.9:8002">
-                    URL сервера (необязательно)
-                  </Hint>
-                }
-                placeholder="http://172.10.100.9:8002"
-                value={form.tts_fish_url ?? ''}
-                onChange={(e) => updateField('tts_fish_url', e.currentTarget.value || undefined)}
-              />
-              <NumberInput
-                label={
-                  <Hint hint="Скорость речи. 1.0 = нормальная. Fish Speech поддерживает через параметр speed в API.">
-                    Скорость речи
-                  </Hint>
-                }
-                placeholder="1.0"
-                min={0.5} max={2.0} step={0.1} decimalScale={1}
-                value={form.tts_speed ?? undefined}
-                onChange={(v) => updateField('tts_speed', typeof v === 'number' ? v : undefined)}
-              />
-            </SimpleGrid>
-          </Stack>
-        </Fieldset>
-      )}
 
       <TTSTestPlayer tenantId={tenantId} />
     </Stack>
