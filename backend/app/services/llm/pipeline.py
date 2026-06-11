@@ -2178,13 +2178,43 @@ async def _chat_completion_inner(self) -> dict:
                         tool_call_id=tc_id,
                         content="(Лимит вызовов инструментов исчерпан. Дай ответ на основе того, что уже собрано.)",
                     ))
+            # plan_update exception: if a plan was registered this request and
+            # progress wasn't marked yet, the wrap-up call may use exactly one
+            # tool — plan_update — so the checklist doesn't stay empty when
+            # the round cap cuts execution short. Detected by the tool-result
+            # prefixes we control (executor's plan/plan_update outputs).
+            _final_tools = None
+            if tools_enabled:
+                _plan_ran = any(
+                    isinstance(m, dict) and m.get("role") == "tool"
+                    and str(m.get("content") or "").startswith("План записан")
+                    for m in messages
+                )
+                _plan_marked = any(
+                    isinstance(m, dict) and m.get("role") == "tool"
+                    and str(m.get("content") or "").startswith("Прогресс отмечен")
+                    for m in messages
+                )
+                if _plan_ran and not _plan_marked:
+                    from app.services.tools.builtin_registry import BUILTIN_TOOLS
+                    _pu = next(
+                        (t for t in BUILTIN_TOOLS if t["function"]["name"] == "plan_update"),
+                        None,
+                    )
+                    if _pu:
+                        _final_tools = [{"type": "function", "function": _pu["function"]}]
             messages.append({
                 "role": "system",
                 "content": (
                     "Достигнут лимит вызовов инструментов в этом раунде. "
                     "Сформулируй ответ пользователю на основе уже полученных данных. "
                     "Если данных недостаточно — честно скажи об этом и предложи следующие шаги. "
-                    "НЕ вызывай tools в этом ответе."
+                    + (
+                        "Разрешён ровно один tool — plan_update(done=[...], failed=[...]): "
+                        "отметь им фактически выполненные шаги плана. Другие tools НЕ вызывай."
+                        if _final_tools else
+                        "НЕ вызывай tools в этом ответе."
+                    )
                 ),
             })
             await _emit("provider_call_start", {"round": round_num + 1, "model": model_name, "final_summary": True})
@@ -2196,22 +2226,50 @@ async def _chat_completion_inner(self) -> dict:
                     model=model_name,
                     temperature=effective_temperature,
                     max_tokens=config.max_tokens,
-                    tools=None,  # explicitly disable tools
+                    tools=_final_tools,  # None unless the plan_update exception applies
                     on_chunk=chunk_cb,
                     extra_body={"chat_template_kwargs": {"enable_thinking": False}},  # final summary fast
                 )
+                if resp.prompt_tokens:
+                    total_prompt_tokens += resp.prompt_tokens
+                if resp.completion_tokens:
+                    total_completion_tokens += resp.completion_tokens
+                if _final_tools and resp.tool_calls:
+                    # Execute plan_update (and only it), then one last text-only call.
+                    round_num += 1
+                    tool_calls_total += len(resp.tool_calls)
+                    messages.append(provider.format_assistant_turn(resp))
+                    for tc in resp.tool_calls:
+                        parsed = _parse_tool_call(tc)
+                        if parsed and parsed[1] == "plan_update":
+                            await _execute_tool_call(_tool_ctx, tc, round_num)
+                        elif parsed:
+                            messages.append(provider.format_tool_result_turn(
+                                tool_call_id=parsed[0],
+                                content="(Лимит исчерпан — разрешён только plan_update.)",
+                            ))
+                    current_round_ref["round"] = round_num + 1
+                    resp = await provider.chat_completion(
+                        messages=messages,
+                        model=model_name,
+                        temperature=effective_temperature,
+                        max_tokens=config.max_tokens,
+                        tools=None,
+                        on_chunk=chunk_cb,
+                        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+                    )
+                    if resp.prompt_tokens:
+                        total_prompt_tokens += resp.prompt_tokens
+                    if resp.completion_tokens:
+                        total_completion_tokens += resp.completion_tokens
                 await _emit("provider_call_done", {
-                    "round": round_num + 1,
+                    "round": current_round_ref["round"],
                     "latency_ms": int((time.time() - provider_t0) * 1000),
                     "has_tool_calls": False,
                     "content_chars": len(resp.content or ""),
                     "reasoning_chars": len(resp.reasoning or ""),
                     "final_summary": True,
                 })
-                if resp.prompt_tokens:
-                    total_prompt_tokens += resp.prompt_tokens
-                if resp.completion_tokens:
-                    total_completion_tokens += resp.completion_tokens
             except Exception as e:
                 logger.warning(f"[{correlation_id}] Final summary call failed: {e}")
 
