@@ -859,6 +859,22 @@ async def _chat_completion_inner(self) -> dict:
                     if getattr(config, "debug_enabled", True) else None
                 ),
             ))
+            # Promote the tool result to a first-class artifact — same as the
+            # LLM tool loop does via _schedule_tool_result_capture. Without it
+            # Tier 0 answers leave no grounding trace for follow-up turns.
+            if tier0_result.tool_output:
+                try:
+                    from app.services.artifacts.tool_result_capture import capture_tool_result_as_artifact
+                    asyncio.create_task(capture_tool_result_as_artifact(
+                        tenant_id=uuid.UUID(str(tenant_id)),
+                        chat_id=uuid.UUID(str(chat_id)),
+                        user_message_id=uuid.UUID(str(user_message_id)) if user_message_id else None,
+                        tool_name=tier0_result.tool_name,
+                        arguments=tier0_result.arguments,
+                        output=tier0_result.tool_output,
+                    ))
+                except Exception:
+                    logger.exception("[tier0] tool-result capture scheduling failed (non-fatal)")
             # Auto-title: provider is not loaded on the Tier 0 fast path,
             # so pass None — the function falls back to the user query text.
             await _auto_summary_background(

@@ -76,6 +76,12 @@ class Tier0Result:
     second_score: float          # for transparency (gap-check explanation)
     latency_ms: float
     extracted_entities: dict
+    # Raw tool call of the successful attempt — lets the pipeline promote the
+    # result to a first-class artifact (same as the LLM tool loop does), so
+    # follow-up turns can ground on it. None when the hit was a not-found
+    # template (nothing worth grounding on).
+    arguments: dict | None = None
+    tool_output: str | None = None
 
 
 def _entity_value(
@@ -685,6 +691,8 @@ async def try_tier0(
     template = t0_cfg.get("template") or ""
     required_fields = t0_cfg.get("required_fields") or []
     rendered: str | None = None
+    hit_arguments: dict | None = None
+    hit_output: str | None = None
 
     # Extra entity bag — carries keyword_extract if we resolved one
     extra_entities: dict[str, str] | None = (
@@ -726,6 +734,7 @@ async def try_tier0(
         # Step 8 — render template.
         # `raw_output: true` in tier0_template skips JSON parsing and returns
         # the tool output as-is (useful for plain-text tools like ping/traceroute).
+        not_found_hit = False
         if t0_cfg.get("raw_output"):
             rendered = result.output.strip() or None
         else:
@@ -738,6 +747,7 @@ async def try_tier0(
             # of either emitting half-rendered {MISSING} junk or bailing to the LLM.
             not_found_tpl = t0_cfg.get("not_found_template")
             if _result_is_empty(data, required_fields):
+                not_found_hit = True
                 rendered = (
                     _render_not_found(not_found_tpl, entities, keyword_extracted, user_query)
                     if not_found_tpl else None
@@ -751,6 +761,8 @@ async def try_tier0(
                                             table_defs=t0_cfg.get("table_defs"),
                                             value_maps=t0_cfg.get("value_maps"))
         if rendered is not None:
+            hit_arguments = arguments
+            hit_output = None if not_found_hit else result.output
             if attempt_idx > 0:
                 logger.info(
                     "[tier0] succeeded on attempt %d (after %d misses)",
@@ -778,6 +790,8 @@ async def try_tier0(
         second_score=second_score,
         latency_ms=latency_ms,
         extracted_entities=ent_dict,
+        arguments=hit_arguments,
+        tool_output=hit_output,
     )
 
 
