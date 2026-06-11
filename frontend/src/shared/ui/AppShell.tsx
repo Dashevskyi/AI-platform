@@ -32,6 +32,7 @@ import {
   IconPlus,
   IconRobot,
   IconCpu,
+  IconCalculator,
   IconArrowLeft,
   IconChevronRight,
 } from '@tabler/icons-react';
@@ -96,6 +97,7 @@ export function AppShellLayout() {
         { label: 'Каталог моделей', icon: IconRobot, path: '/models' },
         { label: 'Тенанты', icon: IconBuilding, path: '/tenants' },
         { label: 'Инфраструктура', icon: IconCpu, path: '/infrastructure' },
+        { label: 'Калькулятор', icon: IconCalculator, path: '/calculator' },
       ]
     : isTenantAdmin && myTenantId
       ? [

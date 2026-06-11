@@ -26,6 +26,9 @@ const ChatPage = lazy(() =>
 const InfrastructurePage = lazy(() =>
   import('./pages/InfrastructurePage').then((module) => ({ default: module.InfrastructurePage }))
 );
+const CalculatorPage = lazy(() =>
+  import('./pages/CalculatorPage').then((module) => ({ default: module.CalculatorPage }))
+);
 
 function RouteFallback() {
   return (
@@ -72,6 +75,7 @@ export default function App() {
           <Route path="/dashboard" element={<SuperadminOnly><DashboardPage /></SuperadminOnly>} />
           <Route path="/models" element={<SuperadminOnly><ModelsPage /></SuperadminOnly>} />
           <Route path="/infrastructure" element={<SuperadminOnly><InfrastructurePage /></SuperadminOnly>} />
+          <Route path="/calculator" element={<SuperadminOnly><CalculatorPage /></SuperadminOnly>} />
           <Route path="/tenants" element={<SuperadminOnly><TenantListPage /></SuperadminOnly>} />
           <Route path="/tenants/:id" element={<TenantDetailPage />} />
           <Route path="/tenants/:id/chat" element={<ChatPage />} />
