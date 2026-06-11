@@ -230,6 +230,9 @@ export function AiChat({
   const viewportRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messageInputRef = useRef<HTMLTextAreaElement>(null);
+  // Snapshot of typed text when a live-STT mic session opens; live transcript
+  // is rendered as `base + live` so streaming partials don't clobber typing.
+  const micBaseRef = useRef('');
 
   const connection = useMemo(() => {
     if (mode === 'admin') {
@@ -923,6 +926,16 @@ export function AiChat({
                       onTranscribed={(text) => {
                         setMessageText((prev) => prev ? (prev.trim() + ' ' + text) : text);
                         requestAnimationFrame(() => messageInputRef.current?.focus());
+                      }}
+                      onSessionStart={() => {
+                        setMessageText((prev) => {
+                          micBaseRef.current = prev.trim();
+                          return prev;
+                        });
+                      }}
+                      onLiveText={(live) => {
+                        const base = micBaseRef.current;
+                        setMessageText(base ? `${base} ${live}` : live);
                       }}
                     />
                   </>
