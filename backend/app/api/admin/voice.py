@@ -142,7 +142,9 @@ async def text_to_speech_admin(
         speaker = _vid if re.fullmatch(r"[a-z]+_[a-z0-9_]+", _vid) else (
             settings.SILERO_SPEAKER_UA if silero_lang == "ua" else settings.SILERO_SPEAKER_RU
         )
-        text_silero = _normalize_numbers_for_silero(text, silero_lang)
+        from app.api.tenant.voice import _get_local_abbr, _apply_custom_abbr
+        text_silero = _apply_custom_abbr(text, await _get_local_abbr())
+        text_silero = _normalize_numbers_for_silero(text_silero, silero_lang)
         out_fmt = "mp3" if (body.format or "").lower() == "mp3" else "wav"
         silero_payload = {"text": text_silero, "lang": silero_lang, "speaker": speaker, "sample_rate": 48000,
                           "speed": tts_cfg.speed or 1.0, "pitch": getattr(tts_cfg, "pitch", None),

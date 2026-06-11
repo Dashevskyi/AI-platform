@@ -367,6 +367,43 @@ def _num_words(n: int, lang: str) -> str:
         return str(n)
 
 
+# ── Custom local-TTS rules (admin-edited on the silero-v5 service) ──────────
+# Abbreviation expansions must run BEFORE this normalizer's latin/all-caps
+# rules, otherwise "DNS" is spelt out before the admin's "дэ эн эс" applies.
+# Rules live on the service (/rules); fetched here with a short TTL cache.
+_local_rules_cache: dict = {"at": 0.0, "abbr": {}}
+
+
+async def _get_local_abbr() -> dict:
+    import time as _t
+    now = _t.monotonic()
+    if now - _local_rules_cache["at"] < 60:
+        return _local_rules_cache["abbr"]
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(f"{settings.SILERO_TTS_URL.rstrip('/')}/rules")
+            resp.raise_for_status()
+            _local_rules_cache["abbr"] = (resp.json().get("custom") or {}).get("abbr") or {}
+    except Exception:
+        pass  # keep last known rules on failure
+    _local_rules_cache["at"] = now
+    return _local_rules_cache["abbr"]
+
+
+def _apply_custom_abbr(text: str, abbr: dict) -> str:
+    import re as _re_a
+    for k, v in abbr.items():
+        if not k.strip():
+            continue
+        pat = r"(?<![\w\u0400-\u04FF])" + _re_a.escape(k) + r"(?![\w\u0400-\u04FF])"
+        text = _re_a.sub(
+            pat,
+            lambda m, _v=v: (_v.capitalize() if m.group(0)[:1].isupper() and _v[:1].isalpha() else _v),
+            text, flags=_re_a.IGNORECASE,
+        )
+    return text
+
+
 def _normalize_numbers_for_silero(text: str, lang: str = 'ru') -> str:
     """Convert numeric expressions, abbreviations and math symbols to spoken word form for Silero TTS.
 
@@ -875,7 +912,8 @@ async def text_to_speech(
             settings.SILERO_SPEAKER_UA if silero_lang == "ua" else settings.SILERO_SPEAKER_RU
         )
         # Silero v4 doesn't expand numbers itself — normalize before synthesis
-        text_silero = _normalize_numbers_for_silero(text, silero_lang)
+        text_silero = _apply_custom_abbr(text, await _get_local_abbr())
+        text_silero = _normalize_numbers_for_silero(text_silero, silero_lang)
         out_fmt = "mp3" if (body.format or "").lower() == "mp3" else "wav"
         silero_payload = {"text": text_silero, "lang": silero_lang, "speaker": speaker, "sample_rate": 48000,
                           "speed": tts_cfg.speed or 1.0, "pitch": getattr(tts_cfg, "pitch", None),
@@ -1060,11 +1098,15 @@ async def stt_stream_proxy(
                         if text is not None:
                             if not first_json_done:
                                 first_json_done = True
-                                # Inject vocab into the initial config frame
+                                # Inject vocab into the initial config frame.
+                                # NOTE: initial_prompt is deliberately NOT
+                                # injected — WhisperLive stops emitting
+                                # segments entirely when it's set (verified
+                                # A/B against a control). Hotwords work fine;
+                                # initial_prompt remains in use on the batch
+                                # /stt path (faster-whisper-server).
                                 try:
                                     cfg = _json.loads(text)
-                                    if initial_prompt and "initial_prompt" not in cfg:
-                                        cfg["initial_prompt"] = initial_prompt
                                     if hotwords and "hotwords" not in cfg:
                                         cfg["hotwords"] = hotwords
                                     text = _json.dumps(cfg)

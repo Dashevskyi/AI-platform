@@ -85,8 +85,14 @@ async def tts_test(body: TTSTestPayload) -> Response:
     provider settings — this page configures the LOCAL engine specifically)."""
     if not body.text.strip():
         raise HTTPException(400, "Пустой текст")
+    # Mirror the platform path: numbers/dates/IPs must be words before they
+    # reach the engine (the base model chokes on raw digits).
+    from app.api.tenant.voice import _normalize_numbers_for_silero, _get_local_abbr, _apply_custom_abbr
+    _lang = "ua" if body.lang == "ua" else "ru"
+    text_norm = _apply_custom_abbr(body.text, await _get_local_abbr())
+    text_norm = _normalize_numbers_for_silero(text_norm, _lang)
     payload = {
-        "text": body.text,
+        "text": text_norm,
         "lang": body.lang,
         "format": "mp3",
         **({"speaker": body.speaker} if body.speaker else {}),
