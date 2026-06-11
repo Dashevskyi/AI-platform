@@ -257,6 +257,12 @@ export function VoiceModeOverlay({
       if (closedRef.current) break;
     }
     queueRunningRef.current = false;
+    // Drop whatever WhisperLive transcribed while WE were speaking: that's
+    // background noise and acoustic leakage of our own TTS. Without this it
+    // auto-submits as the user's "next phrase" right after playback ends.
+    wlConsumedRef.current = wlLastFullRef.current;
+    wlFinalTextRef.current = '';
+    setTranscript('');
     if (!llmStreamingRef.current && !closedRef.current) {
       setPhase('listening');
     }
@@ -420,6 +426,11 @@ export function VoiceModeOverlay({
     }
   };
 
+  // WhisperLive emits junk finals on coughs/clicks/echo («а», «м», «и») —
+  // require at least 4 letters before a transcript may start an LLM turn.
+  const isMeaningful = (t: string) =>
+    t.replace(/[^\wа-яёіїєґА-ЯЁІЇЄҐ]/g, '').length >= 4;
+
   // WhisperLive: drives the fast path.
   // onPartial → show live transcript, cancel any pending debounce (user still speaking).
   // onFinal   → start 350ms debounce; if no new partial arrives, submit to LLM.
@@ -441,8 +452,8 @@ export function VoiceModeOverlay({
       wlDebounceRef.current = setTimeout(() => {
         wlDebounceRef.current = null;
         const t = wlFinalTextRef.current.trim();
-        if (t) void submitLLM(t);
-      }, 350);
+        if (isMeaningful(t)) void submitLLM(t);
+      }, 900);
     },
   });
 
@@ -453,24 +464,25 @@ export function VoiceModeOverlay({
   const vad = useVAD({
     silenceMs: 900,
     onSegment: async (blob) => {
+      // Bot is talking or LLM is mid-turn → this segment is our own TTS echo
+      // (or background noise); submitting it would corrupt the dialogue.
+      if (llmStreamingRef.current || queueRunningRef.current) return;
       // Case 1: WL debounce is pending → fire immediately instead of waiting
       if (wlDebounceRef.current) {
         clearTimeout(wlDebounceRef.current);
         wlDebounceRef.current = null;
         const t = wlFinalTextRef.current.trim();
-        if (t) { void submitLLM(t); return; }
+        if (isMeaningful(t)) { void submitLLM(t); return; }
       }
-      // Case 2: submitLLM already running (WL fired faster) → ignore
-      if (llmStreamingRef.current) return;
-      // Case 3: WL has text but debounce already resolved → shouldn't happen, guard anyway
+      // Case 2: WL has text but debounce already resolved → shouldn't happen, guard anyway
       const t = wlFinalTextRef.current.trim();
-      if (t) { void submitLLM(t); return; }
-      // Case 4: WL delivered nothing → batch STT fallback
+      if (isMeaningful(t)) { void submitLLM(t); return; }
+      // Case 3: WL delivered nothing → batch STT fallback
       setPhase('transcribing');
       try {
         const { text } = await api.transcribeAudio(tenantId, blob);
         const ut = (text || '').trim();
-        if (ut) void submitLLM(ut);
+        if (isMeaningful(ut)) void submitLLM(ut);
         else setPhase('listening');
       } catch (e) {
         setPhase('listening');
