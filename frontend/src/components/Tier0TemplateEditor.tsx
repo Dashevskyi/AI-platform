@@ -51,6 +51,7 @@ import {
   IconSparkles,
   IconListCheck,
   IconBulb,
+  IconAlertTriangle,
 } from '@tabler/icons-react';
 import { tier0Api, type Tier0ExplainResult, type Tier0TestLLMResult } from '../shared/api/endpoints';
 
@@ -743,6 +744,16 @@ function KeywordRegexBuilder({ opened, onClose, onApply, currentRegex, initialSt
       size="xl"
     >
       <Stack gap="md">
+
+        {!initialState && !!(currentRegex && currentRegex.trim()) && (
+          <Alert color="yellow" variant="light" p="xs" icon={<IconAlertTriangle size={15} />}>
+            <Text size="xs">
+              Текущий <Code>keyword_regex</Code> создан не Конструктором (Визардом или вручную) — его настройки
+              здесь не отображаются. Конструктор начинается с нуля; нажав «Применить», ты <b>заменишь</b> текущий regex.
+              Чтобы только подправить существующий — закрой это окно и редактируй regex как текст.
+            </Text>
+          </Alert>
+        )}
 
         {/* Presets row */}
         <div>
@@ -2210,7 +2221,9 @@ export function Tier0TemplateEditor({ value, onChange, tenantId, toolName, toolD
 
   function applyAssistSuggestion() {
     if (!assistResult) return;
-    onChange({ ...tpl, ...(assistResult.suggestion as Partial<Tier0Template>) });
+    // LLM-authored regex doesn't come from the visual builder — drop any saved
+    // builder state so the constructor won't show settings that no longer match.
+    onChange({ ...tpl, keyword_builder_state: undefined, ...(assistResult.suggestion as Partial<Tier0Template>) });
     setAssistOpen(false);
     setAssistMessage('');
     setAssistResult(null);
@@ -2292,7 +2305,9 @@ export function Tier0TemplateEditor({ value, onChange, tenantId, toolName, toolD
 
   function applyWizardSuggestion() {
     if (!wizResult) return;
-    onChange({ ...tpl, ...(wizResult.suggestion as Partial<Tier0Template>) });
+    // Wizard regex isn't from the visual builder — drop saved builder state so
+    // the constructor won't reopen with settings that no longer match.
+    onChange({ ...tpl, keyword_builder_state: undefined, ...(wizResult.suggestion as Partial<Tier0Template>) });
     setWizardOpen(false);
     setWizResult(null);
   }
