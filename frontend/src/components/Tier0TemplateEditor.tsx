@@ -1841,6 +1841,74 @@ function TableDefsSection({ template, tableDefs, onChange }: TableDefsEditorProp
 }
 
 // ─── Value maps editor: {field:map} normalizers ─────────────────────────────
+
+// Serialize one field's map to "raw=display" lines and back.
+const valueMapToText = (m: Record<string, string>) =>
+  Object.entries(m).map(([k, v]) => `${k}=${v}`).join('\n');
+const textToValueMap = (t: string): Record<string, string> => {
+  const out: Record<string, string> = {};
+  for (const line of t.split('\n')) {
+    const i = line.indexOf('=');
+    if (i < 0) continue;
+    const k = line.slice(0, i).trim();
+    if (k) out[k] = line.slice(i + 1).trim();
+  }
+  return out;
+};
+
+// Drafts are local and commit on blur/Enter. The parent keys cards by field
+// name, so committing a rename remounts the card — editing through parent
+// state directly would remount on EVERY keystroke and drop input focus.
+function ValueMapCard({
+  field,
+  map,
+  onCommit,
+  onRemove,
+}: {
+  field: string;
+  map: Record<string, string>;
+  onCommit: (newName: string, m: Record<string, string>) => void;
+  onRemove: () => void;
+}) {
+  const [name, setName] = useState(field);
+  const [text, setText] = useState(() => valueMapToText(map));
+  // Resync drafts when the parent value changes externally (preset load, etc.)
+  useEffect(() => { setName(field); }, [field]);
+  useEffect(() => { setText(valueMapToText(map)); }, [map]);
+
+  const commit = () => onCommit(name, textToValueMap(text));
+
+  return (
+    <Card withBorder padding="xs">
+      <Group gap="xs" mb={4} align="center" wrap="nowrap">
+        <TextInput
+          size="xs"
+          label="Поле (имя или путь)"
+          value={name}
+          onChange={(e) => setName(e.currentTarget.value)}
+          onBlur={commit}
+          onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+          placeholder="state"
+          style={{ flex: 1 }}
+        />
+        <ActionIcon variant="subtle" color="red" size="sm" mt={18} onClick={onRemove}>
+          <IconTrash size={14} />
+        </ActionIcon>
+      </Group>
+      <Textarea
+        size="xs"
+        label="Карта: одна пара на строку, формат raw=display"
+        placeholder={'1=Включен\n0=Отключен'}
+        autosize minRows={2} maxRows={8}
+        ff="monospace"
+        value={text}
+        onChange={(e) => setText(e.currentTarget.value)}
+        onBlur={commit}
+      />
+    </Card>
+  );
+}
+
 function ValueMapsSection({
   value,
   onChange,
@@ -1849,20 +1917,6 @@ function ValueMapsSection({
   onChange: (next: Record<string, Record<string, string>> | undefined) => void;
 }) {
   const entries = Object.entries(value || {});
-
-  // Serialize one field's map to "raw=display" lines and back.
-  const mapToText = (m: Record<string, string>) =>
-    Object.entries(m).map(([k, v]) => `${k}=${v}`).join('\n');
-  const textToMap = (t: string): Record<string, string> => {
-    const out: Record<string, string> = {};
-    for (const line of t.split('\n')) {
-      const i = line.indexOf('=');
-      if (i < 0) continue;
-      const k = line.slice(0, i).trim();
-      if (k) out[k] = line.slice(i + 1).trim();
-    }
-    return out;
-  };
 
   const setField = (oldName: string, newName: string, m: Record<string, string>) => {
     const next: Record<string, Record<string, string>> = {};
@@ -1902,30 +1956,13 @@ function ValueMapsSection({
       ) : (
         <Stack gap="xs">
           {entries.map(([field, m]) => (
-            <Card key={field} withBorder padding="xs">
-              <Group gap="xs" mb={4} align="center" wrap="nowrap">
-                <TextInput
-                  size="xs"
-                  label="Поле (имя или путь)"
-                  value={field}
-                  onChange={(e) => setField(field, e.currentTarget.value, m)}
-                  placeholder="state"
-                  style={{ flex: 1 }}
-                />
-                <ActionIcon variant="subtle" color="red" size="sm" mt={18} onClick={() => removeField(field)}>
-                  <IconTrash size={14} />
-                </ActionIcon>
-              </Group>
-              <Textarea
-                size="xs"
-                label="Карта: одна пара на строку, формат raw=display"
-                placeholder={'1=Включен\n0=Отключен'}
-                autosize minRows={2} maxRows={8}
-                ff="monospace"
-                value={mapToText(m)}
-                onChange={(e) => setField(field, field, textToMap(e.currentTarget.value))}
-              />
-            </Card>
+            <ValueMapCard
+              key={field}
+              field={field}
+              map={m}
+              onCommit={(newName, nm) => setField(field, newName, nm)}
+              onRemove={() => removeField(field)}
+            />
           ))}
         </Stack>
       )}
