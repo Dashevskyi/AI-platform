@@ -44,6 +44,7 @@ class ShellConfigUpdate(BaseModel):
     tts_voice_id: str | None = None
     tts_model: str | None = None
     tts_speed: float | None = None
+    tts_pitch: str | None = None
     tts_fish_url: str | None = None    # custom Fish Speech base URL override
 
 
@@ -92,6 +93,7 @@ class ShellConfigResponse(BaseModel):
     tts_voice_id: str | None = None
     tts_model: str | None = None
     tts_speed: float | None = None
+    tts_pitch: str | None = None
     tts_fish_url: str | None = None
 
     model_config = {"from_attributes": True}

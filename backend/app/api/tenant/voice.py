@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import re
 import uuid
 
 import httpx
@@ -87,15 +88,16 @@ async def _load_stt_config(tenant_id: uuid.UUID, db: AsyncSession) -> _STTConfig
 
 class _TTSConfig:
     """Resolved per-tenant TTS parameters (after fallback to system defaults)."""
-    __slots__ = ("provider", "api_key", "voice_id", "model", "speed", "fish_url")
+    __slots__ = ("provider", "api_key", "voice_id", "model", "speed", "fish_url", "pitch")
 
-    def __init__(self, provider, api_key, voice_id, model, speed, fish_url):
+    def __init__(self, provider, api_key, voice_id, model, speed, fish_url, pitch=None):
         self.provider = provider      # 'elevenlabs' | 'fish_speech'
         self.api_key = api_key        # str | None
         self.voice_id = voice_id      # str | None
         self.model = model            # str | None
         self.speed = speed            # float | None
         self.fish_url = fish_url      # str — Fish Speech base URL
+        self.pitch = pitch            # str | None — Silero SSML pitch
 
 
 async def _load_tts_config(tenant_id: uuid.UUID, db: AsyncSession) -> _TTSConfig:
@@ -116,6 +118,7 @@ async def _load_tts_config(tenant_id: uuid.UUID, db: AsyncSession) -> _TTSConfig
                 TenantShellConfig.tts_voice_id,
                 TenantShellConfig.tts_model,
                 TenantShellConfig.tts_speed,
+                TenantShellConfig.tts_pitch,
                 TenantShellConfig.tts_fish_url,
             ).where(TenantShellConfig.tenant_id == tenant_id)
         )
@@ -152,7 +155,9 @@ async def _load_tts_config(tenant_id: uuid.UUID, db: AsyncSession) -> _TTSConfig
         # tts_voice_id = speaker name (e.g. 'xenia', 'mykyta').
         silero_url = ((row.tts_fish_url if row else None) or "").rstrip("/") or settings.SILERO_TTS_URL.rstrip("/")
         voice_id = (row.tts_voice_id if row else None) or None  # None = auto from lang
-        return _TTSConfig("silero", None, voice_id, None, None, silero_url)
+        speed = row.tts_speed if row else None
+        pitch = row.tts_pitch if row else None
+        return _TTSConfig("silero", None, voice_id, None, speed, silero_url, pitch)
 
     # 'system' or fallback
     if settings.ELEVENLABS_API_KEY:
@@ -810,12 +815,16 @@ async def text_to_speech(
         lang = _detect_lang(text)
         silero_lang = "ua" if lang == "uk" else "ru"
         # tts_voice_id holds speaker name if configured; otherwise use system defaults
-        speaker = tts_cfg.voice_id or (
+        # tts_voice_id is shared across providers — an ElevenLabs voice id may
+        # linger here after a provider switch. Only accept silero-looking names.
+        _vid = tts_cfg.voice_id or ""
+        speaker = _vid if re.fullmatch(r"[a-z]+_[a-z0-9_]+", _vid) else (
             settings.SILERO_SPEAKER_UA if silero_lang == "ua" else settings.SILERO_SPEAKER_RU
         )
         # Silero v4 doesn't expand numbers itself — normalize before synthesis
         text_silero = _normalize_numbers_for_silero(text, silero_lang)
-        silero_payload = {"text": text_silero, "lang": silero_lang, "speaker": speaker, "sample_rate": 48000}
+        silero_payload = {"text": text_silero, "lang": silero_lang, "speaker": speaker, "sample_rate": 48000,
+                          "speed": tts_cfg.speed or 1.0, "pitch": getattr(tts_cfg, "pitch", None)}
         logger.debug("TTS: Silero %d→%d chars, lang=%s, speaker=%s, url=%s",
                      len(text), len(text_silero), silero_lang, speaker, silero_base)
 

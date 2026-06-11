@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 
 import httpx
@@ -135,11 +136,15 @@ async def text_to_speech_admin(
         silero_base = tts_cfg.fish_url or settings.SILERO_TTS_URL.rstrip("/")
         lang = _detect_lang(text)
         silero_lang = "ua" if lang == "uk" else "ru"
-        speaker = tts_cfg.voice_id or (
+        # tts_voice_id is shared across providers — an ElevenLabs voice id may
+        # linger here after a provider switch. Only accept silero-looking names.
+        _vid = tts_cfg.voice_id or ""
+        speaker = _vid if re.fullmatch(r"[a-z]+_[a-z0-9_]+", _vid) else (
             settings.SILERO_SPEAKER_UA if silero_lang == "ua" else settings.SILERO_SPEAKER_RU
         )
         text_silero = _normalize_numbers_for_silero(text, silero_lang)
-        silero_payload = {"text": text_silero, "lang": silero_lang, "speaker": speaker, "sample_rate": 48000}
+        silero_payload = {"text": text_silero, "lang": silero_lang, "speaker": speaker, "sample_rate": 48000,
+                          "speed": tts_cfg.speed or 1.0, "pitch": getattr(tts_cfg, "pitch", None)}
         logger.debug("TTS(admin): Silero %d chars, lang=%s, speaker=%s", len(text_silero), silero_lang, speaker)
 
         async def _silero_gen():

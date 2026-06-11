@@ -106,6 +106,7 @@ def _config_to_response(cfg: TenantShellConfig) -> ShellConfigResponse:
         tts_voice_id=getattr(cfg, "tts_voice_id", None),
         tts_model=getattr(cfg, "tts_model", None),
         tts_speed=getattr(cfg, "tts_speed", None),
+        tts_pitch=getattr(cfg, "tts_pitch", None),
         tts_fish_url=getattr(cfg, "tts_fish_url", None),
     )
 

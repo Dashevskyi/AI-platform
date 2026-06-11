@@ -189,6 +189,7 @@ export interface ShellConfig {
   tts_voice_id: string | null;
   tts_model: string | null;
   tts_speed: number | null;
+  tts_pitch: string | null;
   tts_fish_url: string | null;
 }
 
@@ -234,6 +235,7 @@ export interface ShellConfigUpdate {
   tts_voice_id?: string;
   tts_model?: string;
   tts_speed?: number;
+  tts_pitch?: string;
   tts_fish_url?: string;
 }
 

@@ -267,10 +267,12 @@ function TTSSection({
   form,
   config,
   updateField,
+  tenantId,
 }: {
   form: ShellConfigUpdate;
   config: import('../../shared/api/types').ShellConfig | undefined;
   updateField: <K extends keyof ShellConfigUpdate>(key: K, value: ShellConfigUpdate[K]) => void;
+  tenantId: string;
 }) {
   const [ttsApiKey, setTtsApiKey] = useState('');
   const provider = form.tts_provider ?? 'system';
@@ -399,6 +401,33 @@ function TTSSection({
                 value={form.tts_voice_id ?? ''}
                 onChange={(e) => updateField('tts_voice_id', e.currentTarget.value || undefined)}
               />
+              <NumberInput
+                label={
+                  <Hint hint="Скорость речи через SSML prosody. 1.0 = нормальная, 1.15–1.3 — бодрее (рекомендуется для длинных ответов), 0.9 — медленнее. Диапазон 0.5–2.0.">
+                    Скорость речи
+                  </Hint>
+                }
+                placeholder="1.0"
+                min={0.5} max={2.0} step={0.05} decimalScale={2}
+                value={form.tts_speed ?? undefined}
+                onChange={(v) => updateField('tts_speed', typeof v === 'number' ? v : undefined)}
+              />
+              <Select
+                label={
+                  <Hint hint="Тон голоса через SSML prosody pitch. medium — как в модели, high/x-high — выше (звонче), low/x-low — ниже (солиднее).">
+                    Тон голоса
+                  </Hint>
+                }
+                data={[
+                  { value: '', label: 'По умолчанию (medium)' },
+                  { value: 'x-low', label: 'Очень низкий' },
+                  { value: 'low', label: 'Низкий' },
+                  { value: 'high', label: 'Высокий' },
+                  { value: 'x-high', label: 'Очень высокий' },
+                ]}
+                value={form.tts_pitch ?? ''}
+                onChange={(v) => updateField('tts_pitch', v || undefined)}
+              />
             </SimpleGrid>
           </Stack>
         </Fieldset>
@@ -436,7 +465,80 @@ function TTSSection({
           </Stack>
         </Fieldset>
       )}
+
+      <TTSTestPlayer tenantId={tenantId} />
     </Stack>
+  );
+}
+
+// ── TTS test player: synthesize via the tenant's SAVED settings ─────────────
+function TTSTestPlayer({ tenantId }: { tenantId: string }) {
+  const [text, setText] = useState(
+    'Здравствуйте! Ваш баланс сто двадцать гривен. Чем могу помочь сегодня?'
+  );
+  const [loading, setLoading] = useState(false);
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function synth() {
+    if (!text.trim()) return;
+    setLoading(true);
+    setErr(null);
+    try {
+      const token = localStorage.getItem('auth_token') || '';
+      const resp = await fetch(`/api/admin/tenants/${tenantId}/voice/tts`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ text: text.trim() }),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const blob = await resp.blob();
+      if (blob.size < 100) throw new Error('Пустой ответ TTS — проверьте настройки провайдера');
+      if (audioUrl) URL.revokeObjectURL(audioUrl);
+      const url = URL.createObjectURL(blob);
+      setAudioUrl(url);
+      // autoplay
+      new Audio(url).play().catch(() => {/* user can press play manually */});
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <Fieldset legend={<Group gap={6}><Text fw={500}>🔊 Тест голоса</Text><Text size="xs" c="dimmed">— использует сохранённые настройки</Text></Group>} variant="filled">
+      <Stack gap="xs">
+        <Alert color="blue" variant="light" py={4}>
+          <Text size="xs">Синтез идёт по <b>сохранённым</b> настройкам тенанта — измените параметры, нажмите «Сохранить изменения» внизу, затем тестируйте.</Text>
+        </Alert>
+        <Group align="flex-end" gap="xs" wrap="nowrap">
+          <Textarea
+            label="Текст для озвучки (ru или ua — язык определяется автоматически)"
+            autosize minRows={1} maxRows={5}
+            style={{ flex: 1 }}
+            value={text}
+            onChange={(e) => setText(e.currentTarget.value)}
+          />
+          <Button
+            leftSection={<IconVolume size={16} />}
+            loading={loading}
+            disabled={!text.trim()}
+            onClick={synth}
+          >
+            Прослушать
+          </Button>
+        </Group>
+        {err && <Text size="xs" c="red">{err}</Text>}
+        {audioUrl && (
+          // eslint-disable-next-line jsx-a11y/media-has-caption
+          <audio controls src={audioUrl} style={{ width: '100%', height: 36 }} />
+        )}
+      </Stack>
+    </Fieldset>
   );
 }
 
@@ -662,6 +764,7 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
         tts_voice_id: config.tts_voice_id ?? undefined,
         tts_model: config.tts_model ?? undefined,
         tts_speed: config.tts_speed ?? undefined,
+        tts_pitch: config.tts_pitch ?? undefined,
         tts_fish_url: config.tts_fish_url ?? undefined,
       });
       setDirty(false);
@@ -1135,6 +1238,7 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
                 form={form}
                 config={config}
                 updateField={updateField}
+                tenantId={tenantId}
               />
             </Tabs.Panel>
 
