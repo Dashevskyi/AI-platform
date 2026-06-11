@@ -93,6 +93,16 @@ export type Tier0Template = {
    * same settings (the generated regex can't be reliably reverse-parsed).
    */
   keyword_builder_state?: BuilderState;
+  /**
+   * Saved inputs of the example-driven Wizard, so reopening it pre-fills them
+   * instead of starting from scratch (add one more example and regenerate).
+   */
+  wizard_inputs?: {
+    positive_examples?: string[];
+    negative_examples?: string[];
+    sample_output?: string | null;
+    notes?: string | null;
+  };
   /** Each attempt is a flat dict: parameter dotted-path → entity-ref OR literal. */
   param_maps?: Record<string, unknown>[];
   required_fields?: string[];
@@ -2275,6 +2285,18 @@ export function Tier0TemplateEditor({ value, onChange, tenantId, toolName, toolD
   const [wizResult, setWizResult] = useState<WizardResult | null>(null);
   const [wizError, setWizError] = useState<string | null>(null);
 
+  // Pre-fill the wizard with previously saved inputs when it opens, so the admin
+  // tweaks an existing set of examples instead of re-typing them every time.
+  useEffect(() => {
+    if (!wizardOpen) return;
+    const wi = value?.wizard_inputs;
+    if (!wi) return;
+    setWizPos((prev) => prev || (wi.positive_examples || []).join('\n'));
+    setWizNeg((prev) => prev || (wi.negative_examples || []).join('\n'));
+    setWizSample((prev) => prev || (wi.sample_output || ''));
+    setWizNotes((prev) => prev || (wi.notes || ''));
+  }, [wizardOpen]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const splitLines = (s: string) => s.split('\n').map((l) => l.trim()).filter(Boolean);
 
   async function runWizard(refine: boolean) {
@@ -2334,7 +2356,19 @@ export function Tier0TemplateEditor({ value, onChange, tenantId, toolName, toolD
     if (!wizResult) return;
     // Wizard regex isn't from the visual builder — drop saved builder state so
     // the constructor won't reopen with settings that no longer match.
-    onChange({ ...tpl, keyword_builder_state: undefined, ...(wizResult.suggestion as Partial<Tier0Template>) });
+    // Persist the example inputs so a later tweak starts from them, not blank.
+    const wizard_inputs = {
+      positive_examples: splitLines(wizPos),
+      negative_examples: splitLines(wizNeg),
+      sample_output: wizSample.trim() || null,
+      notes: wizNotes.trim() || null,
+    };
+    onChange({
+      ...tpl,
+      keyword_builder_state: undefined,
+      ...(wizResult.suggestion as Partial<Tier0Template>),
+      wizard_inputs,
+    });
     setWizardOpen(false);
     setWizResult(null);
   }
@@ -3160,6 +3194,9 @@ export function Tier0TemplateEditor({ value, onChange, tenantId, toolName, toolD
             Дайте несколько реальных примеров запросов — визард сгенерирует полную конфигурацию
             и сразу прогонит regex/сущность по примерам, показав, что совпало, а что нет.
             Поля универсальные (телефон, email, IP, MAC, номер, дата, произвольный текст) — не привязаны к домену.
+            {value?.wizard_inputs && (
+              <Text span fw={600}> Примеры подставлены из прошлого раза — допишите недостающие и сгенерируйте заново.</Text>
+            )}
           </Text>
         </Alert>
 

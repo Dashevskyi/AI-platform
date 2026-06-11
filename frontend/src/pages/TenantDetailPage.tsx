@@ -1252,6 +1252,9 @@ function readTier0Template(
     keyword_builder_state: isRecord(t0.keyword_builder_state)
       ? (t0.keyword_builder_state as Tier0Template['keyword_builder_state'])
       : undefined,
+    wizard_inputs: isRecord(t0.wizard_inputs)
+      ? (t0.wizard_inputs as Tier0Template['wizard_inputs'])
+      : undefined,
   };
 }
 
@@ -1283,6 +1286,12 @@ function applyTier0TemplateToConfig(
       tpl.value_maps = template.value_maps;
     if (template.keyword_builder_state)
       tpl.keyword_builder_state = template.keyword_builder_state;
+    if (template.wizard_inputs && (
+      (template.wizard_inputs.positive_examples?.length ?? 0) > 0 ||
+      (template.wizard_inputs.negative_examples?.length ?? 0) > 0 ||
+      template.wizard_inputs.sample_output || template.wizard_inputs.notes
+    ))
+      tpl.wizard_inputs = template.wizard_inputs;
     // Drop legacy single-map form when we re-save with the new list form.
     runtime.tier0_template = tpl;
   }
