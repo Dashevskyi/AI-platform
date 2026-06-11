@@ -371,31 +371,31 @@ function TTSSection({
       )}
 
       {provider === 'silero' && (
-        <Fieldset legend="Silero TTS v4" variant="filled">
+        <Fieldset legend="Silero TTS v5 (MIT)" variant="filled">
           <Stack gap="sm">
             <Alert color="green" variant="light" py={6}>
-              Silero v4 — локальный GPU-синтез. Очень быстро: ~0.1–1.5 с на любой текст.
-              Два языка: <strong>ru</strong> (xenia, baya, aidar, kseniya, eugene) и <strong>ua</strong> (mykyta, olena, lada, dobrynyla).
-              Язык определяется автоматически по тексту.
+              Silero v5 cis_base — локальный GPU-синтез, лицензия MIT (коммерческое использование разрешено).
+              Очень быстро (~30–130 мс), 48 кГц. 60 голосов: <strong>ru</strong> (ru_saida, ru_alfia, ru_ekaterina, ru_dmitriy…) и{' '}
+              <strong>ua</strong> (ukr_roman, ukr_igor). Язык определяется автоматически по тексту.
             </Alert>
             <SimpleGrid cols={{ base: 1, md: 2 }} spacing="sm">
               <TextInput
                 label={
-                  <Hint hint="Базовый URL Silero сервера. Пусто — используется системный адрес из .env (SILERO_TTS_URL). Пример: http://172.10.100.9:8004">
+                  <Hint hint="Базовый URL Silero сервера. Пусто — используется системный адрес из .env (SILERO_TTS_URL). Пример: http://172.10.100.9:8006">
                     URL сервера (необязательно)
                   </Hint>
                 }
-                placeholder="http://172.10.100.9:8004"
+                placeholder="http://172.10.100.9:8006"
                 value={form.tts_fish_url ?? ''}
                 onChange={(e) => updateField('tts_fish_url', e.currentTarget.value || undefined)}
               />
               <TextInput
                 label={
-                  <Hint hint="Имя диктора. Для ru: xenia (женский, нейтральный), baya, aidar, kseniya, eugene. Для ua: mykyta (мужской), olena, lada, dobrynyla. Пусто = системный default (xenia/mykyta).">
+                  <Hint hint="Имя диктора. Для ru: ru_saida, ru_alfia, ru_ekaterina, ru_dmitriy и др. Для ua: ukr_roman, ukr_igor. Пусто = системный default (ru_saida/ukr_roman). Полный список: GET /speakers на сервере TTS.">
                     Голос (speaker)
                   </Hint>
                 }
-                placeholder="xenia"
+                placeholder="ru_saida"
                 value={form.tts_voice_id ?? ''}
                 onChange={(e) => updateField('tts_voice_id', e.currentTarget.value || undefined)}
               />

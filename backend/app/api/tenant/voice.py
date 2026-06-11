@@ -815,7 +815,7 @@ async def text_to_speech(
         )
         # Silero v4 doesn't expand numbers itself — normalize before synthesis
         text_silero = _normalize_numbers_for_silero(text, silero_lang)
-        silero_payload = {"text": text_silero, "lang": silero_lang, "speaker": speaker, "sample_rate": 24000}
+        silero_payload = {"text": text_silero, "lang": silero_lang, "speaker": speaker, "sample_rate": 48000}
         logger.debug("TTS: Silero %d→%d chars, lang=%s, speaker=%s, url=%s",
                      len(text), len(text_silero), silero_lang, speaker, silero_base)
 

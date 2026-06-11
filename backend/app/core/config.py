@@ -49,9 +49,10 @@ class Settings(BaseSettings):
     # API: POST /tts {"text","lang":"ru"|"ua","speaker","sample_rate":24000} → WAV
     #      GET  /speakers → {"ru":[...],"ua":[...]}
     # Default speakers chosen for ISP support contexts (neutral, clear voice).
-    SILERO_TTS_URL: str = "http://172.10.100.9:8004"
-    SILERO_SPEAKER_RU: str = "xenia"   # ru speakers: aidar/baya/kseniya/xenia/eugene
-    SILERO_SPEAKER_UA: str = "mykyta"  # ua speakers: mykyta/olena/lada/dobrynyla
+    # v5_cis_base (MIT license — commercial OK) service; 60 speakers, 48kHz.
+    SILERO_TTS_URL: str = "http://172.10.100.9:8006"
+    SILERO_SPEAKER_RU: str = "ru_saida"    # ru: ru_saida/ru_alfia/ru_ekaterina/ru_dmitriy…
+    SILERO_SPEAKER_UA: str = "ukr_roman"   # ua: ukr_roman/ukr_igor
     # ── ElevenLabs TTS (optional, overrides local TTS when set) ──────────────
     # Set ELEVENLABS_API_KEY in .env to enable. Falls back to local XTTS if empty.
     # model: eleven_turbo_v2_5 (fastest, multilingual) or eleven_multilingual_v2

@@ -139,7 +139,7 @@ async def text_to_speech_admin(
             settings.SILERO_SPEAKER_UA if silero_lang == "ua" else settings.SILERO_SPEAKER_RU
         )
         text_silero = _normalize_numbers_for_silero(text, silero_lang)
-        silero_payload = {"text": text_silero, "lang": silero_lang, "speaker": speaker, "sample_rate": 24000}
+        silero_payload = {"text": text_silero, "lang": silero_lang, "speaker": speaker, "sample_rate": 48000}
         logger.debug("TTS(admin): Silero %d chars, lang=%s, speaker=%s", len(text_silero), silero_lang, speaker)
 
         async def _silero_gen():
