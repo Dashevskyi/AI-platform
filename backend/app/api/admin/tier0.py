@@ -543,9 +543,8 @@ def _validate_example(cfg: dict, query: str) -> dict:
         return {"query": query, "matched": False, "extracted": None,
                 "blocked": False, "reason": "пустой запрос"}
 
-    uq_lower = query.lower()
-    block_keywords = cfg.get("block_keywords") or []
-    hit = next((bk for bk in block_keywords if bk and bk.lower() in uq_lower), None)
+    from app.services.llm.tier0_router import _block_hit
+    hit = _block_hit(cfg.get("block_keywords"), query)
     if hit:
         return {"query": query, "matched": False, "extracted": None,
                 "blocked": True, "reason": f"block_keyword «{hit}»"}

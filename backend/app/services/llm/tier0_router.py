@@ -456,6 +456,18 @@ def _compute_entity_boost(
     return (bonus if matched else 0.0), matched
 
 
+def _block_hit(block_keywords, user_query: str) -> str | None:
+    """Word-boundary block-keyword match. Substring matching was a trap:
+    block «на» fired inside «НАйди» and silently killed the right tool."""
+    uq = user_query.lower()
+    for bk in (block_keywords or []):
+        if not bk:
+            continue
+        if re.search(r"(?<![\w\u0400-\u04FF])" + re.escape(bk.lower()) + r"(?![\w\u0400-\u04FF])", uq):
+            return bk
+    return None
+
+
 def _extract_tier0_config(tool) -> dict | None:
     cfg = getattr(tool, "config_json", None) or {}
     runtime = cfg.get("x_backend_config")
@@ -573,8 +585,7 @@ async def try_tier0(
         # Use case: "покажи клиентів з тарифом 50 грн" — "з тарифом" signals
         # a conditional query that LLM must handle, not Tier 0.
         block_keywords = b_t0.get("block_keywords") or []
-        uq_lower = user_query.lower()
-        if any(bk and bk.lower() in uq_lower for bk in block_keywords):
+        if _block_hit(block_keywords, user_query):
             logger.debug(
                 "[tier0] block_keywords hit for %s — skipping Tier 0", b_tool.name
             )
@@ -876,9 +887,7 @@ async def explain_tier0(
         t0 = _t0_of(t)
         if not t0 or t0.get("required_entity") != "keyword_extract":
             continue
-        uq_lower = user_query.lower()
-        blocked = next((bk for bk in (t0.get("block_keywords") or [])
-                        if bk and bk.lower() in uq_lower), None)
+        blocked = _block_hit(t0.get("block_keywords"), user_query)
         matched, extracted, err = _regex_match(
             t0.get("keyword_regex") or "", user_query, t0.get("strip_prefixes"))
         if matched:
@@ -930,9 +939,7 @@ async def explain_tier0(
             continue
         if score < REGEX_SANITY_FLOOR:
             continue
-        uq_lower = user_query.lower()
-        blocked = next((bk for bk in (t0.get("block_keywords") or [])
-                        if bk and bk.lower() in uq_lower), None)
+        blocked = _block_hit(t0.get("block_keywords"), user_query)
         if blocked:
             continue
         matched, extracted, err = _regex_match(
@@ -1130,9 +1137,7 @@ async def explain_tier0(
                 else:
                     matched, extracted, err = _regex_match(
                         ft0.get("keyword_regex") or "", user_query, ft0.get("strip_prefixes"))
-                    uq_lower = user_query.lower()
-                    blocked = next((bk for bk in (ft0.get("block_keywords") or [])
-                                    if bk and bk.lower() in uq_lower), None)
+                    blocked = _block_hit(ft0.get("block_keywords"), user_query)
                     if ft0.get("required_entity") == "keyword_extract" and not matched:
                         recs.append({"severity": "warning",
                                      "text": f"regex «{focus_tool}» не совпал с этим запросом"
