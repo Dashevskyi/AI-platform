@@ -433,6 +433,43 @@ function TTSSection({
       )}
 
 
+      <Fieldset legend={<Group gap={6}><Text fw={500}>🕐 Фразы ожидания (голосовой режим)</Text><Text size="xs" c="dimmed">— «Секунду…», пока LLM думает</Text></Group>} variant="filled">
+        <Stack gap="sm">
+          <Switch
+            label="Озвучивать фразы ожидания"
+            description="Выключи, если филлеры раздражают — бот будет молчать до готовности ответа."
+            checked={form.voice_hold_enabled ?? true}
+            onChange={(e) => updateField('voice_hold_enabled', e.currentTarget.checked)}
+          />
+          {(form.voice_hold_enabled ?? true) && (
+            <>
+              <NumberInput
+                label={
+                  <Hint hint="Сколько ждать до первой фразы. Меньше — бот «отзывчивее», но чаще говорит зря (ответ мог уже почти прийти). Рекомендуется 2500–4000 мс.">
+                    Задержка до первой фразы, мс
+                  </Hint>
+                }
+                min={500} max={10000} step={100}
+                value={form.voice_hold_delay_ms ?? 1600}
+                onChange={(v) => updateField('voice_hold_delay_ms', typeof v === 'number' ? v : 1600)}
+                w={260}
+              />
+              <Textarea
+                label={
+                  <Hint hint="Свои фразы — по одной на строку. Выбираются случайно. Пусто — встроенный набор.">
+                    Фразы (по одной на строку)
+                  </Hint>
+                }
+                placeholder={'Секунду...\nСейчас гляну...\nПроверяю...'}
+                autosize minRows={2} maxRows={6}
+                value={form.voice_hold_phrases ?? ''}
+                onChange={(e) => updateField('voice_hold_phrases', e.currentTarget.value || undefined)}
+              />
+            </>
+          )}
+        </Stack>
+      </Fieldset>
+
       <TTSTestPlayer tenantId={tenantId} />
     </Stack>
   );
@@ -732,6 +769,9 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
         tts_model: config.tts_model ?? undefined,
         tts_speed: config.tts_speed ?? undefined,
         tts_pitch: config.tts_pitch ?? undefined,
+        voice_hold_enabled: config.voice_hold_enabled ?? true,
+        voice_hold_delay_ms: config.voice_hold_delay_ms ?? 1600,
+        voice_hold_phrases: config.voice_hold_phrases ?? undefined,
         tts_fish_url: config.tts_fish_url ?? undefined,
       });
       setDirty(false);

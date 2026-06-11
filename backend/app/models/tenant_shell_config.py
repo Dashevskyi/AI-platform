@@ -125,6 +125,10 @@ class TenantShellConfig(Base):
     tts_model: Mapped[str | None] = mapped_column(String(200), nullable=True)
     tts_speed: Mapped[float | None] = mapped_column(Float, nullable=True)
     tts_pitch: Mapped[str | None] = mapped_column(String(10), nullable=True)  # x-low|low|medium|high|x-high (Silero SSML)
+    # Voice-mode hold phrases («Секунду…») while the LLM thinks.
+    voice_hold_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)   # NULL → True
+    voice_hold_delay_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)   # NULL → 1600
+    voice_hold_phrases: Mapped[str | None] = mapped_column(Text, nullable=True)       # newline-separated; NULL → builtins
     tts_fish_url: Mapped[str | None] = mapped_column(String(500), nullable=True)  # custom Fish Speech base URL
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))

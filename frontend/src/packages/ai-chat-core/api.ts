@@ -35,6 +35,8 @@ export type AiChatApi = {
     text: string,
     opts?: { voice?: string; format?: 'mp3' | 'wav' | 'ogg' | 'flac' | 'aac' },
   ) => Promise<Blob>;
+  /** Voice-mode UI settings (hold phrases etc.). */
+  getVoiceConfig: (tenantId: string) => Promise<{ hold_enabled: boolean; hold_delay_ms: number; hold_phrases: string[] }>;
   uploadDraftAttachment: (tenantId: string, chatId: string, file: File) => Promise<AttachmentBrief>;
   getDraftAttachment: (tenantId: string, chatId: string, attachmentId: string) => Promise<AttachmentBrief>;
   deleteDraftAttachment: (tenantId: string, chatId: string, attachmentId: string) => Promise<void>;
@@ -173,6 +175,12 @@ export function getAiChatApi(options: GetAiChatApiOptions = {}): AiChatApi {
         body: fd,
         authHeaders,
       });
+    },
+    getVoiceConfig: async (tenantId) => {
+      const voicePrefix = variant === 'admin'
+        ? `/api/admin/tenants/${tenantId}/voice`
+        : `/api/tenants/${tenantId}/voice`;
+      return jsonFetch(u(`${voicePrefix}/config`), { method: 'GET', authHeaders });
     },
     synthesizeAudio: async (tenantId, text, opts) => {
       const voicePrefix = variant === 'admin'

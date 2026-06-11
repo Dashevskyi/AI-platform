@@ -190,6 +190,9 @@ export interface ShellConfig {
   tts_model: string | null;
   tts_speed: number | null;
   tts_pitch: string | null;
+  voice_hold_enabled: boolean | null;
+  voice_hold_delay_ms: number | null;
+  voice_hold_phrases: string | null;
   tts_fish_url: string | null;
 }
 
@@ -236,6 +239,9 @@ export interface ShellConfigUpdate {
   tts_model?: string;
   tts_speed?: number;
   tts_pitch?: string;
+  voice_hold_enabled?: boolean;
+  voice_hold_delay_ms?: number;
+  voice_hold_phrases?: string | null;
   tts_fish_url?: string;
 }
 

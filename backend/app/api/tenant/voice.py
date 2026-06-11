@@ -170,6 +170,45 @@ async def _load_tts_config(tenant_id: uuid.UUID, db: AsyncSession) -> _TTSConfig
         return _TTSConfig("silero", None, None, None, None, silero_url)
 
 
+DEFAULT_HOLD_PHRASES = [
+    'Одну секунду...', 'Секунду...', 'Подождите немного...', 'Сейчас посмотрю...',
+    'Минуточку...', 'Обрабатываю запрос...', 'Анализирую...', 'Думаю...',
+]
+
+
+async def _voice_ui_config(tenant_id: uuid.UUID, db: AsyncSession) -> dict:
+    """Voice-mode UI settings (hold phrases etc.) for the chat widgets."""
+    row = None
+    try:
+        row = (await db.execute(
+            select(
+                TenantShellConfig.voice_hold_enabled,
+                TenantShellConfig.voice_hold_delay_ms,
+                TenantShellConfig.voice_hold_phrases,
+            ).where(TenantShellConfig.tenant_id == tenant_id)
+        )).first()
+    except Exception as e:
+        logger.warning("voice config load failed for %s: %s", tenant_id, e)
+    enabled = True if row is None or row.voice_hold_enabled is None else bool(row.voice_hold_enabled)
+    delay = row.voice_hold_delay_ms if row and row.voice_hold_delay_ms else 1600
+    phrases = [p.strip() for p in (row.voice_hold_phrases or "").split("\n") if p.strip()] if row else []
+    return {
+        "hold_enabled": enabled,
+        "hold_delay_ms": int(delay),
+        "hold_phrases": phrases or DEFAULT_HOLD_PHRASES,
+    }
+
+
+@router.get("/config")
+async def voice_config(
+    tenant_id: uuid.UUID,
+    auth: TenantAuthContext = Depends(get_current_tenant_auth_context),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    _verify_tenant(tenant_id, auth.tenant)
+    return await _voice_ui_config(tenant_id, db)
+
+
 class STTResponse(BaseModel):
     text: str
 

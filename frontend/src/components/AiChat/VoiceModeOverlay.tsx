@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Stack, Text, ActionIcon, Group, Tooltip, Loader, ScrollArea } from '@mantine/core';
 import { IconMicrophone, IconMicrophoneOff, IconX, IconVolume, IconPlayerStop } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useVAD, useWhisperLiveSTT, getAiChatApi } from '../../packages/ai-chat-core';
 import type { AuthMode } from '../../packages/ai-chat-core';
 import { MarkdownContent } from '../../shared/ui/MarkdownContent';
@@ -125,6 +125,13 @@ export function VoiceModeOverlay({
   }, [mode, apiBase, apiKey, authBearer]);
 
   const queryClient = useQueryClient();
+
+  // Voice-mode UI settings (hold phrases) — tenant-configurable.
+  const { data: voiceCfg } = useQuery({
+    queryKey: ['ai-chat-core', 'voice-config', tenantId, mode],
+    queryFn: () => api.getVoiceConfig(tenantId),
+    staleTime: 60_000,
+  });
 
   // Build WhisperLive proxy URL with auth token
   const wlProxyUrl = useMemo(() => {
@@ -314,24 +321,25 @@ export function VoiceModeOverlay({
     firstTTSFiredRef.current = false;
     tableSpokenRef.current = false;
     clearHoldTimers();
-    // Randomized hold phrases — vary on every invocation so the user doesn't
-    // always hear the same filler. Arrays are: [1.6 s, 4.5 s, 8.5 s].
-    const HOLD_DELAYS = [1600, 4500, 8500] as const;
-    const HOLD_VARIANTS = [
-      ['Одну секунду...', 'Секунду...', 'Подождите немного...', 'Сейчас посмотрю...', 'Минуточку...'],
-      ['Обрабатываю запрос...', 'Анализирую...', 'Думаю...', 'Ищу информацию...', 'Собираю данные...'],
-      ['Это займёт немного больше времени...', 'Почти готово...', 'Ещё секунду...', 'Запрос сложный, анализирую...'],
-    ] as const;
-    for (let _hi = 0; _hi < HOLD_DELAYS.length; _hi++) {
-      const _vars = HOLD_VARIANTS[_hi];
-      const _phrase = _vars[Math.floor(Math.random() * _vars.length)];
-      holdTimersRef.current.push(
-        setTimeout(() => {
-          if (!firstTTSFiredRef.current && !closedRef.current) {
-            void enqueueSpeech(_phrase);
-          }
-        }, HOLD_DELAYS[_hi]),
-      );
+    // Hold phrases while the LLM thinks — tenant-configurable (enable/delay/
+    // phrase pool). Three escalating timers keep the old pacing relative to
+    // the configured first delay.
+    if (voiceCfg?.hold_enabled !== false) {
+      const pool = voiceCfg?.hold_phrases?.length
+        ? voiceCfg.hold_phrases
+        : ['Одну секунду...', 'Секунду...', 'Подождите немного...', 'Сейчас посмотрю...', 'Минуточку...'];
+      const first = voiceCfg?.hold_delay_ms ?? 1600;
+      const delays = [first, first + 2900, first + 6900];
+      for (const d of delays) {
+        const phrase = pool[Math.floor(Math.random() * pool.length)];
+        holdTimersRef.current.push(
+          setTimeout(() => {
+            if (!firstTTSFiredRef.current && !closedRef.current) {
+              void enqueueSpeech(phrase);
+            }
+          }, d),
+        );
+      }
     }
 
     let buffer = '';

@@ -76,6 +76,16 @@ async def speech_to_text_admin(
         raise HTTPException(status_code=502, detail=f"STT failed: {str(e)[:200]}")
 
 
+@router.get("/config")
+async def voice_config_admin(
+    tenant_id: uuid.UUID,
+    current_user: AdminUser = Depends(require_tenant_access),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    from app.api.tenant.voice import _voice_ui_config
+    return await _voice_ui_config(tenant_id, db)
+
+
 class TTSRequest(BaseModel):
     text: str
     voice: str | None = None
