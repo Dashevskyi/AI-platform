@@ -136,7 +136,11 @@ function parseBlocks(content: string): Block[] {
         /^#{1,6}\s+/.test(currentTrimmed) ||
         /^>\s?/.test(currentTrimmed) ||
         /^\s*[-*+]\s+/.test(current) ||
-        /^\s*\d+\.\s+/.test(current)
+        /^\s*\d+\.\s+/.test(current) ||
+        // LLMs often start a table right after a text line without a blank
+        // line — break the paragraph so the table parser can pick it up.
+        (currentTrimmed.startsWith('|') &&
+          isMarkdownTableSeparator((lines[index + 1] || '').trim()))
       ) {
         break;
       }

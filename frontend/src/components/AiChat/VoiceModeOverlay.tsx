@@ -181,6 +181,10 @@ export function VoiceModeOverlay({
   // Flips to true on the first real enqueueSpeech call; prevents hold phrases
   // from being enqueued after the LLM has already started responding.
   const firstTTSFiredRef = useRef(false);
+  // Streaming sends table rows as separate "sentences"; announce the table
+  // once per LLM turn instead of once per row (prepareForTTS's local tracker
+  // can't see across calls).
+  const tableSpokenRef = useRef(false);
 
   const stopAudio = () => {
     audioQueueRef.current = [];
@@ -241,7 +245,18 @@ export function VoiceModeOverlay({
   };
 
   const enqueueSpeech = async (rawSentence: string) => {
-    const sentence = prepareForTTS(rawSentence);
+    // Drop table rows before TTS; announce the table once per turn.
+    const lines = rawSentence.split('\n');
+    const isRow = (l: string) => { const t = l.trim(); return t.startsWith('|') && t.endsWith('|'); };
+    const hadTable = lines.some(isRow);
+    let cleanedRaw = lines.filter((l) => !isRow(l)).join('\n');
+    if (hadTable && !tableSpokenRef.current) {
+      tableSpokenRef.current = true;
+      cleanedRaw = cleanedRaw.trim()
+        ? `${cleanedRaw.trim()}\nДанные представлены в таблице.`
+        : 'Данные представлены в таблице.';
+    }
+    const sentence = prepareForTTS(cleanedRaw);
     if (!sentence || closedRef.current) return;
     // First real TTS chunk: cancel any pending hold-phrase timers so they
     // don't speak on top of the actual response.
@@ -297,6 +312,7 @@ export function VoiceModeOverlay({
     // Progressive hold phrases: fire if LLM is slow to produce the first TTS chunk.
     // Cancelled immediately when the first enqueueSpeech call happens.
     firstTTSFiredRef.current = false;
+    tableSpokenRef.current = false;
     clearHoldTimers();
     // Randomized hold phrases — vary on every invocation so the user doesn't
     // always hear the same filler. Arrays are: [1.6 s, 4.5 s, 8.5 s].
