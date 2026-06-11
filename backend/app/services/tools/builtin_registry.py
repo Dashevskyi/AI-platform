@@ -248,6 +248,36 @@ BUILTIN_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "plan_update",
+            "description": (
+                "Отметить выполненные/проваленные шаги текущего плана "
+                "(последний plan-артефакт этого чата). Вызывай ОДИН раз, "
+                "перед финальным ответом: plan_update(done=[1,2], failed=[3]). "
+                "Чек-лист обновится — и пользователь, и ты на следующих ходах "
+                "увидите реальный прогресс вместо пустых чекбоксов."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "done": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "Номера выполненных шагов (как в чек-листе).",
+                    },
+                    "failed": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "Номера шагов, которые выполнить не удалось.",
+                    },
+                },
+                "additionalProperties": False,
+            },
+        },
+        "x_backend_config": {"handler": "plan_update"},
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "describe_tool",
             "description": (
                 "Получить ПОЛНОЕ описание + parameters schema указанного tool — "

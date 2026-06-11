@@ -2923,9 +2923,73 @@ async def plan_handler(arguments: dict, tool_config: dict | None = None) -> Tool
         f"План записан ({len(clean_steps)} шагов, artifact_id={aid}).\n\n"
         + content
         + "\n\nТеперь последовательно выполняй шаги через нужные tools. "
-        "В финальном ответе кратко сверь результаты с пунктами плана."
+        "Перед финальным ответом отметь сделанное одним вызовом "
+        "plan_update(done=[...]). В финальном ответе кратко сверь "
+        "результаты с пунктами плана."
     )
     return ToolResult(success=True, output=output)
+
+
+@register_tool("plan_update")
+async def plan_update_handler(arguments: dict, tool_config: dict | None = None) -> ToolResult:
+    """Mark steps of the chat's latest `plan` artifact as done/failed. Rewrites
+    the checklist in place (version bump) so later turns reground a plan with
+    real progress — otherwise the checkboxes stay empty forever and the model
+    can't tell what's already been executed."""
+    import re as _re
+    import uuid as _uuid
+    from datetime import datetime, timezone
+    from sqlalchemy import select
+    from app.core.database import async_session
+    from app.models.artifact import Artifact
+
+    ctx = (tool_config or {}).get("_context") or {}
+    tenant_id_s = ctx.get("tenant_id")
+    chat_id_s = ctx.get("chat_id")
+    if not tenant_id_s or not chat_id_s:
+        return ToolResult(success=False, output="", error="plan_update: tenant/chat context missing")
+
+    try:
+        done = {int(x) for x in (arguments.get("done") or [])}
+        failed = {int(x) for x in (arguments.get("failed") or [])}
+    except (TypeError, ValueError):
+        return ToolResult(success=False, output="", error="plan_update: 'done'/'failed' — списки номеров шагов (integer)")
+    if not done and not failed:
+        return ToolResult(success=False, output="", error="plan_update: укажи хотя бы один шаг в 'done' или 'failed'")
+
+    try:
+        async with async_session() as db:
+            art = (await db.execute(
+                select(Artifact).where(
+                    Artifact.tenant_id == _uuid.UUID(tenant_id_s),
+                    Artifact.chat_id == _uuid.UUID(chat_id_s),
+                    Artifact.kind == "plan",
+                    Artifact.deleted_at.is_(None),
+                ).order_by(Artifact.created_at.desc()).limit(1)
+            )).scalar_one_or_none()
+            if not art:
+                return ToolResult(success=False, output="", error="plan_update: в этом чате нет плана (сначала вызови plan)")
+
+            def _mark(line: str) -> str:
+                m = _re.match(r"^- \[(?: |x|✗)\] (\d+)\.", line)
+                if not m:
+                    return line
+                num = int(m.group(1))
+                if num in done:
+                    return "- [x]" + line[5:]
+                if num in failed:
+                    return "- [✗]" + line[5:]
+                return line
+
+            new_content = "\n".join(_mark(l) for l in (art.content or "").split("\n"))
+            art.content = new_content
+            art.version = (art.version or 1) + 1
+            art.last_referenced_at = datetime.now(timezone.utc)
+            await db.commit()
+    except Exception as e:
+        return ToolResult(success=False, output="", error=f"plan_update: {e}")
+
+    return ToolResult(success=True, output="Прогресс отмечен.\n\n" + new_content)
 
 
 @register_tool("describe_tool")
