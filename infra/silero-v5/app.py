@@ -65,6 +65,10 @@ def _uk_to_plus(text: str) -> str:
 # (declension endings survive because we replace the stem only).
 _RU_PRON_FIXES = {
     "синтез": "синтэз",
+    "претензи": "претэнзи",
+    "тезис": "тэзис",
+    "менеджер": "мэнэджер",
+    "бизнес": "бизнэс",
     "сервер": "сэрвер",
     "модем": "модэм",
     "тест": "тэст",

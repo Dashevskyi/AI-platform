@@ -240,6 +240,7 @@ _DOMAIN_DOT_RE = _re_num.compile(r'(?<=[a-zA-Z\d])\.(?=[a-zA-Z])')
 # \b works with Cyrillic in Python 3 Unicode mode (Cyrillic is \w).
 _ADDR_ABBR_RU: list[tuple] = [
     (_re_num.compile(r'\bул\.\s*',         _re_num.IGNORECASE), 'улица '),
+    (_re_num.compile(r'\bтел\.\s*',        _re_num.IGNORECASE), 'телефон '),
     (_re_num.compile(r'\bпросп\.\s*',      _re_num.IGNORECASE), 'проспект '),
     (_re_num.compile(r'\bпр\.\s*',         _re_num.IGNORECASE), 'проспект '),
     (_re_num.compile(r'\bпер\.\s*',        _re_num.IGNORECASE), 'переулок '),
@@ -259,6 +260,7 @@ _ADDR_ABBR_RU: list[tuple] = [
 ]
 _ADDR_ABBR_UA: list[tuple] = [
     (_re_num.compile(r'\bвул\.\s*',              _re_num.IGNORECASE), 'вулиця '),
+    (_re_num.compile(r'\bтел\.\s*',        _re_num.IGNORECASE), 'телефон '),
     (_re_num.compile(r'\bпросп\.\s*',            _re_num.IGNORECASE), 'проспект '),
     (_re_num.compile(r'\bпр\.\s*',               _re_num.IGNORECASE), 'проспект '),
     (_re_num.compile(r'\bпров\.\s*',             _re_num.IGNORECASE), 'провулок '),
@@ -320,7 +322,9 @@ _EN_UNITS_UA: list[tuple] = [
 
 # Slash between two numeric values (ping/traceroute output):
 # "21.508/21.609/21.710/0.101" → "21.508, 21.609, 21.710, 0.101"
-_SLASH_NUM_RE = _re_num.compile(r'(?<=[\d.])\/(?=[\d.])')
+# Only slashes between DECIMALS (ping output 21.5/21.6/21.7). Integer/integer
+# like house numbers 26/1 must survive for the fraction rule (дробь).
+_SLASH_NUM_RE = _re_num.compile(r'(?<=\d)\/(?=\d+\.\d)|(?<=\.\d)\/(?=\d)|(?<=\.\d\d)\/(?=\d)|(?<=\.\d\d\d)\/(?=\d)')
 
 # ALL-CAPS Latin abbreviation (2-8 letters): DNS, VLAN, SFP, BGP, ONU, OLT → spelt
 _ALLCAPS_WORD_RE = _re_num.compile(r'\b([A-Z]{2,8})\b')
@@ -487,6 +491,27 @@ def _normalize_numbers_for_silero(text: str, lang: str = 'ru') -> str:
             return m.group(0)
         return f"{_ord_gen(d)} {_months[mo]} {_ord_gen(y)} {_w_year}"
     text = _re_num.sub(r'\b(\d{1,2})\.(\d{1,2})\.(\d{4})\b', date_repl, text)
+
+    # 2.8 Phone numbers (+380501234567 / 0501234567) → dictation groups
+    # ("ноль пять ноль, сто двадцать три, сорок пять, шестьдесят семь") —
+    # otherwise the integer rule reads them as millions.
+    def _phone_repl(m):
+        digits = m.group(0)
+        plus = digits.startswith('+')
+        d = digits.lstrip('+')
+        if d.startswith('38') and len(d) == 12:
+            d = d[2:]
+        if len(d) != 10:
+            return m.group(0)
+        groups = [d[0:3], d[3:6], d[6:8], d[8:10]]
+        parts = []
+        for g in groups:
+            if g[0] == '0':
+                parts.append(' '.join(_num_words(int(ch), lang) for ch in g))
+            else:
+                parts.append(_num_words(int(g), lang))
+        return ('плюс три вісім, ' if plus and lang == 'ua' else 'плюс три восемь, ' if plus else '') + ', '.join(parts)
+    text = _re_num.sub(r'(?<![\d.])\+?(?:38)?0\d{9}(?![\d.])', _phone_repl, text)
 
     # 3. House/address fractions  26/1 → двадцать шесть дробь один
     def frac_repl(m):
@@ -951,30 +976,58 @@ async def stt_stream_proxy(
     import websockets as _ws
 
     # -- Auth ----------------------------------------------------------------
-    raw_key = api_key or (authorization.removeprefix("Bearer ").strip() if authorization else None)
-    if not raw_key:
+    # Two callers: the end-user widget passes ?api_key=<tenant key>; the admin
+    # chat passes ?authorization=Bearer <admin JWT> (browser WS can't send
+    # headers). The JWT must NOT be treated as an api key (it used to be —
+    # hash lookup always failed and admin voice mode silently fell back to
+    # batch STT).
+    bearer = authorization.removeprefix("Bearer ").strip() if authorization else None
+    if not api_key and not bearer:
         await websocket.close(code=4401, reason="API key required")
         return
 
     db_gen = get_db()
     db = await db_gen.__anext__()
     try:
-        key_hash = hash_api_key(raw_key)
-        ak = (
-            await db.execute(
-                select(TenantApiKey).where(
-                    TenantApiKey.key_hash == key_hash,
-                    TenantApiKey.tenant_id == tenant_id,
-                    TenantApiKey.is_active.is_(True),
+        authed = False
+        if api_key:
+            key_hash = hash_api_key(api_key)
+            ak = (
+                await db.execute(
+                    select(TenantApiKey).where(
+                        TenantApiKey.key_hash == key_hash,
+                        TenantApiKey.tenant_id == tenant_id,
+                        TenantApiKey.is_active.is_(True),
+                    )
                 )
-            )
-        ).scalars().first()
-        if not ak:
-            await websocket.close(code=4403, reason="Invalid API key")
+            ).scalars().first()
+            authed = ak is not None
+        elif bearer:
+            # Validate like get_current_admin: signature, active user,
+            # token_version, tenant scope for tenant_admin.
+            from app.core.security import decode_access_token
+            from app.models.admin_user import AdminUser
+            try:
+                payload = decode_access_token(bearer)
+                uid = uuid.UUID(str(payload.get("sub")))
+                user = (
+                    await db.execute(select(AdminUser).where(AdminUser.id == uid))
+                ).scalars().first()
+                authed = bool(
+                    user
+                    and user.is_active
+                    and int(payload.get("ver", 0)) == int(user.token_version or 0)
+                    and (user.role == "superadmin" or str(user.tenant_id) == str(tenant_id))
+                )
+            except Exception:
+                authed = False
+        if not authed:
+            await websocket.close(code=4403, reason="Invalid credentials")
             return
 
         # Load STT vocabulary while we still have the db session open
-        initial_prompt, hotwords = await _load_stt_vocab(tenant_id, db)
+        _stt_cfg = await _load_stt_config(tenant_id, db)
+        initial_prompt, hotwords = _stt_cfg.initial_prompt, _stt_cfg.hotwords
     finally:
         await db_gen.aclose()
 
