@@ -294,7 +294,7 @@ function TTSSection({
             }
             data={[
               { value: 'system', label: '🖥 Системный (по умолчанию платформы)' },
-              { value: 'silero', label: '⚡ Silero v4 (локальный, быстрый)' },
+              { value: 'silero', label: '⚡ Silero v5 (локальный, MIT, быстрый)' },
               { value: 'elevenlabs', label: '☁️ ElevenLabs (свой ключ)' },
               { value: 'fish_speech', label: '🐟 Fish Speech (локальный)' },
             ]}
@@ -306,7 +306,7 @@ function TTSSection({
 
           {provider === 'system' && (
             <Alert color="gray" variant="light" py={6}>
-              Используются системные настройки платформы. Если в <code>.env</code> установлен <code>ELEVENLABS_API_KEY</code> — работает ElevenLabs, иначе — Silero v4 (локальный, быстрый).
+              Используются системные настройки платформы. Если в <code>.env</code> установлен <code>ELEVENLABS_API_KEY</code> — работает ElevenLabs, иначе — Silero v5 (локальный, MIT, быстрый).
             </Alert>
           )}
         </Stack>
