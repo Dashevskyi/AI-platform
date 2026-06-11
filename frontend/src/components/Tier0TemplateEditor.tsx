@@ -595,9 +595,10 @@ type KeywordRegexBuilderProps = {
   onApply: (regex: string, builderState: BuilderState) => void;
   currentRegex?: string | null;
   initialState?: BuilderState;
+  onOpenWizard?: () => void;
 };
 
-function KeywordRegexBuilder({ opened, onClose, onApply, currentRegex, initialState }: KeywordRegexBuilderProps) {
+function KeywordRegexBuilder({ opened, onClose, onApply, currentRegex, initialState, onOpenWizard }: KeywordRegexBuilderProps) {
   const [state, setState] = useState<BuilderState>(DEFAULT_BUILDER_STATE);
   const [newWord, setNewWord] = useState('');
   const [testInput, setTestInput] = useState('');
@@ -765,12 +766,19 @@ function KeywordRegexBuilder({ opened, onClose, onApply, currentRegex, initialSt
 
         {unrepresentable && (
           <Alert color="yellow" variant="light" p="xs" icon={<IconAlertTriangle size={15} />}>
-            <Text size="xs">
+            <Text size="xs" mb={onOpenWizard ? 6 : 0}>
               Текущий <Code>keyword_regex</Code> создан не Конструктором (Визардом или вручную) и не выражается
-              его блоками — поэтому настройки здесь не отображаются. Конструктор начинается с нуля; нажав
-              «Применить», ты <b>заменишь</b> текущий regex. Чтобы только подправить существующий — закрой это
-              окно и редактируй regex как текст.
+              его блоками — настройки здесь не отображаются, а «Применить» <b>заменит</b> текущий regex.
+              Чтобы доработать его <b>без написания regex</b> — используй Визард: добавь примеры запросов
+              (что ловить / что не ловить) и он сам обновит правило.
             </Text>
+            {onOpenWizard && (
+              <Button size="compact-xs" variant="light" color="grape"
+                      leftSection={<IconSparkles size={13} />}
+                      onClick={() => { onClose(); onOpenWizard(); }}>
+                Доработать через Визард
+              </Button>
+            )}
           </Alert>
         )}
 
@@ -2611,6 +2619,7 @@ export function Tier0TemplateEditor({ value, onChange, tenantId, toolName, toolD
                 onApply={(regex, builderState) => emit({ keyword_regex: regex || null, keyword_builder_state: builderState })}
                 currentRegex={tpl.keyword_regex}
                 initialState={tpl.keyword_builder_state}
+                onOpenWizard={tenantId ? () => setWizardOpen(true) : undefined}
               />
 
               <Group align="flex-end" gap="sm" wrap="wrap">
