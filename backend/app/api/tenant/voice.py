@@ -982,6 +982,12 @@ async def stt_stream_proxy(
     # hash lookup always failed and admin voice mode silently fell back to
     # batch STT).
     bearer = authorization.removeprefix("Bearer ").strip() if authorization else None
+    if not bearer:
+        # Cookie-auth admin sessions: the WS handshake carries the HttpOnly
+        # access_token cookie (same-origin), and localStorage no longer holds
+        # a bearer after the cookie-auth migration.
+        from app.api.deps import ACCESS_TOKEN_COOKIE
+        bearer = websocket.cookies.get(ACCESS_TOKEN_COOKIE) or None
     if not api_key and not bearer:
         await websocket.close(code=4401, reason="API key required")
         return
