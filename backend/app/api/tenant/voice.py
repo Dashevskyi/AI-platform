@@ -460,6 +460,34 @@ def _normalize_numbers_for_silero(text: str, lang: str = 'ru') -> str:
     # 2.5 Domain / hostname dots: google.com → google точка com
     text = _DOMAIN_DOT_RE.sub(f' {point} ', text)
 
+    # 2.7 Full dates DD.MM.YYYY → "одиннадцатого июня две тысячи двадцать
+    # шестого года". MUST run before the decimal rule, which otherwise eats
+    # "06.2026" as a decimal number and mangles the date.
+    _months_ru = [None, 'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
+                  'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря']
+    _months_ua = [None, 'січня', 'лютого', 'березня', 'квітня', 'травня', 'червня',
+                  'липня', 'серпня', 'вересня', 'жовтня', 'листопада', 'грудня']
+    _months = _months_ua if lang == 'ua' else _months_ru
+    _w_year = 'року' if lang == 'ua' else 'года'
+
+    def _ord_gen(n: int) -> str:
+        """Ordinal in genitive: 11 → одиннадцатого / одинадцятого."""
+        try:
+            w = _n2w(n, lang='uk' if lang == 'ua' else 'ru', to='ordinal')
+        except Exception:
+            return _num_words(n, lang)
+        for suf, rep in (('ый', 'ого'), ('ой', 'ого'), ('ій', 'ього'), ('ий', 'ого')):
+            if w.endswith(suf):
+                return w[: -len(suf)] + rep
+        return w
+
+    def date_repl(m):
+        d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if not (1 <= d <= 31 and 1 <= mo <= 12 and 1900 <= y <= 2199):
+            return m.group(0)
+        return f"{_ord_gen(d)} {_months[mo]} {_ord_gen(y)} {_w_year}"
+    text = _re_num.sub(r'\b(\d{1,2})\.(\d{1,2})\.(\d{4})\b', date_repl, text)
+
     # 3. House/address fractions  26/1 → двадцать шесть дробь один
     def frac_repl(m):
         return f'{_num_words(int(m.group(1)), lang)} {frac} {_num_words(int(m.group(2)), lang)}'
