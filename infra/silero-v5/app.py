@@ -59,6 +59,67 @@ def _uk_to_plus(text: str) -> str:
     return "".join(out)
 
 
+# ── Custom rules (admin-editable, persisted to /data/rules.json) ────────────
+# Three rule types, applied around the accentuator:
+#   abbr   — token → expansion, before everything ("тех." → "технический")
+#   pron   — stem respell, before accentuation ("претензи" → "претэнзи")
+#   stress — word → +marked form, AFTER accentuation (overrides ruaccent)
+import json as _json
+import os
+RULES_PATH = "/data/rules.json"
+CUSTOM: dict = {"abbr": {}, "pron": {}, "stress": {}}
+
+
+def _load_rules():
+    global CUSTOM
+    try:
+        if os.path.exists(RULES_PATH):
+            with open(RULES_PATH) as f:
+                data = _json.load(f)
+            CUSTOM = {k: dict(data.get(k) or {}) for k in ("abbr", "pron", "stress")}
+            log.info("custom rules loaded: %s", {k: len(v) for k, v in CUSTOM.items()})
+    except Exception:
+        log.exception("failed to load %s", RULES_PATH)
+
+
+def _save_rules():
+    os.makedirs(os.path.dirname(RULES_PATH), exist_ok=True)
+    with open(RULES_PATH, "w") as f:
+        _json.dump(CUSTOM, f, ensure_ascii=False, indent=1)
+
+
+_load_rules()
+
+
+def _case_repl(src: str, dst: str) -> str:
+    return dst.capitalize() if src[:1].isupper() else dst
+
+
+def _apply_abbr(text: str) -> str:
+    for abbr, full in CUSTOM["abbr"].items():
+        text = re.sub(r"(?<![\wа-яёіїєґА-ЯЁІЇЄҐ])" + re.escape(abbr) + r"(?![\wа-яёіїєґА-ЯЁІЇЄҐ])",
+                      lambda m: _case_repl(m.group(0), full), text, flags=re.IGNORECASE)
+    return text
+
+
+def _apply_custom_pron(text: str) -> str:
+    for stem, repl in CUSTOM["pron"].items():
+        text = re.sub(r"\b" + re.escape(stem),
+                      lambda m: _case_repl(m.group(0), repl), text, flags=re.IGNORECASE)
+    return text
+
+
+def _apply_stress_overrides(text: str) -> str:
+    """Replace a word (with or without accentuator's + marks) by the admin's
+    +marked form. «коротко» / «кор+отко» / «коротк+о» → configured mark."""
+    for word, marked in CUSTOM["stress"].items():
+        bare = word.replace("+", "")
+        pat = r"\b" + r"\+?".join(re.escape(ch) for ch in bare) + r"\b"
+        text = re.sub(pat, lambda m: _case_repl(m.group(0).replace("+", ""), marked),
+                      text, flags=re.IGNORECASE)
+    return text
+
+
 # ── Pronunciation fixes (ru loanwords with hard э) ──────────────────────────
 # The model reads spelling literally: "синтез" comes out as "синтЕз" while
 # everyone says "синтЭз". Respell known loanword stems before accentuation
@@ -95,14 +156,18 @@ def _ru_pron_fix(text: str) -> str:
 def accentuate(text: str, lang: str) -> str:
     if "+" in text:
         return text  # caller already marked stress — trust them
+    text = _apply_abbr(text)
     try:
         if lang == "ru":
-            text = _ru_pron_fix(text)
+            text = _ru_pron_fix(_apply_custom_pron(text))
             if RU_ACC is not None:
-                return RU_ACC.process_all(text)
-            return text
-        if lang in ("ua", "uk") and UK_ACC is not None:
-            return _uk_to_plus(UK_ACC(text))
+                text = RU_ACC.process_all(text)
+            return _apply_stress_overrides(text)
+        if lang in ("ua", "uk"):
+            text = _apply_custom_pron(text)
+            if UK_ACC is not None:
+                text = _uk_to_plus(UK_ACC(text))
+            return _apply_stress_overrides(text)
     except Exception as e:
         log.warning("accentuation failed (%s): %s — using raw text", lang, e)
     return text
@@ -191,6 +256,29 @@ class TTSReq(BaseModel):
 def health():
     return {"status": "ok", "device": str(DEVICE), "speakers": len(SPEAKERS),
             "accent_ru": RU_ACC is not None, "accent_uk": UK_ACC is not None}
+
+
+class RulesPayload(BaseModel):
+    abbr: dict[str, str] = {}
+    pron: dict[str, str] = {}
+    stress: dict[str, str] = {}
+
+
+@app.get("/rules")
+def get_rules():
+    return {"custom": CUSTOM, "builtin_pron": _RU_PRON_FIXES}
+
+
+@app.put("/rules")
+def put_rules(r: RulesPayload):
+    global CUSTOM
+    for d in (r.abbr, r.pron, r.stress):
+        for k, v in d.items():
+            if not k.strip() or len(k) > 100 or len(v) > 200:
+                raise HTTPException(400, f"bad rule: {k!r}")
+    CUSTOM = {"abbr": dict(r.abbr), "pron": dict(r.pron), "stress": dict(r.stress)}
+    _save_rules()
+    return {"saved": {k: len(v) for k, v in CUSTOM.items()}}
 
 
 @app.get("/speakers")

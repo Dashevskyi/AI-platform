@@ -29,6 +29,9 @@ const InfrastructurePage = lazy(() =>
 const CalculatorPage = lazy(() =>
   import('./pages/CalculatorPage').then((module) => ({ default: module.CalculatorPage }))
 );
+const TtsLocalPage = lazy(() =>
+  import('./pages/TtsLocalPage').then((module) => ({ default: module.TtsLocalPage }))
+);
 
 function RouteFallback() {
   return (
@@ -76,6 +79,7 @@ export default function App() {
           <Route path="/models" element={<SuperadminOnly><ModelsPage /></SuperadminOnly>} />
           <Route path="/infrastructure" element={<SuperadminOnly><InfrastructurePage /></SuperadminOnly>} />
           <Route path="/calculator" element={<SuperadminOnly><CalculatorPage /></SuperadminOnly>} />
+          <Route path="/tts-local" element={<SuperadminOnly><TtsLocalPage /></SuperadminOnly>} />
           <Route path="/tenants" element={<SuperadminOnly><TenantListPage /></SuperadminOnly>} />
           <Route path="/tenants/:id" element={<TenantDetailPage />} />
           <Route path="/tenants/:id/chat" element={<ChatPage />} />
