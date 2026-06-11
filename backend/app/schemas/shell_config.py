@@ -11,6 +11,7 @@ class ShellConfigUpdate(BaseModel):
     rules_text: str | None = None
     temperature: float | None = None
     max_context_messages: int | None = None
+    history_budget_tokens: int | None = None
     max_tokens: int | None = None
     summary_model_name: str | None = None
     context_mode: str | None = None
@@ -63,6 +64,7 @@ class ShellConfigResponse(BaseModel):
     rules_text: str | None
     temperature: float
     max_context_messages: int
+    history_budget_tokens: int = 3000
     max_tokens: int
     summary_model_name: str | None
     context_mode: str

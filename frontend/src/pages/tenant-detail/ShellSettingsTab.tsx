@@ -740,6 +740,7 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
         rules_text: config.rules_text ?? undefined,
         temperature: config.temperature,
         max_context_messages: config.max_context_messages,
+        history_budget_tokens: config.history_budget_tokens ?? 3000,
         max_tokens: config.max_tokens,
         context_mode: config.context_mode,
         memory_enabled: config.memory_enabled,
@@ -962,12 +963,25 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
                         />
                       </div>
                       <NumberInput
-                        label={<Hint hint="Сколько последних сообщений чата отправлять в LLM.">Макс. сообщений контекста</Hint>}
+                        label={<Hint hint="Сколько последних пар (вопрос+ответ) чата рассматривать для истории в промте.">Макс. пар истории</Hint>}
                         value={form.max_context_messages ?? 20}
                         onChange={(val) => updateField('max_context_messages', Number(val))}
                         min={1}
                         max={200}
                         w={200}
+                      />
+                      <NumberInput
+                        label={
+                          <Hint hint="Токен-бюджет блока истории. Последние 2 пары идут дословно, более старые — однострочными резюме, пока влезают в бюджет; что не влезло — покрывается общей сводкой чата.">
+                            Бюджет истории (токенов)
+                          </Hint>
+                        }
+                        value={form.history_budget_tokens ?? 3000}
+                        onChange={(val) => updateField('history_budget_tokens', Number(val))}
+                        min={500}
+                        max={32000}
+                        step={250}
+                        w={210}
                       />
                       <NumberInput
                         label={<Hint hint="Максимальная длина ответа LLM в токенах.">Макс. токенов ответа</Hint>}

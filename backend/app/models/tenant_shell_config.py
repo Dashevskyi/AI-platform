@@ -24,6 +24,11 @@ class TenantShellConfig(Base):
     rules_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     temperature: Mapped[float] = mapped_column(Float, default=0.7)
     max_context_messages: Mapped[int] = mapped_column(Integer, default=20)
+    # Token budget for the prompt history block. Layered by recency:
+    # last pairs verbatim (native roles) → older pairs as one-line resumes,
+    # newest-first while the budget lasts → beyond that, the rolling chat
+    # summary. ~3 chars/token estimate for Cyrillic.
+    history_budget_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=3000)
     max_tokens: Mapped[int] = mapped_column(Integer, default=4096)
     summary_model_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     context_mode: Mapped[str] = mapped_column(String(50), default="summary_plus_recent")

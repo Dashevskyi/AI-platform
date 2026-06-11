@@ -1427,12 +1427,30 @@ async def _chat_completion_inner(self) -> dict:
         debug_trace["grounding"] = {"error": "grounding_failed"}
 
     # === [BLOCK-HISTORY-RESUMES] — agentic memory ===
-    # Inject the last N pair-resumes (user-question summary + assistant-response summary)
-    # as a compact markdown block, BEFORE building the system message. Full original
-    # content is reachable via recall_chat and get_message tools.
-    # N = config.max_context_messages (treated as pair-count).
+    # Three-layer history, budget-driven (config.history_budget_tokens):
+    #   1. Last RAW_LAST_PAIRS pairs — VERBATIM, appended as native chat roles
+    #      (see `history_role_msgs` consumed below). Chat templates are trained
+    #      on dialogue turns, weak models track the thread much better this
+    #      way — and follow-ups («а какой у него IP?») need the exact text.
+    #   2. Older pairs — one-line resumes (concrete values stripped by design),
+    #      NEWEST first, while the token budget lasts.
+    #   3. Beyond the budget — the rolling chat summary, when present.
+    # Full original content stays reachable via recall_chat / get_message.
+    # N pairs considered = config.max_context_messages (treated as pair-count).
+    chat = (await db.execute(select(Chat).where(Chat.id == chat_id))).scalar_one_or_none()
+    history_role_msgs: list[dict] = []
     try:
         n_pairs = max(0, int(getattr(config, "max_context_messages", 0) or 0))
+        budget_tokens = max(500, int(getattr(config, "history_budget_tokens", 3000) or 3000))
+        budget_left = budget_tokens
+        dropped_pairs = 0
+        resume_pair_count = 0
+        raw_pair_count = 0
+
+        def _est_tokens(s: str) -> int:
+            # ~3 chars/token for Cyrillic on Qwen-family tokenizers.
+            return len(s) // 3 + 1
+
         if n_pairs > 0:
             # Pull the last N user messages REGARDLESS of whether their resume
             # has been generated yet. The resume_query filter we used to have
@@ -1459,8 +1477,13 @@ async def _chat_completion_inner(self) -> dict:
                 user_rows = [u for u in user_rows if str(u.id) != cur_id_s]
             user_rows = user_rows[-n_pairs:]
 
-            # Char caps for the FULL-content fallback. Tight enough to keep
-            # token bloat bounded even when many pairs are un-resumed.
+            # Char caps. The verbatim layer is generous — it carries the data
+            # the user is most likely to follow up on. The FULL-content
+            # fallback for un-resumed pairs in the resume layer stays tight
+            # (token bloat bound).
+            RAW_LAST_PAIRS = 2
+            RAW_USER_CAP = 1500
+            RAW_ASSISTANT_CAP = 2000
             FULL_USER_CAP = 400
             FULL_ASSISTANT_CAP = 700
 
@@ -1473,17 +1496,8 @@ async def _chat_completion_inner(self) -> dict:
                     return t[:cap].rstrip() + " …"
                 return t
 
-            # The LAST K pairs are always rendered in full (raw) form regardless
-            # of whether a resume exists. This is critical for short follow-ups
-            # like "да", "ок", "продолжай" — the resume strips the question the
-            # assistant just asked, so without full content the model has no
-            # idea what's being confirmed.
-            ALWAYS_RAW_LAST_K = 1
-            raw_threshold_idx = max(0, len(user_rows) - ALWAYS_RAW_LAST_K)
-
-            resume_lines: list[str] = []
-            has_full_content = False
-            for i, u in enumerate(user_rows):
+            pairs: list[tuple] = []
+            for u in user_rows:
                 asst = (await db.execute(
                     select(Message).where(
                         Message.chat_id == chat_id,
@@ -1491,6 +1505,31 @@ async def _chat_completion_inner(self) -> dict:
                         Message.created_at >= u.created_at,
                     ).order_by(Message.created_at.asc()).limit(1)
                 )).scalar_one_or_none()
+                pairs.append((u, asst))
+
+            # Layer 1 — verbatim native-role turns. Critical for short
+            # follow-ups like «да», «ок», «а во второй строке?» — the resume
+            # strips exactly what's being referenced.
+            raw_pairs = pairs[-RAW_LAST_PAIRS:] if RAW_LAST_PAIRS > 0 else []
+            older_pairs = pairs[: len(pairs) - len(raw_pairs)]
+            for u, asst in raw_pairs:
+                q_full = _trim(u.content, RAW_USER_CAP)
+                a_full = _trim(asst.content if asst else None, RAW_ASSISTANT_CAP)
+                if not q_full:
+                    continue
+                history_role_msgs.append({"role": "user", "content": q_full})
+                if a_full:
+                    history_role_msgs.append({"role": "assistant", "content": a_full})
+                budget_left -= _est_tokens(q_full) + _est_tokens(a_full)
+                raw_pair_count += 1
+
+            # Layer 2 — resume lines, NEWEST first; stop once an entry no
+            # longer fits (contiguous window — holes in the middle of history
+            # confuse the model more than a clean cut).
+            resume_lines_rev: list[str] = []
+            has_full_content = False
+            older_rev = list(reversed(older_pairs))
+            for idx, (u, asst) in enumerate(older_rev):
                 # Anchor the id on the assistant message when present — that's the
                 # row that owns artifacts, and the row the model fetches via get_message.
                 anchor_id = str(asst.id) if asst else str(u.id)
@@ -1498,27 +1537,22 @@ async def _chat_completion_inner(self) -> dict:
                 a_resume = (asst.resume_response if asst else None) or ""
                 a_resume = a_resume.strip()
 
-                force_raw = (i >= raw_threshold_idx)
-
                 # Anchor id is the assistant message id — explicit msg: prefix
                 # so the model never confuses it with an artifact_id (which
                 # appears later as `(artifact_id=...)`). Maps cleanly to
                 # get_message(id) in the footer.
                 anchor_token = f"msg:{anchor_id}"
-                if u_resume and a_resume and not force_raw:
+                if u_resume and a_resume:
                     # Sanitized form — older turn with both resumes generated.
-                    resume_lines.append(f"- [{anchor_token}] Q: {u_resume} → A: {a_resume}")
+                    entry = f"- [{anchor_token}] Q: {u_resume} → A: {a_resume}"
                 else:
-                    # Raw form: full trimmed content. Used for the last K pairs
-                    # always, and for any pair whose resume isn't ready yet.
-                    # Marks the entry as "raw" so the model knows concrete
-                    # values are quotable here.
+                    # Raw form — resume isn't ready yet. Marked so the model
+                    # knows concrete values are quotable here.
                     has_full_content = True
                     q_full = _trim(u.content, FULL_USER_CAP)
                     a_full = _trim(asst.content if asst else None, FULL_ASSISTANT_CAP)
-                    tag = "последний обмен, полный текст" if force_raw else "raw, без резюме"
-                    resume_lines.append(
-                        f"- [{anchor_token}] ({tag})\n"
+                    entry = (
+                        f"- [{anchor_token}] (raw, без резюме)\n"
                         f"  Q: {q_full or '(пусто)'}\n"
                         f"  A: {a_full or '(нет ответа)'}"
                     )
@@ -1532,10 +1566,18 @@ async def _chat_completion_inner(self) -> dict:
                     aid = (a.get("id") or "").strip()
                     if not label:
                         continue
-                    if aid:
-                        resume_lines.append(f"  📎 [{kind}] {label} (artifact_id={aid})")
-                    else:
-                        resume_lines.append(f"  📎 [{kind}] {label}")
+                    entry += (
+                        f"\n  📎 [{kind}] {label} (artifact_id={aid})"
+                        if aid else f"\n  📎 [{kind}] {label}"
+                    )
+                cost = _est_tokens(entry)
+                if cost > budget_left:
+                    dropped_pairs = len(older_rev) - idx
+                    break
+                budget_left -= cost
+                resume_lines_rev.append(entry)
+            resume_pair_count = len(resume_lines_rev)
+            resume_lines = list(reversed(resume_lines_rev))
             if resume_lines:
                 # ID mapping (важно — у модели часто путаются эти два tool'а):
                 #   [msg:<uuid>]            → get_message(id="<uuid>")
@@ -1550,9 +1592,8 @@ async def _chat_completion_inner(self) -> dict:
                     "Не путай: msg-id ≠ artifact-id. Если зовёшь не тот tool — получишь not-found."
                 )
                 footer = (
-                    "\n\nПомечены `(raw, без резюме)` или `(последний обмен, полный текст)` — "
-                    "свежие обмены, резюме ещё не сгенерилось; их полный текст — надёжный "
-                    "источник конкретики (это сказано только что в этом чате).\n"
+                    "\n\nПомечены `(raw, без резюме)` — свежие обмены, резюме ещё "
+                    "не сгенерилось; их полный текст — надёжный источник конкретики.\n"
                     "Остальные строки — резюме без конкретных значений (IP, числа, имена) "
                     "специально, чтобы исключить искажения. За конкретикой по ним:"
                     + id_mapping
@@ -1564,10 +1605,29 @@ async def _chat_completion_inner(self) -> dict:
                 )
                 _sys(
                     "HISTORY-RESUMES recent exchanges",
-                    "## Recent conversation (последние обмены)\n"
+                    "## Более ранние обмены этого чата (сжато; самые свежие идут "
+                    "ниже обычными репликами диалога)\n"
                     + "\n".join(resume_lines)
                     + footer,
                 )
+
+            # Layer 3 — rolling chat summary covers what didn't fit (budget
+            # cut or beyond the n_pairs window). Generated in background /
+            # via admin endpoint; absent for most fresh chats — that's fine.
+            summary_text = ((chat.history_summary if chat else None) or "").strip()
+            if summary_text and (dropped_pairs > 0 or total_messages_count > 2 * (n_pairs + 1)):
+                _sys(
+                    "BLOCK-HISTORY-SUMMARY older context",
+                    "## Сводка более раннего диалога (старше обменов выше)\n" + summary_text,
+                )
+
+        debug_trace["history"] = {
+            "budget_tokens": budget_tokens,
+            "budget_left_tokens": max(0, budget_left),
+            "raw_pairs": raw_pair_count,
+            "resume_pairs": resume_pair_count,
+            "dropped_pairs": dropped_pairs,
+        }
     except Exception:
         logger.exception("[pipeline] failed to assemble HISTORY-RESUMES block")
 
@@ -1582,9 +1642,12 @@ async def _chat_completion_inner(self) -> dict:
     if system_parts:
         messages.append({"role": "system", "content": "\n\n".join(system_parts)})
 
-    # Build history: saved summary (from DB) + recent messages in full.
-    # Summary is generated/updated in background — zero LLM calls here.
-    chat = (await db.execute(select(Chat).where(Chat.id == chat_id))).scalar_one_or_none()
+    # Layer-1 verbatim history (built in BLOCK-HISTORY-RESUMES above) goes
+    # right after the system message in native dialogue roles.
+    if history_role_msgs:
+        messages.extend(history_role_msgs)
+
+    # `chat` is loaded above (BLOCK-HISTORY-RESUMES).
     context_mode = _normalize_context_mode(config.context_mode)
     history_dicts = _build_history_dicts(recent_msgs)
 

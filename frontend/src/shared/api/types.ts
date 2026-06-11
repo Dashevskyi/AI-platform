@@ -157,6 +157,7 @@ export interface ShellConfig {
   rules_text: string | null;
   temperature: number;
   max_context_messages: number;
+  history_budget_tokens: number;
   max_tokens: number;
   summary_model_name: string | null;
   context_mode: string;
@@ -206,6 +207,7 @@ export interface ShellConfigUpdate {
   rules_text?: string;
   temperature?: number;
   max_context_messages?: number;
+  history_budget_tokens?: number;
   max_tokens?: number;
   summary_model_name?: string;
   context_mode?: string;
