@@ -388,6 +388,13 @@ export function VoiceModeOverlay({
             // was computed against the streamed chunks. TTS uses `buffer` in the
             // `final` event below to emit the unsent tail.
             setAssistantText(payload.content as string);
+            // Tier 0 / non-streamed answers arrive ONLY in `done` (no
+            // content_chunk events) — without this the buffer stays empty,
+            // nothing is spoken, and the hold-phrase timers keep firing
+            // («Секунду…» instead of the actual answer).
+            if (!buffer.trim() && (payload.content as string).trim()) {
+              buffer = payload.content as string;
+            }
           } else if (eventType === 'final') {
             const remaining = buffer.slice(splitOffset).trim();
             if (remaining) void enqueueSpeech(remaining);
