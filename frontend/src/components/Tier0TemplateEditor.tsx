@@ -601,17 +601,35 @@ function KeywordRegexBuilder({ opened, onClose, onApply, currentRegex, initialSt
   const [state, setState] = useState<BuilderState>(DEFAULT_BUILDER_STATE);
   const [newWord, setNewWord] = useState('');
   const [testInput, setTestInput] = useState('');
+  // True when there's a regex we couldn't load into the builder (foreign shape).
+  const [unrepresentable, setUnrepresentable] = useState(false);
 
-  // When modal opens — restore the saved builder state if we have one (the
-  // generated regex can't be reliably reverse-parsed); otherwise best-effort
-  // parse it back from the current regex.
+  // When modal opens, restore the builder's view of the current regex:
+  //   1. saved builder state → use verbatim (exact authoring intent);
+  //   2. else best-effort parse, but ONLY adopt it if it round-trips back to the
+  //      SAME regex (so we never silently rewrite a regex the builder can't
+  //      faithfully represent — e.g. wizard/hand-written ones);
+  //   3. else start blank and flag the regex as foreign.
   useEffect(() => {
-    if (opened) {
-      if (initialState) {
-        setState(initialState);
-      } else {
-        setState(parseBuilderStateFromRegex(currentRegex ?? ''));
-      }
+    if (!opened) return;
+    const rx = (currentRegex ?? '').trim();
+    if (initialState) {
+      setState(initialState);
+      setUnrepresentable(false);
+      return;
+    }
+    if (!rx) {
+      setState(DEFAULT_BUILDER_STATE);
+      setUnrepresentable(false);
+      return;
+    }
+    const parsed = parseBuilderStateFromRegex(rx);
+    if (buildRegexFromBuilder(parsed) === rx) {
+      setState(parsed);          // builder can reproduce it exactly → safe to load
+      setUnrepresentable(false);
+    } else {
+      setState(DEFAULT_BUILDER_STATE);
+      setUnrepresentable(true);  // foreign regex → keep it, warn, don't rewrite
     }
   }, [opened]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -745,12 +763,13 @@ function KeywordRegexBuilder({ opened, onClose, onApply, currentRegex, initialSt
     >
       <Stack gap="md">
 
-        {!initialState && !!(currentRegex && currentRegex.trim()) && (
+        {unrepresentable && (
           <Alert color="yellow" variant="light" p="xs" icon={<IconAlertTriangle size={15} />}>
             <Text size="xs">
-              Текущий <Code>keyword_regex</Code> создан не Конструктором (Визардом или вручную) — его настройки
-              здесь не отображаются. Конструктор начинается с нуля; нажав «Применить», ты <b>заменишь</b> текущий regex.
-              Чтобы только подправить существующий — закрой это окно и редактируй regex как текст.
+              Текущий <Code>keyword_regex</Code> создан не Конструктором (Визардом или вручную) и не выражается
+              его блоками — поэтому настройки здесь не отображаются. Конструктор начинается с нуля; нажав
+              «Применить», ты <b>заменишь</b> текущий regex. Чтобы только подправить существующий — закрой это
+              окно и редактируй regex как текст.
             </Text>
           </Alert>
         )}
