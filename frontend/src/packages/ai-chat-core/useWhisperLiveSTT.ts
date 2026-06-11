@@ -103,14 +103,23 @@ export function useWhisperLiveSTT(options: UseWhisperLiveOptions): UseWhisperLiv
 
   useEffect(() => () => { cleanup(); }, [cleanup]);
 
-  /** Downsample a Float32Array from srcRate to 16000. */
+  /** Downsample a Float32Array from srcRate to 16000.
+   *
+   * Averages each source window (box low-pass) instead of picking the nearest
+   * sample — naive decimation aliases high frequencies into the speech band
+   * and audibly degrades recognition on 48k/44.1k contexts (Firefox always,
+   * Chrome with some devices/bluetooth headsets). */
   function downsample(buf: Float32Array, srcRate: number): Float32Array {
     if (srcRate === TARGET_SAMPLE_RATE) return buf;
     const ratio = srcRate / TARGET_SAMPLE_RATE;
-    const outLen = Math.round(buf.length / ratio);
+    const outLen = Math.floor(buf.length / ratio);
     const out = new Float32Array(outLen);
     for (let i = 0; i < outLen; i++) {
-      out[i] = buf[Math.min(buf.length - 1, Math.round(i * ratio))];
+      const start = Math.floor(i * ratio);
+      const end = Math.min(buf.length, Math.max(start + 1, Math.floor((i + 1) * ratio)));
+      let sum = 0;
+      for (let j = start; j < end; j++) sum += buf[j];
+      out[i] = sum / (end - start);
     }
     return out;
   }
@@ -225,6 +234,9 @@ export function useWhisperLiveSTT(options: UseWhisperLiveOptions): UseWhisperLiv
     let ctx: AudioContext;
     try {
       ctx = new AudioContext({ sampleRate: TARGET_SAMPLE_RATE });
+      if (ctx.sampleRate !== TARGET_SAMPLE_RATE) {
+        console.info('[WL-STT] AudioContext runs at %d Hz — downsampling to 16k', ctx.sampleRate);
+      }
     } catch {
       ctx = new AudioContext();
     }

@@ -145,6 +145,22 @@ export function VoiceModeOverlay({
 
   // Partial/final transcript ref for when VAD fires
   const wlFinalTextRef = useRef('');
+  // WhisperLive streams the CUMULATIVE session transcript; track what we've
+  // already submitted so each turn sends only the new delta (otherwise turn 2
+  // becomes «old text + new text», as observed in production).
+  const wlConsumedRef = useRef('');
+  const wlLastFullRef = useRef('');
+
+  const wlDelta = (full: string): string => {
+    const consumed = wlConsumedRef.current;
+    if (!consumed) return full.trim();
+    if (full.startsWith(consumed)) return full.slice(consumed.length).trim();
+    // WL may have dropped old segments from its window — try tail overlap.
+    const tail = consumed.slice(-48);
+    const idx = tail ? full.indexOf(tail) : -1;
+    if (idx >= 0) return full.slice(idx + tail.length).trim();
+    return full.trim();
+  };
 
   /**
    * Voice mode bypasses useAiChatSend and calls sendMessageStream directly,
@@ -310,6 +326,8 @@ export function VoiceModeOverlay({
     abortLLM();
     stopAudio();
     wlFinalTextRef.current = '';
+    // Everything heard so far is now consumed — next turn starts from delta 0.
+    wlConsumedRef.current = wlLastFullRef.current;
     wlSTT.resetText();
 
     setTranscript(userText);
@@ -402,12 +420,14 @@ export function VoiceModeOverlay({
     proxyUrl: wlProxyUrl,
     language: 'ru',
     onPartial: (text) => {
-      setTranscript(text);
+      wlLastFullRef.current = text;
+      setTranscript(wlDelta(text));
       // New speech coming in — cancel premature submit
       if (wlDebounceRef.current) { clearTimeout(wlDebounceRef.current); wlDebounceRef.current = null; }
     },
     onFinal: (text) => {
-      wlFinalTextRef.current = text;
+      wlLastFullRef.current = text;
+      wlFinalTextRef.current = wlDelta(text);
       // Guard: don't trigger a new turn while LLM/TTS is still running
       if (llmStreamingRef.current || queueRunningRef.current) return;
       if (wlDebounceRef.current) clearTimeout(wlDebounceRef.current);
