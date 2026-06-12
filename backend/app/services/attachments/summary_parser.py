@@ -78,7 +78,7 @@ async def generate_attachment_summary(
         max_tokens=350,
         # Disable thinking: attachment summary is a short JSON — reasoning
         # burns the token budget and leaves resp.content empty on Qwen3.
-        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        extra_body={"chat_template_kwargs": {"enable_thinking": False, "thinking": False}},
     )
     raw = (resp.content or "").strip()
     parsed = _parse_summary_json(raw)

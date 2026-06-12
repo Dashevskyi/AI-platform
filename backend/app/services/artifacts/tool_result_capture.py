@@ -148,7 +148,7 @@ async def _llm_label_for_tool_result(
             max_tokens=80,
             # Disable thinking: tool-result labeling is one short line — reasoning
             # burns the token budget and leaves resp.content empty on Qwen3.
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            extra_body={"chat_template_kwargs": {"enable_thinking": False, "thinking": False}},
         )
         label = (resp.content or "").strip().splitlines()[0].strip()
         # Strip common pre/suffixes the model might add despite instruction.

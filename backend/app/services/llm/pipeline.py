@@ -584,18 +584,21 @@ def _resolve_thinking_kwargs(
 
     `voice_mode` → always forces off, regardless of `mode`. The reasoning
       warmup adds ~5 s to TTFT which is unacceptable for real-time TTS."""
+    # Both kwarg spellings: Qwen3/R1 honor `enable_thinking`, DeepSeek V3.1+/V4
+    # honor `thinking`. Templates silently ignore the name they don't know.
+    _off = {"chat_template_kwargs": {"enable_thinking": False, "thinking": False}}
     # Voice pipeline: any thinking latency is user-perceptible — force off.
     if voice_mode:
-        return {"chat_template_kwargs": {"enable_thinking": False}}
+        return _off
     m = (mode or "on").lower()
     if m == "off":
-        return {"chat_template_kwargs": {"enable_thinking": False}}
+        return _off
     if m == "auto":
         is_short = len((user_content or "").strip()) < 100
         # Tool-routing rounds: kill reasoning to avoid Qwen3-thinking loops
         # trying to imagine schema in prose. Short queries: don't need it.
         if has_tools or is_short:
-            return {"chat_template_kwargs": {"enable_thinking": False}}
+            return _off
     # "on", or "auto" on a final no-tools long-form round → use model default.
     return None
 
@@ -2228,7 +2231,7 @@ async def _chat_completion_inner(self) -> dict:
                     max_tokens=config.max_tokens,
                     tools=_final_tools,  # None unless the plan_update exception applies
                     on_chunk=chunk_cb,
-                    extra_body={"chat_template_kwargs": {"enable_thinking": False}},  # final summary fast
+                    extra_body={"chat_template_kwargs": {"enable_thinking": False, "thinking": False}},  # final summary fast
                 )
                 if resp.prompt_tokens:
                     total_prompt_tokens += resp.prompt_tokens
@@ -2256,7 +2259,7 @@ async def _chat_completion_inner(self) -> dict:
                         max_tokens=config.max_tokens,
                         tools=None,
                         on_chunk=chunk_cb,
-                        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+                        extra_body={"chat_template_kwargs": {"enable_thinking": False, "thinking": False}},
                     )
                     if resp.prompt_tokens:
                         total_prompt_tokens += resp.prompt_tokens

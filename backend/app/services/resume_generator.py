@@ -146,7 +146,7 @@ async def generate_resume_for_pair(
                 max_tokens=300,
                 # Disable thinking: resume is a short JSON — reasoning burns
                 # the token budget and leaves resp.content empty on Qwen3.
-                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+                extra_body={"chat_template_kwargs": {"enable_thinking": False, "thinking": False}},
             )
 
         query_resume, response_resume = _parse_resume_json(resp.content or "")

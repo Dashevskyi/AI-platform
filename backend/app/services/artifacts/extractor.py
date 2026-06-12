@@ -232,7 +232,7 @@ async def _label_blocks_via_llm(
             max_tokens=400,
             # Disable thinking: artifact labeling is a short JSON — reasoning
             # burns the token budget and leaves resp.content empty on Qwen3.
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            extra_body={"chat_template_kwargs": {"enable_thinking": False, "thinking": False}},
         )
         return _parse_labels_json(resp.content or "", expected=len(blocks))
     except Exception as e:

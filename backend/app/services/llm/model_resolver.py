@@ -133,7 +133,7 @@ async def _classify_complexity(
             model=model_name,
             temperature=0.0,
             max_tokens=10,
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            extra_body={"chat_template_kwargs": {"enable_thinking": False, "thinking": False}},
         )
         score = _parse_score((resp.content or "").strip())
         if score is None:
