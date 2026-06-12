@@ -224,7 +224,11 @@ class OllamaProvider(BaseProvider):
         async with httpx.AsyncClient(timeout=300.0) as client:
             response = await client.post(
                 f"{self.base_url}/api/embed",
-                json={"model": model.strip(), "input": inputs},
+                # keep_alive=-1: pin the embedding model in RAM. Without it
+                # Ollama unloads after ~5 min idle and the next embed pays a
+                # ~3 s cold reload (vs ~250 ms warm). Embeddings run on every
+                # KB/memory recall, so the cold hit is very visible.
+                json={"model": model.strip(), "input": inputs, "keep_alive": -1},
             )
             if response.is_error:
                 _raise_ollama_http_error(response)
