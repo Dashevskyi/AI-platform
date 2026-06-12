@@ -727,6 +727,41 @@ export const tier0Api = {
   },
 };
 
+// ─── Retrieval diagnostic bench (KB / memory / chat-history / artifacts) ───────
+export interface RetrievalSourceResult {
+  source: string;
+  tool: string;
+  scope: string;
+  success: boolean;
+  output: string;
+  error: string | null;
+  latency_ms: number;
+}
+export interface RetrievalTestResponse {
+  query: string;
+  embedding_model: string | null;
+  recall_cross_chat_enabled: boolean;
+  results: RetrievalSourceResult[];
+}
+
+export const retrievalApi = {
+  test: async (
+    tenantId: string,
+    query: string,
+    sources?: string[],
+    chatId?: string | null,
+    limit = 5,
+  ): Promise<RetrievalTestResponse> => {
+    const res = await apiClient.post(`/api/admin/tenants/${tenantId}/retrieval/test`, {
+      query,
+      sources: sources ?? null,
+      chat_id: chatId ?? null,
+      limit,
+    });
+    return res.data;
+  },
+};
+
 // Audit
 export const auditApi = {
   list: async (page = 1, pageSize = 20): Promise<PaginatedResponse<AuditLog>> => {

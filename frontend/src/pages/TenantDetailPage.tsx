@@ -87,6 +87,7 @@ import { MemoryTab } from './tenant-detail/MemoryTab';
 import { ModelConfigTab } from './tenant-detail/ModelConfigTab';
 import { ShellSettingsTab } from './tenant-detail/ShellSettingsTab';
 import { Tier0Tab } from './tenant-detail/Tier0Tab';
+import { RetrievalTab } from './tenant-detail/RetrievalTab';
 import { StatsTab } from './TenantStatsTab';
 import { ApiInfoTab } from './TenantApiInfoTab';
 import { UsersTab } from './tenant-detail/UsersTab';
@@ -207,6 +208,7 @@ export function TenantDetailPage() {
           {has('chats') && <Tabs.Tab value="chats">Чаты</Tabs.Tab>}
           {has('logs') && <Tabs.Tab value="logs">Логи</Tabs.Tab>}
           {has('logs') && <Tabs.Tab value="tier0">⚡ Tier 0</Tabs.Tab>}
+          {has('logs') && <Tabs.Tab value="retrieval">🔍 Поиск</Tabs.Tab>}
           {isSuperadmin && <Tabs.Tab value="stats">Статистика</Tabs.Tab>}
           {has('users') && <Tabs.Tab value="users">Пользователи</Tabs.Tab>}
           {isSuperadmin && <Tabs.Tab value="api-info">API</Tabs.Tab>}
@@ -268,6 +270,11 @@ export function TenantDetailPage() {
         {has('logs') && (
           <Tabs.Panel value="tier0" pt="md">
             <Tier0Tab tenantId={tenantId} />
+          </Tabs.Panel>
+        )}
+        {has('logs') && (
+          <Tabs.Panel value="retrieval" pt="md">
+            <RetrievalTab tenantId={tenantId} />
           </Tabs.Panel>
         )}
         {isSuperadmin && (
