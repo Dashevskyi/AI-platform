@@ -1789,15 +1789,26 @@ async def _chat_completion_inner(self) -> dict:
         logger.exception("[pipeline] failed to build tools_payload debug snapshot")
 
     # Snapshot the FULL catalog of every tool the tenant could call this
-    # request — used by builtin `describe_tool(name)` regardless of whether
-    # lazy-catalog actually demoted anything. Captured BEFORE the lazy
-    # split below (which rebinds all_tool_defs to just the full subset).
-    if tools_enabled and all_tool_defs:
-        _full_catalog_by_name = {
-            (td.get("function") or {}).get("name"): td
-            for td in all_tool_defs
-            if (td.get("function") or {}).get("name")
-        }
+    # request — used by builtin `describe_tool(name)`. Built from the genuine
+    # full allow-set (`all_allowed_tools_for_tenant`: every active tenant tool
+    # + builtins), NOT from `all_tool_defs` — the latter is only the
+    # semantically-selected payload subset, so a tool excluded by the semantic
+    # floor would be callable-by-name yet invisible to describe_tool. That's
+    # exactly the case describe_tool exists to serve: fetch the schema of a
+    # tool the model knows by name (from ontology/history/KB) but that wasn't
+    # ranked into the payload. Union with all_tool_defs to also cover
+    # attachment search tools, which live only there.
+    if tools_enabled and (all_allowed_tools_for_tenant or all_tool_defs):
+        _full_catalog_by_name: dict[str, dict] = {}
+        for _cfg in all_allowed_tools_for_tenant.values():
+            td = _public_tool_def(_cfg)
+            nm = (td.get("function") or {}).get("name")
+            if nm:
+                _full_catalog_by_name[nm] = td
+        for td in all_tool_defs:
+            nm = (td.get("function") or {}).get("name")
+            if nm and nm not in _full_catalog_by_name:
+                _full_catalog_by_name[nm] = td
         for _name, _cfg in tool_config_map.items():
             ctx = _cfg.get("_context")
             if isinstance(ctx, dict):
