@@ -2333,12 +2333,23 @@ async def recall_chat_handler(arguments: dict, tool_config: dict | None = None) 
             if scope == "chat":
                 params["cid"] = _uuid.UUID(chat_id_s) if chat_id_s else None
                 scope_clause = "AND m_user.chat_id = :cid"
+            # Hybrid recall: rank by the BEST (smallest cosine distance) of
+            #  - resume_embedding  (sanitized summary → topical match)
+            #  - content_embedding (raw Q+A → factual match: IPs, names, numbers)
+            # so factual queries that the summary strips still hit. We still
+            # RETURN the sanitized resume text — concrete values come via
+            # get_message, never from the (possibly distorted) summary.
+            # COALESCE missing vectors to distance 2 (max cosine distance) so a
+            # row missing one embedding ranks purely on the other.
             sql = sa_text(f"""
                 SELECT
                     m_user.id::text AS user_id,
                     m_user.resume_query,
                     m_user.created_at,
-                    1 - (m_user.resume_embedding <=> CAST(:qvec AS vector)) AS similarity,
+                    1 - LEAST(
+                        COALESCE(m_user.resume_embedding  <=> CAST(:qvec AS vector), 2),
+                        COALESCE(m_user.content_embedding <=> CAST(:qvec AS vector), 2)
+                    ) AS similarity,
                     m_asst.id::text AS asst_id,
                     m_asst.resume_response
                 FROM messages m_user
@@ -2351,9 +2362,12 @@ async def recall_chat_handler(arguments: dict, tool_config: dict | None = None) 
                 ) m_asst ON true
                 WHERE m_user.tenant_id = :tid
                   AND m_user.role = 'user'
-                  AND m_user.resume_embedding IS NOT NULL
+                  AND (m_user.resume_embedding IS NOT NULL OR m_user.content_embedding IS NOT NULL)
                   {scope_clause}
-                ORDER BY m_user.resume_embedding <=> CAST(:qvec AS vector)
+                ORDER BY LEAST(
+                    COALESCE(m_user.resume_embedding  <=> CAST(:qvec AS vector), 2),
+                    COALESCE(m_user.content_embedding <=> CAST(:qvec AS vector), 2)
+                )
                 LIMIT :limit
             """)
             rows = (await db.execute(sql, params)).fetchall()

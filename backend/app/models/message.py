@@ -34,6 +34,10 @@ class Message(Base):
     resume_response: Mapped[str | None] = mapped_column(Text, nullable=True)
     resume_embedding = mapped_column(Vector(1024), nullable=True)
     resume_embedding_model: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # Embedding of the RAW trimmed Q+A text (concrete values intact). Lets
+    # recall_chat match factual queries the sanitized resume_embedding misses;
+    # the tool still returns the resume text. Set on the USER (anchor) message.
+    content_embedding = mapped_column(Vector(1024), nullable=True)
     # Structured list of artifacts present in this message: code blocks, scripts,
     # configs, SQL queries, instructions. Each item: {"kind": "...", "label": "...", "lang": "..."}.
     # Content stays in `content`; this column is metadata for retrieval/markers.

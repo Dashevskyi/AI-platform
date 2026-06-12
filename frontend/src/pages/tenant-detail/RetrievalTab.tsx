@@ -1,11 +1,11 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   Stack, Card, Text, Group, TextInput, Button, Checkbox, NumberInput,
-  Badge, Code, Alert, Loader, Box,
+  Badge, Code, Alert, Loader, Box, Select,
 } from '@mantine/core';
 import { IconSearch, IconDatabase, IconBrain, IconMessage, IconPaperclip } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
-import { retrievalApi, type RetrievalTestResponse, type RetrievalSourceResult } from '../../shared/api/endpoints';
+import { retrievalApi, chatsApi, type RetrievalTestResponse, type RetrievalSourceResult } from '../../shared/api/endpoints';
 
 const SOURCES = [
   { key: 'kb', label: 'База знаний', icon: IconDatabase, tool: 'search_kb' },
@@ -57,11 +57,28 @@ function SourceCard({ r }: { r: RetrievalSourceResult }) {
 
 export function RetrievalTab({ tenantId }: { tenantId: string }) {
   const [query, setQuery] = useState('');
-  const [chatId, setChatId] = useState('');
+  const [chatId, setChatId] = useState<string | null>(null);
   const [limit, setLimit] = useState(5);
   const [selected, setSelected] = useState<string[]>(SOURCES.map((s) => s.key));
   const [loading, setLoading] = useState(false);
   const [resp, setResp] = useState<RetrievalTestResponse | null>(null);
+  const [chatOptions, setChatOptions] = useState<{ value: string; label: string }[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    chatsApi.list(tenantId, 1, 100)
+      .then((page) => {
+        if (cancelled) return;
+        setChatOptions(
+          (page.items || []).map((c) => ({
+            value: c.id,
+            label: `${c.title || '(без названия)'} · ${new Date(c.created_at).toLocaleDateString()}`,
+          })),
+        );
+      })
+      .catch(() => { /* selector stays empty — query still works tenant-wide */ });
+    return () => { cancelled = true; };
+  }, [tenantId]);
 
   const toggle = (key: string) =>
     setSelected((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
@@ -70,7 +87,7 @@ export function RetrievalTab({ tenantId }: { tenantId: string }) {
     if (!query.trim() || selected.length === 0) return;
     setLoading(true);
     try {
-      setResp(await retrievalApi.test(tenantId, query.trim(), selected, chatId.trim() || null, limit));
+      setResp(await retrievalApi.test(tenantId, query.trim(), selected, chatId || null, limit));
     } catch (e: unknown) {
       const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
       notifications.show({
@@ -104,13 +121,17 @@ export function RetrievalTab({ tenantId }: { tenantId: string }) {
         />
 
         <Group align="flex-end" gap="md" wrap="wrap" mb="sm">
-          <TextInput
-            label={<Text size="sm">Chat ID (опц.)</Text>}
-            description="scope=chat для памяти/истории/артефактов; пусто → tenant"
-            placeholder="UUID чата"
+          <Select
+            label={<Text size="sm">Чат (опц.)</Text>}
+            description="scope=chat для памяти/истории/артефактов; пусто → весь тенант"
+            placeholder="Весь тенант"
+            data={chatOptions}
             value={chatId}
-            onChange={(e) => setChatId(e.currentTarget.value)}
-            w={320}
+            onChange={setChatId}
+            clearable
+            searchable
+            w={360}
+            nothingFoundMessage="Чаты не найдены"
           />
           <NumberInput label="Лимит" value={limit} onChange={(v) => setLimit(Number(v) || 5)} min={1} max={20} w={100} />
         </Group>

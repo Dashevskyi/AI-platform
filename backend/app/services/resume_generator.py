@@ -176,20 +176,34 @@ async def generate_resume_for_pair(
             # contain concrete values — see RESUME_PROMPT.
             assistant_msg.artifacts = None
 
-            # Embed combined text — used by recall_chat for semantic lookup.
+            # Two embeddings, both anchored on the user message:
+            #  - resume_embedding: sanitized summary → topical recall.
+            #  - content_embedding: RAW trimmed Q+A (concrete values intact) →
+            #    factual recall ("роутер косарева", an IP) that the summary
+            #    embedding misses. recall_chat searches both, returns the summary.
             combined = f"Q: {query_resume or ''}\nA: {response_resume or ''}".strip()
+            # Cap raw text so a giant tool-dump answer doesn't blow the embedder's
+            # token window; the front of Q+A holds the identifying terms.
+            RAW_EMBED_CAP = 2000
+            raw_combined = (
+                f"{(user_text or '')[:RAW_EMBED_CAP]}\n{(assistant_text or '')[:RAW_EMBED_CAP]}"
+            ).strip()
             embed_model = await _resolve_embedding_model(tenant_id, db)
-            if embed_model and combined:
+            if embed_model:
                 try:
                     provider = get_provider(
                         "ollama",
                         app_settings.OLLAMA_BASE_URL or "http://localhost:11434",
                     )
-                    vectors = await provider.embed(combined, embed_model)
-                    if vectors:
-                        # We store the embedding on the user message — that's the anchor for recall.
-                        user_msg.resume_embedding = vectors[0]
-                        user_msg.resume_embedding_model = embed_model
+                    if combined:
+                        vectors = await provider.embed(combined, embed_model)
+                        if vectors:
+                            user_msg.resume_embedding = vectors[0]
+                            user_msg.resume_embedding_model = embed_model
+                    if raw_combined:
+                        raw_vectors = await provider.embed(raw_combined, embed_model)
+                        if raw_vectors:
+                            user_msg.content_embedding = raw_vectors[0]
                 except Exception:
                     logger.exception("[resume] embed failed for pair user=%s", user_message_id)
 
