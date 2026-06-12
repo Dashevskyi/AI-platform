@@ -176,6 +176,10 @@ export interface ShellConfig {
   tool_routing_temperature: number;
   lazy_tool_catalog_topk: number;
   max_tool_rounds: number;
+  tool_limit_auto: boolean;
+  tool_limit_max_failures: number;
+  tool_limit_max_per_tool: number;
+  tool_limit_plan_rounds: number;
   tier0_enabled: boolean;
   tier0_min_tool_score: number;
   tier0_max_score_gap: number;
@@ -226,6 +230,10 @@ export interface ShellConfigUpdate {
   tool_routing_temperature?: number;
   lazy_tool_catalog_topk?: number;
   max_tool_rounds?: number;
+  tool_limit_auto?: boolean;
+  tool_limit_max_failures?: number;
+  tool_limit_max_per_tool?: number;
+  tool_limit_plan_rounds?: number;
   tier0_enabled?: boolean;
   tier0_min_tool_score?: number;
   tier0_max_score_gap?: number;

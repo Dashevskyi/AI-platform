@@ -30,6 +30,10 @@ class ShellConfigUpdate(BaseModel):
     tool_routing_temperature: float | None = None
     lazy_tool_catalog_topk: int | None = None
     max_tool_rounds: int | None = None
+    tool_limit_auto: bool | None = None
+    tool_limit_max_failures: int | None = None
+    tool_limit_max_per_tool: int | None = None
+    tool_limit_plan_rounds: int | None = None
     tier0_enabled: bool | None = None
     tier0_min_tool_score: float | None = None
     tier0_max_score_gap: float | None = None
@@ -83,6 +87,10 @@ class ShellConfigResponse(BaseModel):
     tool_routing_temperature: float = 0.3
     lazy_tool_catalog_topk: int = 3
     max_tool_rounds: int = 6
+    tool_limit_auto: bool = False
+    tool_limit_max_failures: int = 4
+    tool_limit_max_per_tool: int = 4
+    tool_limit_plan_rounds: int = 20
     tier0_enabled: bool = False
     tier0_min_tool_score: float = 0.80
     tier0_max_score_gap: float = 0.15

@@ -757,6 +757,10 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
         tool_routing_temperature: config.tool_routing_temperature,
         lazy_tool_catalog_topk: config.lazy_tool_catalog_topk,
         max_tool_rounds: config.max_tool_rounds,
+        tool_limit_auto: config.tool_limit_auto ?? false,
+        tool_limit_max_failures: config.tool_limit_max_failures ?? 4,
+        tool_limit_max_per_tool: config.tool_limit_max_per_tool ?? 4,
+        tool_limit_plan_rounds: config.tool_limit_plan_rounds ?? 20,
         tier0_enabled: config.tier0_enabled,
         tier0_min_tool_score: config.tier0_min_tool_score,
         tier0_max_score_gap: config.tier0_max_score_gap,
@@ -1111,8 +1115,42 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
                       step={1}
                       value={form.max_tool_rounds ?? 6}
                       onChange={(v) => updateField('max_tool_rounds', typeof v === 'number' ? v : 6)}
+                      disabled={form.tool_limit_auto ?? false}
                     />
                   </SimpleGrid>
+
+                  <Switch
+                    mt="sm"
+                    checked={form.tool_limit_auto ?? false}
+                    onChange={(e) => updateField('tool_limit_auto', e.currentTarget.checked)}
+                    label={
+                      <Hint hint="Вместо жёсткого лимита раундов — умные предохранители: останавливаем, только когда модель «заблудилась» (повторяющиеся ошибки или дёргает один инструмент), а при наличии плана даём больший бюджет на разные инструменты.">
+                        Авто-управление лимитом вызовов
+                      </Hint>
+                    }
+                  />
+                  {(form.tool_limit_auto ?? false) && (
+                    <SimpleGrid cols={{ base: 1, md: 3 }} spacing="sm" mt="sm">
+                      <NumberInput
+                        label={<Hint hint="Стоп после стольких неудачных вызовов tool (битые аргументы, ошибки). Ловит зацикливание на ошибке.">Макс. неудачных вызовов</Hint>}
+                        min={1} max={20} step={1}
+                        value={form.tool_limit_max_failures ?? 4}
+                        onChange={(v) => updateField('tool_limit_max_failures', typeof v === 'number' ? v : 4)}
+                      />
+                      <NumberInput
+                        label={<Hint hint="Стоп, если ОДИН инструмент вызван больше стольки раз за запрос (plan/plan_update не считаются). Ловит «дёргает ping 30 раз».">Макс. вызовов одного tool</Hint>}
+                        min={1} max={30} step={1}
+                        value={form.tool_limit_max_per_tool ?? 4}
+                        onChange={(v) => updateField('tool_limit_max_per_tool', typeof v === 'number' ? v : 4)}
+                      />
+                      <NumberInput
+                        label={<Hint hint="Когда модель составила план (вызвала plan) — поднимаем потолок раундов до этого числа, чтобы многошаговая работа разными инструментами не обрывалась.">Раундов при наличии плана</Hint>}
+                        min={1} max={40} step={1}
+                        value={form.tool_limit_plan_rounds ?? 20}
+                        onChange={(v) => updateField('tool_limit_plan_rounds', typeof v === 'number' ? v : 20)}
+                      />
+                    </SimpleGrid>
+                  )}
                 </Fieldset>
 
                 {/* ── Tier 0 routing ────────────────────────────────────── */}

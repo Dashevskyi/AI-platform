@@ -347,6 +347,10 @@ class ToolExecCtx:
     round_breakdown: list = None
     tool_routing_temperature: float = 0.0
     effective_temperature: float = 0.3
+    # Auto tool-limit bookkeeping (per request). name → call count; failures
+    # is a 1-element list used as a mutable int box.
+    tool_call_counts: dict = None
+    failed_calls: list = None
 
 
 async def _run_provider_round(ctx: ToolExecCtx, round_num: int, *, voice_mode: bool = False):
@@ -466,6 +470,12 @@ async def _execute_tool_call(ctx: ToolExecCtx, tc, round_num: int) -> None:
     })
     logger.debug(f"[{ctx.correlation_id}] Tool result ({len(tool_output)} chars): {tool_output[:200]}")
     ctx.tool_outputs.append({"tool": func_name, "output": tool_output})
+
+    # Auto tool-limit counters (per request): per-tool call count + failures.
+    if ctx.tool_call_counts is not None:
+        ctx.tool_call_counts[func_name] = ctx.tool_call_counts.get(func_name, 0) + 1
+    if not tool_ok and ctx.failed_calls is not None:
+        ctx.failed_calls[0] += 1
 
     if tool_ok:
         _schedule_tool_result_capture(
@@ -644,6 +654,49 @@ def _resolve_max_tool_rounds(config) -> int:
     except (TypeError, ValueError):
         value = DEFAULT_MAX_TOOL_ROUNDS
     return max(1, min(20, value))
+
+
+def _tool_limit_auto(config) -> bool:
+    """Auto tool-limit mode: replace the flat round cap with intent-aware
+    guards — stop only when the model is clearly *lost* (repeated failures or
+    hammering one tool), and grant a larger budget once a plan exists. A fixed
+    cap can't tell legitimate multi-step work from a runaway; this can."""
+    return bool(getattr(config, "tool_limit_auto", False))
+
+
+def _effective_round_cap(config, plan_made: bool) -> int:
+    """Round cap for the current request. In auto mode, a registered plan
+    raises the cap to tool_limit_plan_rounds (diverse multi-step work is fine);
+    otherwise the normal max_tool_rounds applies."""
+    base = _resolve_max_tool_rounds(config)
+    if _tool_limit_auto(config) and plan_made:
+        try:
+            plan_cap = int(getattr(config, "tool_limit_plan_rounds", 20) or 20)
+        except (TypeError, ValueError):
+            plan_cap = 20
+        return max(base, min(40, plan_cap))
+    return base
+
+
+def _auto_limit_tripped(config, tool_call_counts: dict | None, failed: int) -> str | None:
+    """In auto mode, return a human reason when a runaway guard trips, else
+    None: (a) too many failed tool calls, (b) one tool called too many times.
+    `plan`/`plan_update` are exempt from the per-tool cap (bookkeeping calls)."""
+    if not _tool_limit_auto(config):
+        return None
+    try:
+        max_fail = int(getattr(config, "tool_limit_max_failures", 4) or 4)
+        max_per = int(getattr(config, "tool_limit_max_per_tool", 4) or 4)
+    except (TypeError, ValueError):
+        max_fail, max_per = 4, 4
+    if failed >= max_fail:
+        return f"достигнут лимит неудачных вызовов tool ({failed}/{max_fail})"
+    for name, count in (tool_call_counts or {}).items():
+        if name in ("plan", "plan_update"):
+            continue
+        if count > max_per:
+            return f"инструмент {name} вызван слишком часто ({count} > {max_per})"
+    return None
 # Anti-lazy auto-nudge — was needed for Qwen3 thinking-mode quirk. For DeepSeek and
 # Qwen2.5 (no <think> block) it can actually cause runaway: model with no clear
 # next action ends with content ("сделано"), regex matches "сделано/проверю/etc",
@@ -1978,6 +2031,7 @@ async def _chat_completion_inner(self) -> dict:
             model_name=model_name, user_content=user_content, chunk_cb=chunk_cb,
             current_round_ref=current_round_ref, round_breakdown=round_breakdown,
             tool_routing_temperature=tool_routing_temperature, effective_temperature=effective_temperature,
+            tool_call_counts={}, failed_calls=[0],
         )
 
         # Initial LLM call — let the auto-router pick light/heavy first
@@ -1989,7 +2043,24 @@ async def _chat_completion_inner(self) -> dict:
         # Tool execution loop
         round_num = 0
         max_tool_rounds = _resolve_max_tool_rounds(config)
-        while resp.tool_calls and round_num < max_tool_rounds:
+        _auto_stop_reason: str | None = None
+        while resp.tool_calls:
+            # Effective cap: in auto mode a registered plan unlocks a bigger
+            # budget; otherwise the flat max_tool_rounds applies.
+            _plan_made = (_tool_ctx.tool_call_counts or {}).get("plan", 0) > 0
+            _cap = _effective_round_cap(config, _plan_made)
+            if round_num >= _cap:
+                break
+            # Auto guards: stop early if the model is lost (repeated failures or
+            # hammering one tool). Checked BEFORE the next round so the offending
+            # call isn't issued again.
+            _auto_stop_reason = _auto_limit_tripped(
+                config, _tool_ctx.tool_call_counts, (_tool_ctx.failed_calls or [0])[0]
+            )
+            if _auto_stop_reason:
+                logger.info("[%s] auto tool-limit stop: %s", correlation_id, _auto_stop_reason)
+                await _emit("tool_limit_stop", {"reason": _auto_stop_reason})
+                break
             round_num += 1
             tool_calls_total += len(resp.tool_calls)
 
@@ -2169,15 +2240,15 @@ async def _chat_completion_inner(self) -> dict:
         # more tools (and produced no useful content), force one more LLM call
         # WITHOUT tools — instructing it to summarize what it has so the user
         # gets at least a partial answer instead of a blank assistant message.
-        _cap = _resolve_max_tool_rounds(config)
+        _cap = _effective_round_cap(config, (_tool_ctx.tool_call_counts or {}).get("plan", 0) > 0)
         if (
             resp
             and resp.tool_calls
-            and round_num >= _cap
+            and (round_num >= _cap or _auto_stop_reason)
             and not (resp.content or "").strip()
         ):
             logger.info(
-                f"[{correlation_id}] Tool rounds exhausted ({_cap}); "
+                f"[{correlation_id}] Tool loop ended ({_auto_stop_reason or f'cap {_cap}'}); "
                 f"forcing summary call without tools"
             )
             # Add the unfinished assistant turn so history is consistent,

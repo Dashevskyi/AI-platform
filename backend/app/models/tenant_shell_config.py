@@ -79,6 +79,14 @@ class TenantShellConfig(Base):
     # (search → tree → path → ddm); raise only for tenants doing multi-stage
     # data pipelines that genuinely need >6 steps.
     max_tool_rounds: Mapped[int] = mapped_column(Integer, nullable=False, default=6)
+    # Auto tool-limit: when True, replace the flat max_tool_rounds cap with
+    # intent-aware guards — stop only when the model is clearly lost (repeated
+    # failures or hammering one tool), and grant a larger budget once a plan
+    # exists. Lets legitimate multi-step work run while still killing runaways.
+    tool_limit_auto: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    tool_limit_max_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=4)
+    tool_limit_max_per_tool: Mapped[int] = mapped_column(Integer, nullable=False, default=4)
+    tool_limit_plan_rounds: Mapped[int] = mapped_column(Integer, nullable=False, default=20)
     # Per-tenant switch for accumulating the debug JSON on every LLM call.
     # On while we're collecting trace data for analysis; off for "we know
     # this tenant works, stop bloating llm_request_logs" mode.
