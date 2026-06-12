@@ -2383,6 +2383,13 @@ async def recall_chat_handler(arguments: dict, tool_config: dict | None = None) 
                 f"  Q: {(r.resume_query or '(нет резюме)').strip()}\n"
                 f"  A: {(r.resume_response or '(нет резюме)').strip()}"
             )
+        # Q/A здесь — РЕЗЮМЕ без конкретных значений (IP, числа, имена вырезаны
+        # специально). За точными данными вызови get_message(id="<id из скобок>")
+        # — он вернёт полный исходный текст вопроса и ответа.
+        lines.append(
+            "\nQ/A выше — резюме без конкретики. Полный текст пары: "
+            "get_message(id=\"<id из [...]>\")."
+        )
         return ToolResult(success=True, output="\n".join(lines))
     except Exception as e:
         logger.exception("recall_chat failed")
