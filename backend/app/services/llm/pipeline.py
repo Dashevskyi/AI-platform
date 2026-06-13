@@ -37,25 +37,6 @@ def _ct_obj(obj) -> int:
         return 0
 
 
-def _detect_user_language(text: str) -> str | None:
-    """Best-effort language hint for tool-result reminders.
-    Qwen3 (and Qwen2.5 to a degree) tends to switch to the language of tool
-    results (often English JSON). Returns Russian/Ukrainian/None — English does
-    not need a reminder."""
-    if not text:
-        return None
-    cyrillic = sum(1 for ch in text if "Ѐ" <= ch <= "ӿ")
-    ascii_alpha = sum(1 for ch in text if ch.isalpha() and ord(ch) < 128)
-    total = cyrillic + ascii_alpha
-    if total < 10:
-        return None
-    if cyrillic / total > 0.5:
-        if any(ch in text for ch in "іїєґІЇЄҐ"):
-            return "украинском"
-        return "русском"
-    return None
-
-
 # Distinctive tokens worth pinning: long numbers (≥4 digits), MAC, IPv4, IPv6 fragments,
 # ALL-CAPS tags (ABC-123), UUID-like, long identifiers. These typically appear when
 # the model "uses" a value from a tool result in its next reasoning/tool_call.
@@ -97,34 +78,6 @@ def _deterministic_compress(content: str, keep_chars: int | None = None) -> str:
     tail = content[-tail_len:]
     omitted = len(content) - head_len - tail_len
     return f"{head}\n\n... [{omitted} символов сжато — полные данные через повторный вызов tool] ...\n\n{tail}"
-
-
-def _with_lang_reminder(content: str, user_content: str) -> str:
-    """Append a language reminder to tool output if user wrote in non-English.
-    Cheap fix for Qwen3 reasoning drifting to English after a tool turn."""
-    lang = _detect_user_language(user_content)
-    if not lang:
-        return content
-    return content + f"\n\n---\n[Напоминание: продолжай рассуждения и итоговый ответ на {lang} языке.]"
-
-
-def _with_language_system_tail(messages: list[dict], user_content: str) -> list[dict]:
-    """Append a final system-role reminder so it's the LAST thing the model sees
-    before generating. Qwen3 chat template gives the last system message strong
-    weight inside <think>. Returns NEW list (does not mutate caller's)."""
-    lang = _detect_user_language(user_content)
-    if not lang:
-        return messages
-    tail = {
-        "role": "system",
-        "content": (
-            f"⚠ Reasoning policy (FINAL): "
-            f"chain-of-thought (<think>) AND the final reply MUST be in {lang} языке. "
-            f"NOT in English. Tool outputs may be English JSON — translate them when needed, "
-            f"but never switch your own reasoning to English."
-        ),
-    }
-    return messages + [tail]
 
 
 # Lazy-intent detection: model wrote "I'll do X" or "wait while I check" but did not call any tool.
@@ -1789,6 +1742,22 @@ async def _chat_completion_inner(self) -> dict:
         )
     else:
         messages.append({"role": "user", "content": composed_user_content})
+
+    # Final language reminder — strongest position (last message before the
+    # model generates). The "Language pin" system block sits high in the prompt;
+    # when the user's question and inlined artifact data are in another language
+    # (e.g. Ukrainian client data), that nearby signal can out-pull the distant
+    # pin and the model drifts. A terminal reminder from the tenant's CONFIGURED
+    # response_language (NOT auto-detected from input — that would defeat a fixed
+    # output language) re-anchors it. Skipped when no language is configured.
+    _resp_lang = getattr(config, "response_language", None)
+    if _resp_lang:
+        from app.services.llm.language import build_language_pin_text
+        messages.append({
+            "role": "system",
+            "content": "📌 ЯЗЫК ОТВЕТА (приоритет над языком запроса и данных): "
+                       + build_language_pin_text(_resp_lang),
+        })
 
     # Merge tenant tools + attachment search tools only when the request and model support tools.
     all_tool_defs = [_public_tool_def(t.config_json) for t in tools if t.config_json] if tools else []
