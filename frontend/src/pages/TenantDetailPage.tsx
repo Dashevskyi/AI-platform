@@ -88,6 +88,7 @@ import { ModelConfigTab } from './tenant-detail/ModelConfigTab';
 import { ShellSettingsTab } from './tenant-detail/ShellSettingsTab';
 import { Tier0Tab } from './tenant-detail/Tier0Tab';
 import { RetrievalTab } from './tenant-detail/RetrievalTab';
+import { AssistantsTab } from './tenant-detail/AssistantsTab';
 import { StatsTab } from './TenantStatsTab';
 import { ApiInfoTab } from './TenantApiInfoTab';
 import { UsersTab } from './tenant-detail/UsersTab';
@@ -201,6 +202,7 @@ export function TenantDetailPage() {
           {has('keys') && <Tabs.Tab value="keys">API Ключи</Tabs.Tab>}
           {has('model_config') && <Tabs.Tab value="model">Модель</Tabs.Tab>}
           {has('shell_config') && <Tabs.Tab value="shell">Настройки оболочки</Tabs.Tab>}
+          {has('shell_config') && <Tabs.Tab value="assistants">🤖 Ассистенты</Tabs.Tab>}
           {has('data_sources') && <Tabs.Tab value="data-sources">Источники данных</Tabs.Tab>}
           {has('tools') && <Tabs.Tab value="tools">Инструменты</Tabs.Tab>}
           {has('kb') && <Tabs.Tab value="kb">База знаний</Tabs.Tab>}
@@ -235,6 +237,11 @@ export function TenantDetailPage() {
         {has('shell_config') && (
           <Tabs.Panel value="shell" pt="md">
             <ShellSettingsTab tenantId={tenantId} />
+          </Tabs.Panel>
+        )}
+        {has('shell_config') && (
+          <Tabs.Panel value="assistants" pt="md">
+            <AssistantsTab tenantId={tenantId} />
           </Tabs.Panel>
         )}
         {has('data_sources') && (

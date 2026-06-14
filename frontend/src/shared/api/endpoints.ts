@@ -762,6 +762,36 @@ export const retrievalApi = {
   },
 };
 
+// ─── Assistants (persona/config profiles under a tenant) ──────────────────────
+export interface Assistant {
+  id: string;
+  tenant_id: string;
+  name: string;
+  description: string | null;
+  is_default: boolean;
+  is_active: boolean;
+  overrides: Record<string, unknown>;
+  allowed_tool_ids: string[] | null;
+}
+
+export const assistantsApi = {
+  list: async (tenantId: string): Promise<Assistant[]> => {
+    const res = await apiClient.get(`/api/admin/tenants/${tenantId}/assistants/`);
+    return res.data;
+  },
+  create: async (tenantId: string, body: Partial<Assistant>): Promise<Assistant> => {
+    const res = await apiClient.post(`/api/admin/tenants/${tenantId}/assistants/`, body);
+    return res.data;
+  },
+  update: async (tenantId: string, assistantId: string, body: Partial<Assistant>): Promise<Assistant> => {
+    const res = await apiClient.put(`/api/admin/tenants/${tenantId}/assistants/${assistantId}`, body);
+    return res.data;
+  },
+  remove: async (tenantId: string, assistantId: string): Promise<void> => {
+    await apiClient.delete(`/api/admin/tenants/${tenantId}/assistants/${assistantId}`);
+  },
+};
+
 // Audit
 export const auditApi = {
   list: async (page = 1, pageSize = 20): Promise<PaginatedResponse<AuditLog>> => {
