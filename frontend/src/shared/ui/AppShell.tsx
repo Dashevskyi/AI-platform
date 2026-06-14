@@ -15,6 +15,7 @@ import {
   Text,
   Divider,
   Skeleton,
+  Select,
   useMantineColorScheme,
   Avatar,
 } from '@mantine/core';
@@ -40,7 +41,7 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../hooks/useAuth';
 import { usePermissions } from '../hooks/usePermissions';
-import { authApi, chatsApi, tenantsApi } from '../api/endpoints';
+import { authApi, chatsApi, tenantsApi, assistantsApi } from '../api/endpoints';
 
 export function AppShellLayout() {
   const [opened, setOpened] = useState(false);
@@ -135,9 +136,20 @@ export function AppShellLayout() {
     enabled: !!tenantId && canSeeChats,
   });
 
+  // Assistants for the new-chat picker (shown only when a tenant has >1).
+  const { data: assistantsData } = useQuery({
+    queryKey: ['tenants', tenantId, 'assistants'],
+    queryFn: () => assistantsApi.list(tenantId!),
+    enabled: !!tenantId && canSeeChats && (isSuperadmin || isTenantAdmin),
+  });
+  const [newChatAssistantId, setNewChatAssistantId] = useState<string | null>(null);
+
   const handleCreateChat = async () => {
     if (!tenantId) return;
-    const chat = await chatsApi.create(tenantId, {});
+    const chat = await chatsApi.create(
+      tenantId,
+      newChatAssistantId ? { assistant_id: newChatAssistantId } : {},
+    );
     queryClient.invalidateQueries({ queryKey: ['tenants', tenantId, 'chats', 'list'] });
     navigate(`/tenants/${tenantId}/chat/${chat.id}`);
     setOpened(false);
@@ -276,6 +288,18 @@ export function AppShellLayout() {
                 <IconPlus size={14} />
               </ActionIcon>
             </Group>
+            {assistantsData && assistantsData.length > 1 && (
+              <Select
+                size="xs" mb={8} px={4}
+                placeholder="Ассистент для нового чата"
+                data={assistantsData.map((a) => ({
+                  value: a.id, label: a.name + (a.is_default ? ' (по умолчанию)' : ''),
+                }))}
+                value={newChatAssistantId}
+                onChange={setNewChatAssistantId}
+                clearable
+              />
+            )}
             {chatsLoading ? (
               <>
                 <Skeleton height={32} mb={4} />

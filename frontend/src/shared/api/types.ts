@@ -435,6 +435,7 @@ export interface Chat {
 export interface ChatCreate {
   title?: string;
   description?: string;
+  assistant_id?: string;
 }
 
 export interface Message {
