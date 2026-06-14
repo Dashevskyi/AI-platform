@@ -129,7 +129,7 @@ export function VoiceModeOverlay({
   // Voice-mode UI settings (hold phrases) — tenant-configurable.
   const { data: voiceCfg } = useQuery({
     queryKey: ['ai-chat-core', 'voice-config', tenantId, mode],
-    queryFn: () => api.getVoiceConfig(tenantId),
+    queryFn: () => api.getVoiceConfig(tenantId, chatId),
     staleTime: 60_000,
   });
 
@@ -294,7 +294,7 @@ export function VoiceModeOverlay({
       clearHoldTimers();
     }
     try {
-      const rawBlob = await api.synthesizeAudio(tenantId, sentence);
+      const rawBlob = await api.synthesizeAudio(tenantId, sentence, { chatId });
       // Overlay may have closed while the TTS request was in flight.
       if (closedRef.current) return;
       // Force MIME type — chunked streaming responses sometimes leave blob.type
@@ -480,7 +480,7 @@ export function VoiceModeOverlay({
       // Case 3: WL delivered nothing → batch STT fallback
       setPhase('transcribing');
       try {
-        const { text } = await api.transcribeAudio(tenantId, blob);
+        const { text } = await api.transcribeAudio(tenantId, blob, { chatId });
         const ut = (text || '').trim();
         if (isMeaningful(ut)) void submitLLM(ut);
         else setPhase('listening');

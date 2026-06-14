@@ -215,6 +215,17 @@ async def resolve_model(
     1. TenantModelConfig (if exists) — manual or auto mode
     2. Fallback to shell_config provider/model fields (backward compat)
     """
+    # 0. Assistant model override (Assistant layer): if the request's assistant
+    #    pins a specific model, it wins over the tenant's TenantModelConfig.
+    _amid = getattr(shell_config, "assistant_model_id", None)
+    if _amid:
+        try:
+            record, is_custom = await _load_model_record(_amid, None, db)
+            if record:
+                return _make_provider(record, is_custom)
+        except Exception:
+            logger.warning("assistant model override %s failed; falling back", _amid)
+
     # Try to load tenant model config
     result = await db.execute(
         select(TenantModelConfig).where(TenantModelConfig.tenant_id == tenant_id)

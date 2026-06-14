@@ -79,11 +79,12 @@ async def speech_to_text_admin(
 @router.get("/config")
 async def voice_config_admin(
     tenant_id: uuid.UUID,
+    chat_id: str | None = None,
     current_user: AdminUser = Depends(require_tenant_access),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     from app.api.tenant.voice import _voice_ui_config
-    return await _voice_ui_config(tenant_id, db)
+    return await _voice_ui_config(tenant_id, db, chat_id)
 
 
 class TTSRequest(BaseModel):
@@ -91,6 +92,7 @@ class TTSRequest(BaseModel):
     voice: str | None = None
     format: str = "mp3"
     speed: float | None = None
+    chat_id: str | None = None
 
 
 @router.post("/tts")
@@ -113,7 +115,7 @@ async def text_to_speech_admin(
     if len(text) > 4000:
         text = text[:4000]
 
-    tts_cfg = await _load_tts_config(tenant_id, db)
+    tts_cfg = await _load_tts_config(tenant_id, db, body.chat_id)
 
     # ── ElevenLabs ──────────────────────────────────────────────────────────
     if tts_cfg.provider == "elevenlabs":

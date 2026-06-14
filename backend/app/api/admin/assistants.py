@@ -91,10 +91,12 @@ def _to_response(a: Assistant) -> AssistantResponse:
 
 
 def _clean_overrides(raw: dict | None) -> dict:
-    """Keep only whitelisted fields; drop null values (= inherit)."""
+    """Keep whitelisted fields (+ special `model_id` LLM override); drop nulls
+    (= inherit)."""
     if not raw:
         return {}
-    return {k: v for k, v in raw.items() if k in OVERRIDABLE_FIELDS and v is not None}
+    allowed = OVERRIDABLE_FIELDS | {"model_id"}
+    return {k: v for k, v in raw.items() if k in allowed and v is not None}
 
 
 @router.get("/", response_model=list[AssistantResponse])

@@ -5,7 +5,7 @@ import {
 } from '@mantine/core';
 import { IconPlus, IconTrash, IconRobot, IconDeviceFloppy } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
-import { assistantsApi, toolsApi, type Assistant } from '../../shared/api/endpoints';
+import { assistantsApi, toolsApi, modelsApi, type Assistant } from '../../shared/api/endpoints';
 
 // Tri-state select: "" = inherit (key removed from overrides), else override.
 const INHERIT = '';
@@ -40,11 +40,12 @@ function toDraft(a: Assistant): Draft {
 }
 
 function AssistantEditor({
-  tenantId, assistant, toolOptions, onSaved, onDeleted,
+  tenantId, assistant, toolOptions, modelOptions, onSaved, onDeleted,
 }: {
   tenantId: string;
   assistant: Assistant;
   toolOptions: { value: string; label: string }[];
+  modelOptions: { value: string; label: string }[];
   onSaved: () => void;
   onDeleted: () => void;
 }) {
@@ -145,6 +146,14 @@ function AssistantEditor({
         <Select label="Авто-лимит tools" data={TRI} value={ovBool('tool_limit_auto')} onChange={(v) => setOvBool('tool_limit_auto', v || INHERIT)} />
       </Group>
 
+      <Select
+        label="Модель LLM"
+        description="Своя модель для этого ассистента; пусто = модель тенанта"
+        data={[{ value: INHERIT, label: '— модель тенанта —' }, ...modelOptions]}
+        value={ovStr('model_id')} onChange={(v) => setOvStr('model_id', v || INHERIT)}
+        searchable clearable mb="sm"
+      />
+
       <MultiSelect
         label="Доступные инструменты (пусто = все инструменты тенанта)"
         description="Сужает набор tools для этого ассистента; пересекается с правами API-ключа"
@@ -165,6 +174,7 @@ function AssistantEditor({
 export function AssistantsTab({ tenantId }: { tenantId: string }) {
   const [list, setList] = useState<Assistant[] | null>(null);
   const [toolOptions, setToolOptions] = useState<{ value: string; label: string }[]>([]);
+  const [modelOptions, setModelOptions] = useState<{ value: string; label: string }[]>([]);
   const [creating, setCreating] = useState(false);
 
   const reload = useCallback(() => {
@@ -176,6 +186,9 @@ export function AssistantsTab({ tenantId }: { tenantId: string }) {
     toolsApi.list(tenantId, 1, 500)
       .then((p) => setToolOptions((p.items || []).map((t) => ({ value: t.id, label: t.name }))))
       .catch(() => setToolOptions([]));
+    modelsApi.brief()
+      .then((ms) => setModelOptions((ms || []).map((m) => ({ value: m.id, label: m.name }))))
+      .catch(() => setModelOptions([]));
   }, [tenantId, reload]);
 
   async function createNew() {
@@ -207,7 +220,7 @@ export function AssistantsTab({ tenantId }: { tenantId: string }) {
 
       {list.map((a) => (
         <AssistantEditor key={a.id} tenantId={tenantId} assistant={a} toolOptions={toolOptions}
-          onSaved={reload} onDeleted={reload} />
+          modelOptions={modelOptions} onSaved={reload} onDeleted={reload} />
       ))}
     </Stack>
   );

@@ -31,13 +31,20 @@ _NON_OVERRIDABLE = frozenset({"embedding_model_name", "tenant_id", "id"})
 class EffectiveConfig:
     """Read-only proxy over a TenantShellConfig with assistant overrides applied."""
 
-    __slots__ = ("_shell", "_overrides", "assistant_id", "assistant_name", "assistant_allowed_tool_ids")
+    __slots__ = (
+        "_shell", "_overrides", "assistant_id", "assistant_name",
+        "assistant_allowed_tool_ids", "assistant_model_id",
+    )
 
     def __init__(self, shell: TenantShellConfig, assistant: Assistant | None):
         self._shell = shell
         ov = dict(getattr(assistant, "overrides", None) or {}) if assistant else {}
         for k in _NON_OVERRIDABLE:
             ov.pop(k, None)
+        # model_id is handled specially by resolve_model (it's an llm_models
+        # reference, not a TenantShellConfig field) — pull it out of the field
+        # overlay so it doesn't shadow anything.
+        self.assistant_model_id = ov.pop("model_id", None)
         self._overrides = ov
         self.assistant_id = getattr(assistant, "id", None)
         self.assistant_name = getattr(assistant, "name", None)

@@ -60,26 +60,35 @@ class _STTConfig:
         self.fuzzy_threshold = fuzzy_threshold
 
 
-async def _load_stt_config(tenant_id: uuid.UUID, db: AsyncSession) -> _STTConfig:
-    """Load all STT-related settings from tenant shell config."""
+async def _voice_effective_config(
+    tenant_id: uuid.UUID, chat_id: str | None, db: AsyncSession
+):
+    """Tenant shell config overlaid with the chat's assistant overrides
+    (Assistant layer) — so voice settings (TTS voice, hold phrases, STT vocab)
+    follow the assistant a voice chat is bound to. chat_id=None → tenant default
+    assistant. Returns None when the tenant has no shell config."""
+    shell = (await db.execute(
+        select(TenantShellConfig).where(TenantShellConfig.tenant_id == tenant_id)
+    )).scalar_one_or_none()
+    if not shell:
+        return None
+    from app.services.llm.effective_config import build_effective_config
+    return await build_effective_config(db, shell, tenant_id, chat_id)
+
+
+async def _load_stt_config(
+    tenant_id: uuid.UUID, db: AsyncSession, chat_id: str | None = None
+) -> _STTConfig:
+    """Load STT settings from the effective (assistant-aware) config."""
     try:
-        result = await db.execute(
-            select(
-                TenantShellConfig.stt_initial_prompt,
-                TenantShellConfig.stt_hotwords,
-                TenantShellConfig.stt_vocab_source,
-                TenantShellConfig.stt_vocab_source_dsn_enc,
-                TenantShellConfig.stt_fuzzy_threshold,
-            ).where(TenantShellConfig.tenant_id == tenant_id)
-        )
-        row = result.first()
-        if row:
+        cfg = await _voice_effective_config(tenant_id, chat_id, db)
+        if cfg is not None:
             return _STTConfig(
-                initial_prompt=row.stt_initial_prompt,
-                hotwords=row.stt_hotwords,
-                vocab_source=row.stt_vocab_source,
-                vocab_dsn_enc=row.stt_vocab_source_dsn_enc,
-                fuzzy_threshold=row.stt_fuzzy_threshold or 85.0,
+                initial_prompt=cfg.stt_initial_prompt,
+                hotwords=cfg.stt_hotwords,
+                vocab_source=cfg.stt_vocab_source,
+                vocab_dsn_enc=cfg.stt_vocab_source_dsn_enc,
+                fuzzy_threshold=cfg.stt_fuzzy_threshold or 85.0,
             )
     except Exception as e:
         logger.warning("Failed to load STT config for tenant %s: %s", tenant_id, e)
@@ -100,8 +109,11 @@ class _TTSConfig:
         self.pitch = pitch            # str | None — Silero SSML pitch
 
 
-async def _load_tts_config(tenant_id: uuid.UUID, db: AsyncSession) -> _TTSConfig:
-    """Resolve TTS provider for a tenant.
+async def _load_tts_config(
+    tenant_id: uuid.UUID, db: AsyncSession, chat_id: str | None = None
+) -> _TTSConfig:
+    """Resolve TTS provider for a tenant, assistant-aware (chat's assistant
+    overrides tts_* fields).
 
     Priority:
       1. Tenant has tts_provider='elevenlabs' with tts_api_key_enc → use it.
@@ -111,18 +123,7 @@ async def _load_tts_config(tenant_id: uuid.UUID, db: AsyncSession) -> _TTSConfig
          • Otherwise → Fish Speech with system TTS_URL.
     """
     try:
-        result = await db.execute(
-            select(
-                TenantShellConfig.tts_provider,
-                TenantShellConfig.tts_api_key_enc,
-                TenantShellConfig.tts_voice_id,
-                TenantShellConfig.tts_model,
-                TenantShellConfig.tts_speed,
-                TenantShellConfig.tts_pitch,
-                TenantShellConfig.tts_fish_url,
-            ).where(TenantShellConfig.tenant_id == tenant_id)
-        )
-        row = result.first()
+        row = await _voice_effective_config(tenant_id, chat_id, db)
     except Exception as e:
         logger.warning("Failed to load TTS config for tenant %s: %s", tenant_id, e)
         row = None
@@ -176,17 +177,12 @@ DEFAULT_HOLD_PHRASES = [
 ]
 
 
-async def _voice_ui_config(tenant_id: uuid.UUID, db: AsyncSession) -> dict:
-    """Voice-mode UI settings (hold phrases etc.) for the chat widgets."""
+async def _voice_ui_config(tenant_id: uuid.UUID, db: AsyncSession, chat_id: str | None = None) -> dict:
+    """Voice-mode UI settings (hold phrases etc.) for the chat widgets,
+    assistant-aware (chat's assistant overrides voice_hold_*)."""
     row = None
     try:
-        row = (await db.execute(
-            select(
-                TenantShellConfig.voice_hold_enabled,
-                TenantShellConfig.voice_hold_delay_ms,
-                TenantShellConfig.voice_hold_phrases,
-            ).where(TenantShellConfig.tenant_id == tenant_id)
-        )).first()
+        row = await _voice_effective_config(tenant_id, chat_id, db)
     except Exception as e:
         logger.warning("voice config load failed for %s: %s", tenant_id, e)
     enabled = True if row is None or row.voice_hold_enabled is None else bool(row.voice_hold_enabled)
@@ -202,11 +198,12 @@ async def _voice_ui_config(tenant_id: uuid.UUID, db: AsyncSession) -> dict:
 @router.get("/config")
 async def voice_config(
     tenant_id: uuid.UUID,
+    chat_id: str | None = None,
     auth: TenantAuthContext = Depends(get_current_tenant_auth_context),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     _verify_tenant(tenant_id, auth.tenant)
-    return await _voice_ui_config(tenant_id, db)
+    return await _voice_ui_config(tenant_id, db, chat_id)
 
 
 class STTResponse(BaseModel):
@@ -648,6 +645,7 @@ async def speech_to_text(
     tenant_id: uuid.UUID,
     file: UploadFile = File(...),
     language: str | None = Form(default=None),
+    chat_id: str | None = Form(default=None),
     auth: TenantAuthContext = Depends(get_current_tenant_auth_context),
     db: AsyncSession = Depends(get_db),
 ) -> STTResponse:
@@ -667,7 +665,7 @@ async def speech_to_text(
     # noticeably better than auto-detect on ru/uk technical content.
     effective_lang = (language or "").strip() or settings.STT_LANGUAGE
 
-    stt_cfg = await _load_stt_config(tenant_id, db)
+    stt_cfg = await _load_stt_config(tenant_id, db, chat_id)
 
     # Load domain vocabulary for post-processing normalization (cached, non-blocking)
     vocab = await get_tenant_vocab(
@@ -792,6 +790,8 @@ class TTSRequest(BaseModel):
     # Playback speed multiplier. None → backend default (settings.TTS_SPEED).
     # OpenAI-spec range is 0.25..4.0; we clamp.
     speed: float | None = None
+    # Assistant-aware: resolve voice settings for this chat's assistant.
+    chat_id: str | None = None
 
 
 # ── TTS sentence chunking ───────────────────────────────────────────────────
@@ -892,7 +892,7 @@ async def text_to_speech(
     mime = {"mp3": "audio/mpeg", "wav": "audio/wav", "flac": "audio/flac",
             "opus": "audio/ogg", "aac": "audio/aac"}.get(fmt, "audio/mpeg")
 
-    tts_cfg = await _load_tts_config(tenant_id, db)
+    tts_cfg = await _load_tts_config(tenant_id, db, body.chat_id)
 
     # ── ElevenLabs path ────────────────────────────────────────────────────────
     if tts_cfg.provider == "elevenlabs":

@@ -27,16 +27,18 @@ export type AiChatApi = {
   sendMessageWithFiles: (tenantId: string, chatId: string, content: string, files: File[], idempotencyKey?: string, attachmentIds?: string[]) => Promise<Message>;
   listArtifacts: (tenantId: string, chatId: string) => Promise<ArtifactBrief[]>;
   getArtifact: (tenantId: string, chatId: string, artifactId: string) => Promise<ArtifactDetail>;
-  /** Speech-to-text: send a recorded audio blob, get back transcribed text. */
-  transcribeAudio: (tenantId: string, blob: Blob, opts?: { language?: string }) => Promise<{ text: string }>;
-  /** Text-to-speech: get a playable audio Blob from text. */
+  /** Speech-to-text: send a recorded audio blob, get back transcribed text.
+   *  chatId (optional) makes STT vocab assistant-aware. */
+  transcribeAudio: (tenantId: string, blob: Blob, opts?: { language?: string; chatId?: string }) => Promise<{ text: string }>;
+  /** Text-to-speech: get a playable audio Blob from text.
+   *  chatId (optional) resolves TTS voice for the chat's assistant. */
   synthesizeAudio: (
     tenantId: string,
     text: string,
-    opts?: { voice?: string; format?: 'mp3' | 'wav' | 'ogg' | 'flac' | 'aac' },
+    opts?: { voice?: string; format?: 'mp3' | 'wav' | 'ogg' | 'flac' | 'aac'; chatId?: string },
   ) => Promise<Blob>;
-  /** Voice-mode UI settings (hold phrases etc.). */
-  getVoiceConfig: (tenantId: string) => Promise<{ hold_enabled: boolean; hold_delay_ms: number; hold_phrases: string[] }>;
+  /** Voice-mode UI settings (hold phrases etc.). chatId → assistant-aware. */
+  getVoiceConfig: (tenantId: string, chatId?: string) => Promise<{ hold_enabled: boolean; hold_delay_ms: number; hold_phrases: string[] }>;
   uploadDraftAttachment: (tenantId: string, chatId: string, file: File) => Promise<AttachmentBrief>;
   getDraftAttachment: (tenantId: string, chatId: string, attachmentId: string) => Promise<AttachmentBrief>;
   deleteDraftAttachment: (tenantId: string, chatId: string, attachmentId: string) => Promise<void>;
@@ -167,6 +169,7 @@ export function getAiChatApi(options: GetAiChatApiOptions = {}): AiChatApi {
                    blob.type.includes('mp4')  ? 'm4a'  : 'wav');
       fd.append('file', blob, `speech.${ext}`);
       if (opts?.language) fd.append('language', opts.language);
+      if (opts?.chatId) fd.append('chat_id', opts.chatId);
       const voicePrefix = variant === 'admin'
         ? `/api/admin/tenants/${tenantId}/voice`
         : `/api/tenants/${tenantId}/voice`;
@@ -176,11 +179,12 @@ export function getAiChatApi(options: GetAiChatApiOptions = {}): AiChatApi {
         authHeaders,
       });
     },
-    getVoiceConfig: async (tenantId) => {
+    getVoiceConfig: async (tenantId, chatId) => {
       const voicePrefix = variant === 'admin'
         ? `/api/admin/tenants/${tenantId}/voice`
         : `/api/tenants/${tenantId}/voice`;
-      return jsonFetch(u(`${voicePrefix}/config`), { method: 'GET', authHeaders });
+      const qs = chatId ? `?chat_id=${encodeURIComponent(chatId)}` : '';
+      return jsonFetch(u(`${voicePrefix}/config${qs}`), { method: 'GET', authHeaders });
     },
     synthesizeAudio: async (tenantId, text, opts) => {
       const voicePrefix = variant === 'admin'
@@ -189,7 +193,7 @@ export function getAiChatApi(options: GetAiChatApiOptions = {}): AiChatApi {
       const res = await fetch(u(`${voicePrefix}/tts`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders },
-        body: JSON.stringify({ text, voice: opts?.voice, format: opts?.format || 'mp3' }),
+        body: JSON.stringify({ text, voice: opts?.voice, format: opts?.format || 'mp3', chat_id: opts?.chatId }),
       });
       if (!res.ok) {
         let detail = '';
