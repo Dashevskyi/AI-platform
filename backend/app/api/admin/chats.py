@@ -40,6 +40,7 @@ def _chat_to_response(c: Chat, message_count: int | None = None) -> ChatResponse
         id=str(c.id),
         tenant_id=str(c.tenant_id),
         api_key_id=str(c.api_key_id) if c.api_key_id else None,
+        assistant_id=str(c.assistant_id) if c.assistant_id else None,
         title=c.title,
         description=c.description,
         status=c.status,
@@ -276,11 +277,14 @@ async def create_chat(
     current_user: AdminUser = Depends(require_role("superadmin", "tenant_admin")),
 ):
     await _verify_tenant(tenant_id, db)
+    from app.services.llm.effective_config import resolve_assistant_id_for_new_chat
+    assistant_id = await resolve_assistant_id_for_new_chat(db, tenant_id, body.assistant_id)
     chat = Chat(
         tenant_id=tenant_id,
         title=body.title,
         description=body.description,
         created_by=current_user.login,
+        assistant_id=assistant_id,
     )
     db.add(chat)
     await db.flush()

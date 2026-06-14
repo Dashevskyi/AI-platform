@@ -80,6 +80,38 @@ async def resolve_assistant_for_chat(
     ).scalar_one_or_none()
 
 
+async def resolve_assistant_id_for_new_chat(
+    db: AsyncSession,
+    tenant_id: str | uuid.UUID,
+    explicit_id: str | uuid.UUID | None = None,
+    api_key_id: str | uuid.UUID | None = None,
+) -> uuid.UUID | None:
+    """Pick the assistant to bind a NEW chat to: explicit choice (validated to
+    belong to the tenant) → the API key's bound assistant → tenant default."""
+    tid = tenant_id if isinstance(tenant_id, uuid.UUID) else uuid.UUID(str(tenant_id))
+
+    if explicit_id:
+        eid = explicit_id if isinstance(explicit_id, uuid.UUID) else uuid.UUID(str(explicit_id))
+        ok = (await db.execute(
+            select(Assistant.id).where(Assistant.id == eid, Assistant.tenant_id == tid)
+        )).scalar_one_or_none()
+        if ok:
+            return eid
+
+    if api_key_id:
+        from app.models.tenant_api_key import TenantApiKey
+        kid = api_key_id if isinstance(api_key_id, uuid.UUID) else uuid.UUID(str(api_key_id))
+        bound = (await db.execute(
+            select(TenantApiKey.assistant_id).where(TenantApiKey.id == kid)
+        )).scalar_one_or_none()
+        if bound:
+            return bound
+
+    return (await db.execute(
+        select(Assistant.id).where(Assistant.tenant_id == tid, Assistant.is_default.is_(True)).limit(1)
+    )).scalar_one_or_none()
+
+
 async def build_effective_config(
     db: AsyncSession,
     shell: TenantShellConfig,

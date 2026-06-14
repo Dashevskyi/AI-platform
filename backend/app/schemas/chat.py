@@ -5,6 +5,7 @@ from pydantic import BaseModel
 class ChatCreate(BaseModel):
     title: str | None = None
     description: str | None = None
+    assistant_id: str | None = None
 
 
 class ChatUpdate(BaseModel):
@@ -19,6 +20,7 @@ class ChatResponse(BaseModel):
     id: str
     tenant_id: str
     api_key_id: str | None = None
+    assistant_id: str | None = None
     title: str | None
     description: str | None
     status: str

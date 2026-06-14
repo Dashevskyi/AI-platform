@@ -39,6 +39,7 @@ from app.api.admin.chats import router as admin_chats_router
 from app.api.admin.logs import router as logs_router
 from app.api.admin.tier0 import router as tier0_router
 from app.api.admin.retrieval_test import router as retrieval_test_router
+from app.api.admin.assistants import router as assistants_router
 from app.api.admin.tts_local import router as tts_local_router
 from app.api.admin.stats import router as stats_router
 from app.api.admin.audit import router as audit_router
@@ -188,6 +189,7 @@ app.include_router(admin_chats_router)
 app.include_router(logs_router)
 app.include_router(tier0_router)
 app.include_router(retrieval_test_router)
+app.include_router(assistants_router)
 app.include_router(tts_local_router)
 app.include_router(stats_router)
 app.include_router(audit_router)

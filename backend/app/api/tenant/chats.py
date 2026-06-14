@@ -197,9 +197,14 @@ async def create_chat(
 ):
     _verify_tenant_access(tenant_id, auth.tenant)
 
+    from app.services.llm.effective_config import resolve_assistant_id_for_new_chat
+    assistant_id = await resolve_assistant_id_for_new_chat(
+        db, tenant_id, body.assistant_id, auth.api_key.id
+    )
     chat = Chat(
         tenant_id=tenant_id,
         api_key_id=auth.api_key.id,
+        assistant_id=assistant_id,
         title=body.title,
         description=body.description,
         created_by=auth.api_key.name,
