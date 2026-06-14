@@ -19,6 +19,14 @@ class Chat(Base):
         nullable=True,
         index=True,
     )
+    # Which assistant (persona/config profile) handles this chat. NULL →
+    # resolve the tenant's default assistant at request time.
+    assistant_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("assistants.id"),
+        nullable=True,
+        index=True,
+    )
     title: Mapped[str | None] = mapped_column(String(500), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(50), default="active")

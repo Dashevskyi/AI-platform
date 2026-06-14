@@ -794,14 +794,21 @@ async def _chat_completion_inner(self) -> dict:
 
     await _emit("pipeline_start", {"chat_id": chat_id})
 
-    # 1. Load config
-    config = (
+    # 1. Load config — tenant TenantShellConfig overlaid with the request's
+    # assistant overrides (Assistant layer). The whole pipeline reads
+    # `config.<field>`; the EffectiveConfig proxy makes those assistant-aware.
+    # A tenant's default assistant has empty overrides ⇒ identical to the raw
+    # shell config (backward compatible).
+    _shell = (
         await db.execute(
             select(TenantShellConfig).where(TenantShellConfig.tenant_id == tenant_id)
         )
     ).scalar_one_or_none()
-    if not config:
+    if not _shell:
         raise ValueError("Shell config not found for tenant")
+    from app.services.llm.effective_config import build_effective_config
+    config = await build_effective_config(db, _shell, tenant_id, chat_id)
+    self.assistant_id = getattr(config, "assistant_id", None)
 
     # 1a. Tier 0 routing — try the deterministic shortcut FIRST. If the query
     # is unambiguous (high-confidence single tool + required entities present

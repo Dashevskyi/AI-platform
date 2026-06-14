@@ -17,6 +17,9 @@ class TenantApiKey(Base):
     key_prefix: Mapped[str] = mapped_column(String(20), nullable=False)
     key_hash: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
     group_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("tenant_api_key_groups.id"), nullable=True, index=True)
+    # Channel binding: which assistant new chats from this key use. NULL →
+    # tenant default assistant.
+    assistant_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("assistants.id"), nullable=True, index=True)
     memory_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     allowed_tool_ids: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
