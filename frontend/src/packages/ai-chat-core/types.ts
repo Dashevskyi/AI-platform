@@ -18,6 +18,8 @@ export interface Chat {
   id: string;
   tenant_id: string;
   api_key_id: string | null;
+  assistant_id?: string | null;
+  assistant_name?: string | null;
   title: string | null;
   description: string | null;
   status: string;

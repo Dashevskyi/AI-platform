@@ -28,6 +28,7 @@ import {
   IconCode,
   IconHeadphones,
   IconPencil,
+  IconRobot,
   IconPaperclip,
   IconFile,
   IconX,
@@ -671,6 +672,16 @@ export function AiChat({
                       chatsData?.items.find((c) => c.id === activeChatId)?.description ||
                       'Новый чат'}
                   </Text>
+                  {(() => {
+                    const aName = chatsData?.items.find((c) => c.id === activeChatId)?.assistant_name;
+                    return aName ? (
+                      <Tooltip label="Ассистент (персона) этого чата">
+                        <Badge size="sm" variant="light" color="grape" leftSection={<IconRobot size={11} />}>
+                          {aName}
+                        </Badge>
+                      </Tooltip>
+                    ) : null;
+                  })()}
                   <Tooltip label="Переименовать чат">
                     <ActionIcon
                       variant="subtle"

@@ -294,7 +294,7 @@ export function AppShellLayout() {
             {assistantsData && assistantsData.length > 1 && (
               <Select
                 size="xs" mb={8} px={4}
-                label="Ассистент (фильтр + для новых чатов)"
+                label="Ассистент"
                 placeholder="Все ассистенты"
                 data={assistantsData.map((a) => ({
                   value: a.id, label: a.name + (a.is_default ? ' (по умолчанию)' : ''),

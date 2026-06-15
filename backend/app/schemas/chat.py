@@ -21,6 +21,7 @@ class ChatResponse(BaseModel):
     tenant_id: str
     api_key_id: str | None = None
     assistant_id: str | None = None
+    assistant_name: str | None = None
     title: str | None
     description: str | None
     status: str

@@ -19,6 +19,7 @@ from app.core.database import get_db
 from app.models.admin_user import AdminUser
 from app.models.tenant import Tenant
 from app.models.chat import Chat
+from app.models.assistant import Assistant
 from app.models.message import Message
 from app.models.message_attachment import MessageAttachment
 from app.models.artifact import Artifact
@@ -35,12 +36,13 @@ router = APIRouter(
 )
 
 
-def _chat_to_response(c: Chat, message_count: int | None = None) -> ChatResponse:
+def _chat_to_response(c: Chat, message_count: int | None = None, assistant_name: str | None = None) -> ChatResponse:
     return ChatResponse(
         id=str(c.id),
         tenant_id=str(c.tenant_id),
         api_key_id=str(c.api_key_id) if c.api_key_id else None,
         assistant_id=str(c.assistant_id) if c.assistant_id else None,
+        assistant_name=assistant_name,
         title=c.title,
         description=c.description,
         status=c.status,
@@ -147,6 +149,7 @@ async def list_chats(
 
     # Message counts for this page in one grouped query.
     counts: dict = {}
+    anames: dict = {}
     if items:
         ids = [c.id for c in items]
         rows = (await db.execute(
@@ -155,9 +158,16 @@ async def list_chats(
             .group_by(Message.chat_id)
         )).all()
         counts = {cid: n for cid, n in rows}
+        # Assistant names for this page.
+        aids = {c.assistant_id for c in items if c.assistant_id}
+        if aids:
+            arows = (await db.execute(
+                select(Assistant.id, Assistant.name).where(Assistant.id.in_(aids))
+            )).all()
+            anames = {aid: name for aid, name in arows}
 
     return PaginatedResponse[ChatResponse](
-        items=[_chat_to_response(c, counts.get(c.id, 0)) for c in items],
+        items=[_chat_to_response(c, counts.get(c.id, 0), anames.get(c.assistant_id)) for c in items],
         total_count=total,
         page=page,
         page_size=page_size,
