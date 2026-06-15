@@ -3652,6 +3652,11 @@ async def _select_relevant_tools(
     has_enough_embeddings = embedding_model and db is not None and tenant_id and len(embeddable) >= len(rest) // 2
     semantic_selected: list = []
     non_embedded_fallback: list = []
+    # True once semantic search actually executed. When it did, an empty result
+    # (everything below the floor) is a DELIBERATE "no relevant tools" — for
+    # conversational/identity queries ("кто ты?") we must NOT escalate to the
+    # keyword/LLM-pick fallbacks, which would force-pick an irrelevant tool.
+    semantic_ran = False
     if has_enough_embeddings:
         try:
             from app.services.tools.embedder import search_tools
@@ -3662,6 +3667,7 @@ async def _select_relevant_tools(
                 embedding_model=embedding_model,
                 top_k=TOOL_SEMANTIC_TOPK,
             )
+            semantic_ran = True
             if semantic_results:
                 # Apply per-tenant similarity floor — tools below it are noisy
                 # "kinda matches" that crowd the prompt without adding signal.
@@ -3703,8 +3709,10 @@ async def _select_relevant_tools(
             parts.append("non-embedded-fallback")
         selection_method = "+".join(parts)
 
-    # Tier 3 — keyword fallback (also used for small tenants without embeddings)
-    if not selected and len(rest) <= TOOL_KEYWORD_THRESHOLD:
+    # Tier 3 — keyword fallback (only when semantic search couldn't run, i.e.
+    # tenant lacks embeddings). If semantic ran and kept nothing, that's a
+    # deliberate "no tools" — don't force a keyword/LLM pick.
+    if not selected and not semantic_ran and len(rest) <= TOOL_KEYWORD_THRESHOLD:
         try:
             selected = _keyword_match_tools(rest, user_message)
             for t in selected:
@@ -3713,8 +3721,8 @@ async def _select_relevant_tools(
         except Exception:
             logger.exception("keyword tool selection failed")
 
-    # Tier 4 — last resort, LLM picks from name+description list
-    if not selected:
+    # Tier 4 — last resort LLM pick, also only when semantic didn't run.
+    if not selected and not semantic_ran:
         try:
             selected = await _llm_select_tools(rest, user_message, provider, model_name)
             for t in selected:
@@ -3723,6 +3731,9 @@ async def _select_relevant_tools(
         except Exception:
             selected = []
             selection_method = "fallback-empty"
+
+    if not selected and semantic_ran and not selection_method:
+        selection_method = "semantic-empty"  # no tool cleared the floor — answer directly
 
     # Pinned tools are "system-essentials" (memory/artifacts/RAG helpers).
     # They go in ABOVE the budget — budget only constrains the non-pinned
