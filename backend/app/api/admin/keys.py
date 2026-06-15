@@ -35,6 +35,8 @@ def _key_to_response(k: TenantApiKey) -> TenantApiKeyResponse:
         key_prefix=k.key_prefix,
         group_id=str(k.group_id) if k.group_id else None,
         group_name=getattr(k, "group_name", None),
+        assistant_id=str(k.assistant_id) if k.assistant_id else None,
+        assistant_name=getattr(k, "assistant_name", None),
         memory_prompt=k.memory_prompt,
         allowed_tool_ids=k.allowed_tool_ids,
         is_active=k.is_active,
@@ -133,6 +135,19 @@ async def create_key(
             raise HTTPException(status_code=404, detail="API key group not found.")
     await _validate_allowed_tool_ids(tenant_id, body.allowed_tool_ids, db)
 
+    assistant_uuid = None
+    if body.assistant_id:
+        from app.models.assistant import Assistant
+        a = (await db.execute(
+            select(Assistant).where(
+                Assistant.id == uuid.UUID(body.assistant_id),
+                Assistant.tenant_id == tenant_id,
+            )
+        )).scalars().first()
+        if not a:
+            raise HTTPException(status_code=404, detail="Assistant not found.")
+        assistant_uuid = a.id
+
     raw_key, prefix, key_hash = generate_api_key()
     api_key = TenantApiKey(
         tenant_id=tenant_id,
@@ -141,6 +156,7 @@ async def create_key(
         key_hash=key_hash,
         expires_at=body.expires_at,
         group_id=group.id if group else None,
+        assistant_id=assistant_uuid,
         memory_prompt=body.memory_prompt,
         allowed_tool_ids=body.allowed_tool_ids,
     )
@@ -155,6 +171,7 @@ async def create_key(
         key_prefix=api_key.key_prefix,
         group_id=str(api_key.group_id) if api_key.group_id else None,
         group_name=group.name if group else None,
+        assistant_id=str(api_key.assistant_id) if api_key.assistant_id else None,
         memory_prompt=api_key.memory_prompt,
         allowed_tool_ids=api_key.allowed_tool_ids,
         is_active=api_key.is_active,
@@ -206,8 +223,23 @@ async def deactivate_key(
             key.group_id = None
             group_name = None
 
+    if "assistant_id" in body.model_fields_set:
+        if body.assistant_id:
+            from app.models.assistant import Assistant
+            a = (await db.execute(
+                select(Assistant).where(
+                    Assistant.id == uuid.UUID(body.assistant_id),
+                    Assistant.tenant_id == tenant_id,
+                )
+            )).scalars().first()
+            if not a:
+                raise HTTPException(status_code=404, detail="Assistant not found.")
+            key.assistant_id = a.id
+        else:
+            key.assistant_id = None
+
     for field, value in body.model_dump(exclude_unset=True).items():
-        if field == "group_id":
+        if field in ("group_id", "assistant_id"):
             continue
         setattr(key, field, value)
     await db.flush()

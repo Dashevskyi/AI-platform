@@ -69,6 +69,7 @@ import {
   toolsApi,
   dataSourcesApi,
   builtinToolsApi,
+  assistantsApi,
 } from '../shared/api/endpoints';
 import type { BuiltinToolItem, SimulateResponse } from '../shared/api/endpoints';
 import { ParametersEditor, type JsonSchema as JsonSchemaType } from '../components/Tools/ParametersEditor';
@@ -315,6 +316,7 @@ function ApiKeysTab({ tenantId }: { tenantId: string }) {
   const [createOpen, setCreateOpen] = useState(false);
   const [keyName, setKeyName] = useState('');
   const [keyGroupId, setKeyGroupId] = useState<string | null>(null);
+  const [keyAssistantId, setKeyAssistantId] = useState<string | null>(null);
   const [keyMemoryPrompt, setKeyMemoryPrompt] = useState('');
   const [keyAllowedToolsRestricted, setKeyAllowedToolsRestricted] = useState(false);
   const [keyAllowedToolIds, setKeyAllowedToolIds] = useState<string[]>([]);
@@ -332,6 +334,14 @@ function ApiKeysTab({ tenantId }: { tenantId: string }) {
     queryKey: ['tenants', tenantId, 'keys', page],
     queryFn: () => keysApi.list(tenantId, page),
   });
+
+  const { data: assistantsForKeys } = useQuery({
+    queryKey: ['tenants', tenantId, 'assistants'],
+    queryFn: () => assistantsApi.list(tenantId),
+  });
+  const assistantOptions = (assistantsForKeys || []).map((a) => ({
+    value: a.id, label: a.name + (a.is_default ? ' (по умолчанию)' : ''),
+  }));
 
   const { data: groupsData } = useQuery({
     queryKey: ['tenants', tenantId, 'key-groups'],
@@ -387,6 +397,7 @@ function ApiKeysTab({ tenantId }: { tenantId: string }) {
     mutationFn: () => keysApi.create(tenantId, {
       name: keyName,
       group_id: keyGroupId || undefined,
+      assistant_id: keyAssistantId,
       memory_prompt: keyMemoryPrompt || undefined,
       allowed_tool_ids: keyAllowedToolsRestricted ? keyAllowedToolIds : null,
     }),
@@ -395,6 +406,7 @@ function ApiKeysTab({ tenantId }: { tenantId: string }) {
       setCreateOpen(false);
       setKeyName('');
       setKeyGroupId(null);
+      setKeyAssistantId(null);
       setKeyMemoryPrompt('');
       setKeyAllowedToolsRestricted(false);
       setKeyAllowedToolIds([]);
@@ -414,6 +426,7 @@ function ApiKeysTab({ tenantId }: { tenantId: string }) {
       setEditKey(null);
       setKeyName('');
       setKeyGroupId(null);
+      setKeyAssistantId(null);
       setKeyMemoryPrompt('');
       setKeyAllowedToolsRestricted(false);
       setKeyAllowedToolIds([]);
@@ -505,6 +518,7 @@ function ApiKeysTab({ tenantId }: { tenantId: string }) {
     setEditKey(null);
     setKeyName('');
     setKeyGroupId(null);
+    setKeyAssistantId(null);
     setKeyMemoryPrompt('');
     setKeyAllowedToolsRestricted(false);
     setKeyAllowedToolIds([]);
@@ -515,6 +529,7 @@ function ApiKeysTab({ tenantId }: { tenantId: string }) {
     setEditKey(key);
     setKeyName(key.name);
     setKeyGroupId(key.group_id);
+    setKeyAssistantId(key.assistant_id ?? null);
     setKeyMemoryPrompt(key.memory_prompt || '');
     const keyPermissions = normalizePermissionList(key.allowed_tool_ids);
     setKeyAllowedToolsRestricted(keyPermissions.restricted);
@@ -762,6 +777,7 @@ function ApiKeysTab({ tenantId }: { tenantId: string }) {
                 payload: {
                   name: keyName,
                   group_id: keyGroupId || null,
+                  assistant_id: keyAssistantId,
                   memory_prompt: keyMemoryPrompt || null,
                   allowed_tool_ids: keyAllowedToolsRestricted ? keyAllowedToolIds : null,
                 },
@@ -785,6 +801,16 @@ function ApiKeysTab({ tenantId }: { tenantId: string }) {
               data={groupOptions}
               value={keyGroupId || ''}
               onChange={(value) => setKeyGroupId(value || null)}
+            />
+            <Select
+              label="Ассистент (персона канала)"
+              description="Чаты по этому ключу пойдут от имени выбранного ассистента; пусто = ассистент по умолчанию"
+              placeholder="Ассистент по умолчанию"
+              data={assistantOptions}
+              value={keyAssistantId}
+              onChange={setKeyAssistantId}
+              clearable
+              searchable
             />
             <Textarea
               label="Память ключа"

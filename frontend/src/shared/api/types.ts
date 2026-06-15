@@ -94,6 +94,8 @@ export interface TenantApiKey {
   key_prefix: string;
   group_id: string | null;
   group_name: string | null;
+  assistant_id?: string | null;
+  assistant_name?: string | null;
   memory_prompt: string | null;
   allowed_tool_ids: string[] | null;
   is_active: boolean;
@@ -106,6 +108,7 @@ export interface TenantApiKeyCreate {
   name: string;
   expires_at?: string;
   group_id?: string;
+  assistant_id?: string | null;
   memory_prompt?: string;
   allowed_tool_ids?: string[] | null;
 }
@@ -119,6 +122,7 @@ export interface TenantApiKeyUpdate {
   expires_at?: string | null;
   is_active?: boolean;
   group_id?: string | null;
+  assistant_id?: string | null;
   memory_prompt?: string | null;
   allowed_tool_ids?: string[] | null;
 }

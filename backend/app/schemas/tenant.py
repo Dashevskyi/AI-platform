@@ -44,6 +44,7 @@ class TenantApiKeyCreate(BaseModel):
     name: str
     expires_at: datetime | None = None
     group_id: str | None = None
+    assistant_id: str | None = None
     memory_prompt: str | None = None
     allowed_tool_ids: list[str] | None = None
 
@@ -53,6 +54,7 @@ class TenantApiKeyUpdate(BaseModel):
     expires_at: datetime | None = None
     is_active: bool | None = None
     group_id: str | None = None
+    assistant_id: str | None = None
     memory_prompt: str | None = None
     allowed_tool_ids: list[str] | None = None
 
@@ -88,6 +90,8 @@ class TenantApiKeyResponse(BaseModel):
     key_prefix: str
     group_id: str | None
     group_name: str | None
+    assistant_id: str | None = None
+    assistant_name: str | None = None
     memory_prompt: str | None
     allowed_tool_ids: list[str] | None
     is_active: bool
