@@ -331,10 +331,7 @@ export function AppShellLayout() {
         )}
       </MantineAppShell.Navbar>
 
-      {/* Chat view supplies its own top padding (chat header) — drop only the
-          Main TOP padding on the chat route to avoid a double top gap, keeping
-          side/bottom padding so nothing crowds the edges. */}
-      <MantineAppShell.Main pt={location.pathname.includes('/chat/') ? 0 : undefined}>
+      <MantineAppShell.Main>
         <Outlet />
       </MantineAppShell.Main>
 
