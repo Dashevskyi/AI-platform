@@ -1047,9 +1047,19 @@ async def explain_tier0(
                     result = None
                 if result is not None:
                     if not result.success or not result.output:
+                        _err = (getattr(result, "error", None) or "").strip()
+                        if _err:
+                            _detail = f"ошибка инструмента: {_err}"
+                        elif result.success:
+                            _detail = "инструмент вернул пустой ответ (0 записей)"
+                        else:
+                            _detail = "инструмент вернул неуспех без текста ошибки"
                         steps.append({"label": "Вызов инструмента", "status": "fail",
-                                      "detail": "инструмент вернул ошибку/пусто"})
-                        decision["reason"] = "инструмент вернул неуспех или пустой ответ"
+                                      "detail": _detail[:1500]})
+                        decision["reason"] = _detail[:800]
+                        # Some tools put error text in output, not error — show it too.
+                        if result.output:
+                            decision["tool_output"] = result.output[:4000]
                     else:
                         decision["tool_output"] = (result.output or "")[:4000]
                         steps.append({"label": "Вызов инструмента", "status": "ok",
