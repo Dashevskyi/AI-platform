@@ -41,6 +41,7 @@ from app.api.admin.tier0 import router as tier0_router
 from app.api.admin.retrieval_test import router as retrieval_test_router
 from app.api.admin.assistants import router as assistants_router
 from app.api.admin.data_introspect import router as data_introspect_router
+from app.api.admin.tool_builder import router as tool_builder_router
 from app.api.admin.tts_local import router as tts_local_router
 from app.api.admin.stats import router as stats_router
 from app.api.admin.audit import router as audit_router
@@ -192,6 +193,7 @@ app.include_router(tier0_router)
 app.include_router(retrieval_test_router)
 app.include_router(assistants_router)
 app.include_router(data_introspect_router)
+app.include_router(tool_builder_router)
 app.include_router(tts_local_router)
 app.include_router(stats_router)
 app.include_router(audit_router)
