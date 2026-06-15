@@ -666,22 +666,13 @@ export function AiChat({
                 justify="space-between"
                 style={{ borderBottom: '1px solid var(--mantine-color-default-border)' }}
               >
-                <Group gap="xs">
+                <Stack gap={2}>
+                  <Group gap="xs">
                   <Text fw={500}>
                     {chatsData?.items.find((c) => c.id === activeChatId)?.title ||
                       chatsData?.items.find((c) => c.id === activeChatId)?.description ||
                       'Новый чат'}
                   </Text>
-                  {(() => {
-                    const aName = chatsData?.items.find((c) => c.id === activeChatId)?.assistant_name;
-                    return aName ? (
-                      <Tooltip label="Ассистент (персона) этого чата">
-                        <Badge size="sm" variant="light" color="grape" leftSection={<IconRobot size={11} />}>
-                          {aName}
-                        </Badge>
-                      </Tooltip>
-                    ) : null;
-                  })()}
                   <Tooltip label="Переименовать чат">
                     <ActionIcon
                       variant="subtle"
@@ -724,7 +715,17 @@ export function AiChat({
                       </Badge>
                     </Tooltip>
                   )}
-                </Group>
+                  </Group>
+                  {(() => {
+                    const aName = chatsData?.items.find((c) => c.id === activeChatId)?.assistant_name;
+                    return aName ? (
+                      <Group gap={4} pl={2} wrap="nowrap">
+                        <IconRobot size={12} color="var(--mantine-color-grape-5)" />
+                        <Text size="xs" c="dimmed">{aName}</Text>
+                      </Group>
+                    ) : null;
+                  })()}
+                </Stack>
                 <Group gap={4}>
                   <Tooltip label="Голосовой режим">
                     <ActionIcon
