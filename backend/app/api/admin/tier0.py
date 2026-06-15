@@ -592,8 +592,53 @@ def _validate_example(cfg: dict, query: str) -> dict:
             "blocked": False, "reason": "без сущности (вызов без аргументов)"}
 
 
+# Built-in conversational controls EVERY tier0 keyword_regex is tested against —
+# independent of user-supplied negatives. A regex that matches any of these is
+# over-permissive ("greedy"): its triggers are effectively optional, so it fires
+# on small talk / identity / capability questions and hijacks them into a tool
+# call. The classic failure is a regex ending in a bare `(.+)$` with all prefix
+# groups marked optional.
+_TIER0_CONVERSATIONAL_CONTROLS = [
+    "привет", "кто ты?", "кто ты", "спасибо", "что ты умеешь",
+    "как дела", "пока", "доброе утро", "помоги мне", "расскажи о себе",
+    "привіт", "хто ти?", "дякую", "що ти вмієш",
+    "hi", "who are you", "thanks", "what can you do",
+]
+
+
+def _greedy_regex_check(cfg: dict) -> dict | None:
+    """Test a keyword_extract cfg against the built-in conversational controls.
+    Returns a warning dict listing any controls it wrongly matches, or None
+    when the regex is well-scoped (no control matches)."""
+    if (cfg.get("required_entity") or "") != "keyword_extract":
+        return None
+    if not (cfg.get("keyword_regex") or "").strip():
+        return None
+    hits = []
+    for q in _TIER0_CONVERSATIONAL_CONTROLS:
+        try:
+            r = _validate_example(cfg, q)
+        except Exception:
+            continue
+        if r.get("matched") and not r.get("blocked"):
+            hits.append(q)
+    if not hits:
+        return None
+    return {
+        "greedy": True,
+        "matched_controls": hits,
+        "message": (
+            "keyword_regex срабатывает на разговорных фразах "
+            f"({', '.join(repr(h) for h in hits[:5])}{'…' if len(hits) > 5 else ''}) — "
+            "он слишком общий: сделай триггер ОБЯЗАТЕЛЬНЫМ (глагол поиска и/или "
+            "ключевое слово), а не заканчивай голым (.+)$ со всеми группами в (?:...)?."
+        ),
+    }
+
+
 def _validate_tier0(cfg: dict, positives: list[str], negatives: list[str]) -> dict:
-    """Run cfg against positives (should match) and negatives (should NOT)."""
+    """Run cfg against positives (should match) and negatives (should NOT),
+    plus the built-in conversational controls (greedy-regex guard)."""
     pos = []
     for q in positives:
         r = _validate_example(cfg, q)
@@ -613,6 +658,7 @@ def _validate_tier0(cfg: dict, positives: list[str], negatives: list[str]) -> di
         "passed": passed,
         "total": len(all_rows),
         "all_ok": passed == len(all_rows) and len(all_rows) > 0,
+        "greedy_warning": _greedy_regex_check(cfg),
     }
 
 

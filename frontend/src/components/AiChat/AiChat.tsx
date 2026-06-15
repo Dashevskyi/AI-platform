@@ -662,11 +662,12 @@ export function AiChat({
             {/* Chat header */}
             {features.showChatControls && (
               <Group
-                p="sm"
+                px="sm"
+                py="xs"
                 justify="space-between"
                 style={{ borderBottom: '1px solid var(--mantine-color-default-border)' }}
               >
-                <Stack gap={2}>
+                <Stack gap={0}>
                   <Group gap="xs">
                   <Text fw={500}>
                     {chatsData?.items.find((c) => c.id === activeChatId)?.title ||

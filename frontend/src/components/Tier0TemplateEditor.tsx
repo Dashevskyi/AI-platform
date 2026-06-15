@@ -2311,7 +2311,10 @@ export function Tier0TemplateEditor({ value, onChange, tenantId, toolName, toolD
   type WizardResult = {
     explanation: string;
     suggestion: Record<string, unknown>;
-    validation: { results: ValRow[]; passed: number; total: number; all_ok: boolean };
+    validation: {
+      results: ValRow[]; passed: number; total: number; all_ok: boolean;
+      greedy_warning?: { matched_controls: string[]; message: string } | null;
+    };
   };
   const [wizardOpen, setWizardOpen] = useState(false);
   const [wizPos, setWizPos] = useState('');
@@ -3308,6 +3311,12 @@ export function Tier0TemplateEditor({ value, onChange, tenantId, toolName, toolD
                 {wizResult.validation.passed} / {wizResult.validation.total} OK
               </Badge>
             </Group>
+
+            {wizResult.validation.greedy_warning && (
+              <Alert color="red" variant="light" title="Слишком общий keyword_regex">
+                <Text size="sm">{wizResult.validation.greedy_warning.message}</Text>
+              </Alert>
+            )}
 
             {wizResult.validation.results.length > 0 && (
               <Table withTableBorder withColumnBorders verticalSpacing={4} fz="xs">
