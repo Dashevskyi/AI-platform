@@ -1,9 +1,9 @@
 import { useEffect, useState, useCallback } from 'react';
 import {
   Stack, Card, Text, Group, Button, TextInput, Textarea, Select, MultiSelect,
-  Badge, ActionIcon, Switch, Loader, Alert, Divider, Code,
+  Badge, ActionIcon, Switch, Loader, Alert, Divider, Code, Modal,
 } from '@mantine/core';
-import { IconPlus, IconTrash, IconRobot, IconDeviceFloppy } from '@tabler/icons-react';
+import { IconPlus, IconTrash, IconRobot, IconDeviceFloppy, IconPencil } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
 import { assistantsApi, toolsApi, modelsApi, type Assistant } from '../../shared/api/endpoints';
 
@@ -53,7 +53,6 @@ function AssistantEditor({
   const [saving, setSaving] = useState(false);
   useEffect(() => { setD(toDraft(assistant)); }, [assistant]);
 
-  // Override helpers: empty string / inherit removes the key.
   const ovStr = (key: string) => (d.overrides[key] as string | undefined) ?? INHERIT;
   const setOvStr = (key: string, val: string) => setD((p) => {
     const o = { ...p.overrides };
@@ -105,42 +104,26 @@ function AssistantEditor({
   const overrideCount = Object.keys(d.overrides).length;
 
   return (
-    <Card withBorder padding="md">
-      <Group justify="space-between" mb="sm">
-        <Group gap="xs">
-          <IconRobot size={18} />
-          <Text fw={600}>{assistant.name}</Text>
-          {assistant.is_default && <Badge size="sm" color="blue">по умолчанию</Badge>}
-          {!assistant.is_active && <Badge size="sm" color="gray">выключен</Badge>}
-          <Badge size="sm" variant="light">{overrideCount} оверрайд(ов)</Badge>
-        </Group>
-        <Group gap="xs">
-          <Button size="xs" leftSection={<IconDeviceFloppy size={14} />} loading={saving} onClick={save}>Сохранить</Button>
-          {!assistant.is_default && (
-            <ActionIcon variant="subtle" color="red" onClick={remove}><IconTrash size={16} /></ActionIcon>
-          )}
-        </Group>
-      </Group>
-
-      <Group grow mb="sm">
+    <Stack gap="sm">
+      <Group grow>
         <TextInput label="Имя" value={d.name} onChange={(e) => setD((p) => ({ ...p, name: e.currentTarget.value }))} />
         <TextInput label="Описание" value={d.description} onChange={(e) => setD((p) => ({ ...p, description: e.currentTarget.value }))} />
       </Group>
-      <Group mb="sm" gap="lg">
+      <Group gap="lg">
         <Switch label="По умолчанию" checked={d.is_default} onChange={(e) => setD((p) => ({ ...p, is_default: e.currentTarget.checked }))} disabled={assistant.is_default} />
         <Switch label="Активен" checked={d.is_active} onChange={(e) => setD((p) => ({ ...p, is_active: e.currentTarget.checked }))} disabled={assistant.is_default} />
       </Group>
 
-      <Divider label="Переопределения (пусто = наследовать от тенанта)" labelPosition="left" my="sm" />
+      <Divider label="Переопределения (пусто = наследовать от тенанта)" labelPosition="left" />
 
       <Textarea label="Системный промт" autosize minRows={2} maxRows={10}
         placeholder="(наследовать общий промт тенанта)"
-        value={ovStr('system_prompt')} onChange={(e) => setOvStr('system_prompt', e.currentTarget.value)} mb="sm" />
+        value={ovStr('system_prompt')} onChange={(e) => setOvStr('system_prompt', e.currentTarget.value)} />
       <Textarea label="Онтология (ontology_prompt)" autosize minRows={2} maxRows={8}
         placeholder="(наследовать)"
-        value={ovStr('ontology_prompt')} onChange={(e) => setOvStr('ontology_prompt', e.currentTarget.value)} mb="sm" />
+        value={ovStr('ontology_prompt')} onChange={(e) => setOvStr('ontology_prompt', e.currentTarget.value)} />
 
-      <Group grow mb="sm">
+      <Group grow>
         <Select label="Язык ответа" data={LANG_OPTS} value={ovStr('response_language')} onChange={(v) => setOvStr('response_language', v || INHERIT)} />
         <Select label="Tier 0" data={TRI} value={ovBool('tier0_enabled')} onChange={(v) => setOvBool('tier0_enabled', v || INHERIT)} />
         <Select label="Авто-лимит tools" data={TRI} value={ovBool('tool_limit_auto')} onChange={(v) => setOvBool('tool_limit_auto', v || INHERIT)} />
@@ -151,23 +134,29 @@ function AssistantEditor({
         description="Своя модель для этого ассистента; пусто = модель тенанта"
         data={[{ value: INHERIT, label: '— модель тенанта —' }, ...modelOptions]}
         value={ovStr('model_id')} onChange={(v) => setOvStr('model_id', v || INHERIT)}
-        searchable clearable mb="sm"
+        searchable clearable
       />
 
       <MultiSelect
         label="Доступные инструменты (пусто = все инструменты тенанта)"
-        description="Сужает набор tools для этого ассистента; пересекается с правами API-ключа"
+        description="Выбери из списка; сужает набор tools для ассистента, пересекается с правами API-ключа"
         data={toolOptions} searchable clearable
         value={d.allowed_tool_ids ?? []}
         onChange={(v) => setD((p) => ({ ...p, allowed_tool_ids: v.length ? v : null }))}
-        mb="sm"
       />
 
       <Text size="xs" c="dimmed">
-        Ключи оверрайдов: {overrideCount ? <Code>{Object.keys(d.overrides).join(', ')}</Code> : '—'}.
-        Остальные настройки (модель, эмбеддинги, KB, память) — общие на уровне тенанта.
+        Активных оверрайдов: {overrideCount}{overrideCount ? <> — <Code>{Object.keys(d.overrides).join(', ')}</Code></> : ''}.
+        Остальное (эмбеддинги, KB, память) — общее на уровне тенанта.
       </Text>
-    </Card>
+
+      <Group justify="space-between" mt="sm">
+        {!assistant.is_default
+          ? <Button variant="subtle" color="red" leftSection={<IconTrash size={14} />} onClick={remove}>Удалить</Button>
+          : <span />}
+        <Button leftSection={<IconDeviceFloppy size={14} />} loading={saving} onClick={save}>Сохранить</Button>
+      </Group>
+    </Stack>
   );
 }
 
@@ -176,9 +165,13 @@ export function AssistantsTab({ tenantId }: { tenantId: string }) {
   const [toolOptions, setToolOptions] = useState<{ value: string; label: string }[]>([]);
   const [modelOptions, setModelOptions] = useState<{ value: string; label: string }[]>([]);
   const [creating, setCreating] = useState(false);
+  const [editing, setEditing] = useState<Assistant | null>(null);
 
-  const reload = useCallback(() => {
-    assistantsApi.list(tenantId).then(setList).catch(() => setList([]));
+  const reload = useCallback(async () => {
+    const rows = await assistantsApi.list(tenantId).catch(() => []);
+    setList(rows);
+    // keep the open modal's data fresh
+    setEditing((cur) => (cur ? rows.find((r) => r.id === cur.id) ?? null : cur));
   }, [tenantId]);
 
   useEffect(() => {
@@ -194,8 +187,9 @@ export function AssistantsTab({ tenantId }: { tenantId: string }) {
   async function createNew() {
     setCreating(true);
     try {
-      await assistantsApi.create(tenantId, { name: 'Новый ассистент', overrides: {} });
-      reload();
+      const a = await assistantsApi.create(tenantId, { name: 'Новый ассистент', overrides: {} });
+      await reload();
+      setEditing(a); // open the editor for the freshly created one
     } catch (e: unknown) {
       notifications.show({ title: 'Ошибка', message: (e as Error).message, color: 'red' });
     } finally { setCreating(false); }
@@ -218,10 +212,51 @@ export function AssistantsTab({ tenantId }: { tenantId: string }) {
 
       {list.length === 0 && <Alert color="gray">Нет ассистентов. Должен быть хотя бы один по умолчанию.</Alert>}
 
-      {list.map((a) => (
-        <AssistantEditor key={a.id} tenantId={tenantId} assistant={a} toolOptions={toolOptions}
-          modelOptions={modelOptions} onSaved={reload} onDeleted={reload} />
-      ))}
+      <Stack gap="xs">
+        {list.map((a) => {
+          const oc = Object.keys(a.overrides || {}).length;
+          return (
+            <Card key={a.id} withBorder padding="sm"
+              style={{ cursor: 'pointer' }} onClick={() => setEditing(a)}>
+              <Group justify="space-between" wrap="nowrap">
+                <Group gap="xs" wrap="nowrap" style={{ minWidth: 0 }}>
+                  <IconRobot size={18} />
+                  <div style={{ minWidth: 0 }}>
+                    <Group gap={6}>
+                      <Text fw={600} truncate>{a.name}</Text>
+                      {a.is_default && <Badge size="sm" color="blue">по умолчанию</Badge>}
+                      {!a.is_active && <Badge size="sm" color="gray">выключен</Badge>}
+                    </Group>
+                    {a.description && <Text size="xs" c="dimmed" truncate>{a.description}</Text>}
+                  </div>
+                </Group>
+                <Group gap="xs" wrap="nowrap">
+                  <Badge size="sm" variant="light">{oc} оверрайд(ов)</Badge>
+                  <ActionIcon variant="subtle" onClick={(e) => { e.stopPropagation(); setEditing(a); }}>
+                    <IconPencil size={16} />
+                  </ActionIcon>
+                </Group>
+              </Group>
+            </Card>
+          );
+        })}
+      </Stack>
+
+      <Modal
+        opened={!!editing}
+        onClose={() => setEditing(null)}
+        size="lg"
+        title={<Group gap="xs"><IconRobot size={18} /><Text fw={600}>{editing?.name}</Text></Group>}
+      >
+        {editing && (
+          <AssistantEditor
+            tenantId={tenantId} assistant={editing}
+            toolOptions={toolOptions} modelOptions={modelOptions}
+            onSaved={reload}
+            onDeleted={() => { setEditing(null); reload(); }}
+          />
+        )}
+      </Modal>
     </Stack>
   );
 }
