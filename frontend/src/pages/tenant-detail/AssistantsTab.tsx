@@ -237,7 +237,9 @@ export function AssistantsTab({ tenantId }: { tenantId: string }) {
                       {a.is_default && <Badge size="sm" color="blue">по умолчанию</Badge>}
                       {!a.is_active && <Badge size="sm" color="gray">выключен</Badge>}
                     </Group>
-                    {a.description && <Text size="xs" c="dimmed" truncate>{a.description}</Text>}
+                    <Text size="xs" c="dimmed" truncate fs={a.description ? undefined : 'italic'}>
+                      {a.description || 'без описания'}
+                    </Text>
                   </div>
                 </Group>
                 <Group gap="xs" wrap="nowrap">
