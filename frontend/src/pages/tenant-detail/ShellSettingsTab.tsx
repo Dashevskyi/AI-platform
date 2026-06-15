@@ -39,6 +39,7 @@ import {
   IconRefresh,
   IconRobot,
   IconVolume,
+  IconBolt,
 } from '@tabler/icons-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { notifications } from '@mantine/notifications';
@@ -294,7 +295,7 @@ function TTSSection({
             }
             data={[
               { value: 'system', label: '🖥 Системный (по умолчанию платформы)' },
-              { value: 'silero', label: '⚡ Silero v5 (локальный, MIT, быстрый)' },
+              { value: 'silero', label: 'Silero v5 (локальный, MIT, быстрый)' },
               { value: 'elevenlabs', label: '☁️ ElevenLabs (свой ключ)' },
             ]}
             value={provider}
@@ -1154,7 +1155,7 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
                 </Fieldset>
 
                 {/* ── Tier 0 routing ────────────────────────────────────── */}
-                <Fieldset legend={<Group gap={6}><Text fw={500}>⚡ Tier 0 routing</Text><Text size="xs" c="dimmed">— деterминистический шорткат без LLM</Text></Group>} variant="filled">
+                <Fieldset legend={<Group gap={6}><IconBolt size={15} /><Text fw={500}>Tier 0 routing</Text><Text size="xs" c="dimmed">— детерминистический шорткат без LLM</Text></Group>} variant="filled">
                   <Stack gap="sm">
                     <Group gap="lg">
                       <Tooltip

@@ -56,6 +56,9 @@ import {
   IconX,
   IconHelpCircle,
   IconInfoCircle,
+  IconBolt,
+  IconSearch,
+  IconRobot,
 } from '@tabler/icons-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { notifications } from '@mantine/notifications';
@@ -202,15 +205,15 @@ export function TenantDetailPage() {
           {has('keys') && <Tabs.Tab value="keys">API Ключи</Tabs.Tab>}
           {has('model_config') && <Tabs.Tab value="model">Модель</Tabs.Tab>}
           {has('shell_config') && <Tabs.Tab value="shell">Настройки оболочки</Tabs.Tab>}
-          {has('shell_config') && <Tabs.Tab value="assistants">🤖 Ассистенты</Tabs.Tab>}
+          {has('shell_config') && <Tabs.Tab value="assistants" leftSection={<IconRobot size={14} />}>Ассистенты</Tabs.Tab>}
           {has('data_sources') && <Tabs.Tab value="data-sources">Источники данных</Tabs.Tab>}
           {has('tools') && <Tabs.Tab value="tools">Инструменты</Tabs.Tab>}
           {has('kb') && <Tabs.Tab value="kb">База знаний</Tabs.Tab>}
           {has('memory') && <Tabs.Tab value="memory">Память</Tabs.Tab>}
           {has('chats') && <Tabs.Tab value="chats">Чаты</Tabs.Tab>}
           {has('logs') && <Tabs.Tab value="logs">Логи</Tabs.Tab>}
-          {has('logs') && <Tabs.Tab value="tier0">⚡ Tier 0</Tabs.Tab>}
-          {has('logs') && <Tabs.Tab value="retrieval">🔍 Поиск</Tabs.Tab>}
+          {has('logs') && <Tabs.Tab value="tier0" leftSection={<IconBolt size={14} />}>Tier 0</Tabs.Tab>}
+          {has('logs') && <Tabs.Tab value="retrieval" leftSection={<IconSearch size={14} />}>Поиск</Tabs.Tab>}
           {isSuperadmin && <Tabs.Tab value="stats">Статистика</Tabs.Tab>}
           {has('users') && <Tabs.Tab value="users">Пользователи</Tabs.Tab>}
           {isSuperadmin && <Tabs.Tab value="api-info">API</Tabs.Tab>}
@@ -3903,7 +3906,7 @@ function ToolsTab({ tenantId }: { tenantId: string }) {
                               )}
                               {readTier0Template(tool.config_json) !== null && (
                                 <Tooltip label="Tier 0: детерминированный ответ без LLM">
-                                  <Badge color="yellow" size="sm" variant="light">⚡ T0</Badge>
+                                  <Badge color="yellow" size="sm" variant="light" leftSection={<IconBolt size={11} />}>T0</Badge>
                                 </Tooltip>
                               )}
                             </Group>
@@ -4041,7 +4044,7 @@ function ToolsTab({ tenantId }: { tenantId: string }) {
               <Tabs.Tab value="params">Параметры</Tabs.Tab>
               <Tabs.Tab value="llm">Вид LLM</Tabs.Tab>
               <Tabs.Tab value="format">Форматирование</Tabs.Tab>
-              <Tabs.Tab value="tier0">⚡ Tier 0</Tabs.Tab>
+              <Tabs.Tab value="tier0" leftSection={<IconBolt size={14} />}>Tier 0</Tabs.Tab>
               <Tabs.Tab value="test">Тесты</Tabs.Tab>
               <Tabs.Tab value="simulate">Симуляция LLM</Tabs.Tab>
               <Tabs.Tab value="preview">Preview</Tabs.Tab>
