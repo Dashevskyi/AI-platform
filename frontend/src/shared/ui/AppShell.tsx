@@ -166,9 +166,7 @@ export function AppShellLayout() {
         breakpoint: 'sm',
         collapsed: { mobile: !opened },
       }}
-      // Chat view is full-bleed (its own header has padding) — avoid a double
-      // top gap from Main's padding stacking with the chat header.
-      padding={location.pathname.includes('/chat/') ? 0 : 'md'}
+      padding="md"
     >
       <MantineAppShell.Header>
         <Group h="100%" px="md" justify="space-between">
@@ -333,7 +331,10 @@ export function AppShellLayout() {
         )}
       </MantineAppShell.Navbar>
 
-      <MantineAppShell.Main>
+      {/* Chat view supplies its own top padding (chat header) — drop only the
+          Main TOP padding on the chat route to avoid a double top gap, keeping
+          side/bottom padding so nothing crowds the edges. */}
+      <MantineAppShell.Main pt={location.pathname.includes('/chat/') ? 0 : undefined}>
         <Outlet />
       </MantineAppShell.Main>
 
