@@ -176,9 +176,19 @@ export function AssistantsTab({ tenantId }: { tenantId: string }) {
 
   useEffect(() => {
     reload();
-    toolsApi.list(tenantId, 1, 500)
-      .then((p) => setToolOptions((p.items || []).map((t) => ({ value: t.id, label: t.name }))))
-      .catch(() => setToolOptions([]));
+    // Load all tenant tools (page_size is capped at 100 server-side; page
+    // through if a tenant has more so the picker is complete).
+    (async () => {
+      try {
+        const opts: { value: string; label: string }[] = [];
+        for (let page = 1; page <= 20; page++) {
+          const p = await toolsApi.list(tenantId, page, 100);
+          for (const t of p.items || []) opts.push({ value: t.id, label: t.name });
+          if (!p.items || p.items.length < 100) break;
+        }
+        setToolOptions(opts);
+      } catch { setToolOptions([]); }
+    })();
     modelsApi.brief()
       .then((ms) => setModelOptions((ms || []).map((m) => ({ value: m.id, label: m.name }))))
       .catch(() => setModelOptions([]));
