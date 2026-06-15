@@ -695,6 +695,35 @@ START of the query) and `re.IGNORECASE`. The capture group holds the value to ex
 - If a qualifier noun precedes the value ("order number X", "ticket for X"), include it
   in the regex so it is consumed: `(?:order(?:\\\\s+number)?|ticket\\\\s+for)\\\\s+([\\\\w\\\\s\\\\-\\\\.#]+?)(?:$|[?!.,;])`
 
+**CRITICAL — flexibility rules (this is where most regexes fail):**
+
+1. **At least ONE trigger keyword MUST be mandatory.** The regex must require a domain
+   word that identifies intent (the noun/verb naming the action or object). NEVER make
+   every group optional — a regex whose prefixes are all `(?:...)?` ending in a bare
+   `(.+)$` matches ANY text (including "привет", "кто ты") and hijacks small talk. The
+   platform rejects such "greedy" regexes.
+
+2. **Connectors are OPTIONAL; the keyword is REQUIRED.** Users phrase the SAME intent
+   inconsistently. If the positive examples vary like:
+     - "покажи запитку **на свиче** косарева 13"
+     - "найди запитку **на** косарева 113"   (no "свич" word)
+     - "кто запитка **свича** Металлургов 10"
+   the IDENTIFYING word is "запитк..." (mandatory); the connector ("на свиче" / "на" /
+   "свича") VARIES, so put it in an OPTIONAL non-capturing group, e.g.:
+     `(?:(?:покажи|найди|кто)\\\\s+)?запитк[ауиі]\\\\s+(?:(?:на\\\\s+)?свич[аеуії]*\\\\s+|на\\\\s+)?(.+?)(?:[?!.,;]|$)`
+
+3. **Match word STEMS, not one fixed case.** Russian/Ukrainian words decline. "запитка"
+   in queries appears as "запитку", "запитки", etc. Match the stem + a flexible ending:
+   `запитк[ауиіы]?` or `запитк\\\\w*` — NEVER hardcode a single form like "запитка" (it
+   will miss "запитку"). Same for verbs and connectors (свич[аеуії]*, адрес(?:у|і|а)?).
+
+4. **Verbs are usually optional, the object keyword is the anchor.** Make the leading
+   verb group optional `(?:(?:покажи|найди|show|...)\\\\s+)?` but keep the object word
+   mandatory, so "запитку косарева 7" (no verb) still matches.
+
+5. After drafting, mentally test against EVERY positive example AND against "привет" /
+   "кто ты" / "спасибо" — positives must match, conversational controls must NOT.
+
 ### `strip_prefixes`
 Strings stripped (case-insensitive) from the START of the captured keyword. Use only
 when a preposition/word sits directly before the value and the regex didn't consume it.
