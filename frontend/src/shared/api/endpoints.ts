@@ -435,10 +435,10 @@ export const chatsApi = {
     });
     return res.data;
   },
-  list: async (tenantId: string, page = 1, pageSize = 20): Promise<PaginatedResponse<Chat>> => {
-    const res = await apiClient.get(`/api/admin/tenants/${tenantId}/chats/`, {
-      params: { page, page_size: pageSize },
-    });
+  list: async (tenantId: string, page = 1, pageSize = 20, assistantId?: string | null): Promise<PaginatedResponse<Chat>> => {
+    const params: Record<string, unknown> = { page, page_size: pageSize };
+    if (assistantId) params.assistant_id = assistantId;
+    const res = await apiClient.get(`/api/admin/tenants/${tenantId}/chats/`, { params });
     return res.data;
   },
   create: async (tenantId: string, data: ChatCreate): Promise<Chat> => {

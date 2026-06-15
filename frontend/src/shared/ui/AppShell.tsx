@@ -130,25 +130,28 @@ export function AppShellLayout() {
   });
 
   const canSeeChats = hasPerm('chats');
-  const { data: chatsData, isLoading: chatsLoading } = useQuery({
-    queryKey: ['tenants', tenantId, 'chats', 'list'],
-    queryFn: () => chatsApi.list(tenantId!, 1, 10),
-    enabled: !!tenantId && canSeeChats,
-  });
 
-  // Assistants for the new-chat picker (shown only when a tenant has >1).
+  // Assistants for the dual-purpose selector (filter chats + target new chats).
+  // Shown only when a tenant has >1 assistant.
   const { data: assistantsData } = useQuery({
     queryKey: ['tenants', tenantId, 'assistants'],
     queryFn: () => assistantsApi.list(tenantId!),
     enabled: !!tenantId && canSeeChats && (isSuperadmin || isTenantAdmin),
   });
-  const [newChatAssistantId, setNewChatAssistantId] = useState<string | null>(null);
+  // Selected assistant: filters the chat list AND becomes the new chat's persona.
+  const [assistantFilter, setAssistantFilter] = useState<string | null>(null);
+
+  const { data: chatsData, isLoading: chatsLoading } = useQuery({
+    queryKey: ['tenants', tenantId, 'chats', 'list', assistantFilter],
+    queryFn: () => chatsApi.list(tenantId!, 1, 10, assistantFilter),
+    enabled: !!tenantId && canSeeChats,
+  });
 
   const handleCreateChat = async () => {
     if (!tenantId) return;
     const chat = await chatsApi.create(
       tenantId,
-      newChatAssistantId ? { assistant_id: newChatAssistantId } : {},
+      assistantFilter ? { assistant_id: assistantFilter } : {},
     );
     queryClient.invalidateQueries({ queryKey: ['tenants', tenantId, 'chats', 'list'] });
     navigate(`/tenants/${tenantId}/chat/${chat.id}`);
@@ -291,12 +294,13 @@ export function AppShellLayout() {
             {assistantsData && assistantsData.length > 1 && (
               <Select
                 size="xs" mb={8} px={4}
-                placeholder="Ассистент для нового чата"
+                label="Ассистент (фильтр + для новых чатов)"
+                placeholder="Все ассистенты"
                 data={assistantsData.map((a) => ({
                   value: a.id, label: a.name + (a.is_default ? ' (по умолчанию)' : ''),
                 }))}
-                value={newChatAssistantId}
-                onChange={setNewChatAssistantId}
+                value={assistantFilter}
+                onChange={setAssistantFilter}
                 clearable
               />
             )}

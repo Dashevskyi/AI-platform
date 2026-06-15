@@ -114,6 +114,7 @@ async def list_chats(
     status_filter: str | None = Query(None, alias="status"),
     search: str | None = Query(None),
     api_key_id: uuid.UUID | None = Query(None),
+    assistant_id: uuid.UUID | None = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
     await _verify_tenant(tenant_id, db)
@@ -132,6 +133,8 @@ async def list_chats(
         )
     if api_key_id:
         query = query.where(Chat.api_key_id == api_key_id)
+    if assistant_id:
+        query = query.where(Chat.assistant_id == assistant_id)
 
     query = query.order_by(Chat.created_at.desc())
 
