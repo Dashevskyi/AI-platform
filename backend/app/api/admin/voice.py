@@ -6,10 +6,14 @@ import re
 import uuid
 
 import httpx
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from datetime import datetime
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.voice_usage import VoiceUsage
 
 from app.api.deps import require_tenant_access
 from app.core.config import settings
@@ -203,3 +207,46 @@ async def text_to_speech_admin(
                     return
 
     return StreamingResponse(_fs_gen(), media_type="audio/mpeg")
+
+
+@router.get("/usage")
+async def voice_usage_summary(
+    tenant_id: uuid.UUID,
+    date_from: datetime | None = Query(None),
+    date_to: datetime | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: AdminUser = Depends(require_tenant_access),
+):
+    """Aggregated STT/TTS usage for billing: calls, units (chars for TTS /
+    seconds for STT) and cost, grouped by service and provider."""
+    q = (
+        select(
+            VoiceUsage.kind,
+            VoiceUsage.unit_type,
+            VoiceUsage.provider,
+            func.count().label("calls"),
+            func.coalesce(func.sum(VoiceUsage.units), 0).label("units"),
+            func.coalesce(func.sum(VoiceUsage.cost_usd), 0).label("cost_usd"),
+        )
+        .where(VoiceUsage.tenant_id == tenant_id)
+        .group_by(VoiceUsage.kind, VoiceUsage.unit_type, VoiceUsage.provider)
+        .order_by(VoiceUsage.kind)
+    )
+    if date_from:
+        q = q.where(VoiceUsage.created_at >= date_from)
+    if date_to:
+        q = q.where(VoiceUsage.created_at <= date_to)
+    rows = (await db.execute(q)).all()
+    return {
+        "items": [
+            {
+                "kind": r.kind,
+                "unit_type": r.unit_type,
+                "provider": r.provider,
+                "calls": int(r.calls),
+                "units": int(r.units),
+                "cost_usd": float(r.cost_usd or 0),
+            }
+            for r in rows
+        ]
+    }

@@ -387,6 +387,7 @@ async def send_message(
                 user_message_id=str(user_message.id),
                 api_key_id=chat_api_key_id,
                 voice_mode=getattr(body, "voice_mode", False),
+                actor=body.actor.model_dump() if body.actor else None,
             )
         except ThrottleRejected as exc:
             raise HTTPException(
@@ -599,6 +600,7 @@ async def send_message_stream(
                     api_key_id=chat_api_key_id,
                     on_event=emitter,
                     voice_mode=getattr(body, "voice_mode", False),
+                    actor=body.actor.model_dump() if body.actor else None,
                 )
                 # Pipeline writes LLMRequestLog via db.add — commit before session closes
                 await fresh_db.commit()

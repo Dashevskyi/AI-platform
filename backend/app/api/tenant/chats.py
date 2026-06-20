@@ -148,14 +148,38 @@ async def _find_idempotent_response(
 
 
 def _chat_scope_query(tenant_id: uuid.UUID, api_key_id: uuid.UUID):
+    # Each API key sees and uses ONLY its own chats. Previously NULL-key chats
+    # (admin-created / unbound) were visible to EVERY key — that leaked other
+    # contexts into the list AND let a key post into a chat bound to a different
+    # assistant (so the wrong persona/redact applied → e.g. balance leaking from
+    # a chat stuck on the default assistant). Strict per-key scoping fixes both.
     return select(Chat).where(
         Chat.tenant_id == tenant_id,
-        or_(
-            Chat.api_key_id == api_key_id,
-            Chat.api_key_id.is_(None),
-        ),
+        Chat.api_key_id == api_key_id,
         Chat.deleted_at.is_(None),
     )
+
+
+async def _load_sendable_chat(
+    db: AsyncSession, tenant_id: uuid.UUID, auth: TenantAuthContext, chat_id: uuid.UUID,
+) -> Chat:
+    """Load a chat this key is allowed to post into. Must be the key's own chat
+    AND — when the key is bound to an assistant — belong to that same assistant.
+    This keeps "channel = persona": a key can only ever drive its own assistant,
+    so the right redact/forced-filter/prompt always applies (a chat stuck on a
+    different assistant is rejected, not silently answered with wrong rules)."""
+    chat = (await db.execute(
+        _chat_scope_query(tenant_id, auth.api_key.id).where(Chat.id == chat_id)
+    )).scalars().first()
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found.")
+    key_assistant = getattr(auth.api_key, "assistant_id", None)
+    if key_assistant and chat.assistant_id and chat.assistant_id != key_assistant:
+        raise HTTPException(
+            status_code=409,
+            detail="Чат принадлежит другому ассистенту — создайте новый чат под этот ключ.",
+        )
+    return chat
 
 
 @router.get("/", response_model=PaginatedResponse[ChatResponse])
@@ -272,6 +296,16 @@ async def list_messages(
     )
 
 
+def _trusted_actor(body: MessageSend, auth: TenantAuthContext) -> dict | None:
+    """Return the request `actor` ONLY when this API key is trusted to assert it
+    (a server-to-server CRM integration). Untrusted browser/embedded keys →
+    None: client-supplied identity is ignored, so it can't be spoofed and
+    forced-filter tools fall back to fail-closed."""
+    if body.actor and getattr(auth.api_key, "actor_trusted", False):
+        return body.actor.model_dump()
+    return None
+
+
 @router.post("/{chat_id}/messages", response_model=PublicMessageResponse, status_code=status.HTTP_201_CREATED)
 async def send_message(
     tenant_id: uuid.UUID,
@@ -282,12 +316,8 @@ async def send_message(
 ):
     _verify_tenant_access(tenant_id, auth.tenant)
 
-    # Verify chat exists and belongs to tenant
-    chat_result = await db.execute(
-        _chat_scope_query(tenant_id, auth.api_key.id).where(Chat.id == chat_id)
-    )
-    if not chat_result.scalars().first():
-        raise HTTPException(status_code=404, detail="Chat not found.")
+    # Verify chat exists, belongs to this key, and matches the key's assistant.
+    await _load_sendable_chat(db, tenant_id, auth, chat_id)
 
     scoped_idempotency_key = _build_scoped_idempotency_key(tenant_id, chat_id, body.idempotency_key)
 
@@ -325,6 +355,7 @@ async def send_message(
                 user_message_id=str(user_message.id),
                 api_key_id=str(auth.api_key.id),
                 voice_mode=getattr(body, "voice_mode", False),
+                actor=_trusted_actor(body, auth),
             )
         except ThrottleRejected as exc:
             raise HTTPException(
@@ -448,11 +479,7 @@ async def send_message_stream(
     """SSE streaming variant — sanitized event set, no internal trail leaks."""
     _verify_tenant_access(tenant_id, auth.tenant)
 
-    chat_result = await db.execute(
-        _chat_scope_query(tenant_id, auth.api_key.id).where(Chat.id == chat_id)
-    )
-    if not chat_result.scalars().first():
-        raise HTTPException(status_code=404, detail="Chat not found.")
+    await _load_sendable_chat(db, tenant_id, auth, chat_id)
 
     scoped_idempotency_key = _build_scoped_idempotency_key(tenant_id, chat_id, body.idempotency_key)
 
@@ -565,6 +592,7 @@ async def send_message_stream(
                         api_key_id=api_key_id_str,
                         on_event=emitter,
                         voice_mode=getattr(body, "voice_mode", False),
+                        actor=_trusted_actor(body, auth),
                     )
                     await fresh_db.commit()
                 final_id = await _save_assistant(result.get("content", ""), llm_result=result)

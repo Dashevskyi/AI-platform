@@ -35,6 +35,33 @@ class ChatResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ActorGeo(BaseModel):
+    lat: float
+    lng: float
+    accuracy_m: float | None = None
+
+
+class Actor(BaseModel):
+    """Who the request is on behalf of — supplied by the channel (CRM), NOT the
+    model. The platform renders this into a trusted "## Текущий пользователь"
+    system block and exposes the fields to tools, instead of the channel
+    stuffing identity into the prompt (which mixes trusted identity with
+    untrusted user text → prompt-injection risk).
+
+    All fields optional: a channel may pass just an `external_id` (the platform
+    enriches it later via a resolver) or pre-filled display fields. `geo` is
+    ephemeral (the tablet's live position) and only the channel knows it, so it
+    must travel in the request — but as structured data, not prose.
+    """
+    external_id: str | None = None        # stable id in the channel/CRM (CSV → IN)
+    role: str | None = None               # installer | subscriber | dispatcher | ...
+    phone: str | None = None              # verified phone (for forced sms_phone match)
+    display_name: str | None = None
+    # Free key→value the platform renders verbatim (бригада, договор, …).
+    attributes: dict[str, str] | None = None
+    geo: ActorGeo | None = None
+
+
 class MessageSend(BaseModel):
     content: str
     idempotency_key: str | None = None
@@ -42,6 +69,9 @@ class MessageSend(BaseModel):
     # forces enable_thinking=False to avoid the +5 s TTFT penalty from the
     # reasoning warmup, which is unacceptable in real-time voice UX.
     voice_mode: bool = False
+    # Verified identity/context of the asker (technician, subscriber, …),
+    # supplied by the channel. Rendered into a trusted system block.
+    actor: Actor | None = None
 
 
 class MessageResponse(BaseModel):

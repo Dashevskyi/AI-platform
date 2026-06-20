@@ -140,6 +140,72 @@ async def tool_metrics(
     return out
 
 
+class ToolCallRecord(BaseModel):
+    created_at: datetime
+    chat_id: str | None
+    message_id: str | None
+    ok: bool
+    args_preview: str | None
+    output_chars: int | None
+    latency_ms: int | None
+    round: int | None
+
+
+@router.get("/calls", response_model=list[ToolCallRecord])
+async def tool_calls(
+    tenant_id: uuid.UUID,
+    name: str = Query(..., description="имя инструмента (function name)"),
+    status: str | None = Query(None, description="success | error"),
+    date_from: datetime | None = Query(None),
+    date_to: datetime | None = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    """Individual invocations of one tool (newest first) — the params it was
+    called with, success/failure, output size, latency, and the chat it ran in.
+    Drill-down behind the per-tool usage counters. The actual returned data is
+    NOT stored; the UI offers a 'repeat call' that re-runs the tool live."""
+    await _verify_tenant(tenant_id, db)
+    ok_filter = ""
+    if status == "success":
+        ok_filter = "AND (tc->>'ok')::boolean IS TRUE"
+    elif status == "error":
+        ok_filter = "AND (tc->>'ok')::boolean IS NOT TRUE"
+    rows = (await db.execute(text(f"""
+        SELECT l.created_at, l.chat_id, l.message_id,
+               (tc->>'ok')::boolean AS ok,
+               tc->>'args_preview' AS args_preview,
+               (tc->>'output_chars')::int AS output_chars,
+               (tc->>'latency_ms')::int AS latency_ms,
+               (tc->>'round')::int AS round
+        FROM llm_request_logs l,
+             LATERAL jsonb_array_elements(
+                 CASE WHEN jsonb_typeof(l.debug->'tool_calls') = 'array'
+                      THEN l.debug->'tool_calls' ELSE '[]'::jsonb END
+             ) tc
+        WHERE l.tenant_id = :tid
+          AND tc->>'name' = :name
+          {ok_filter}
+          AND (CAST(:date_from AS timestamptz) IS NULL OR l.created_at >= CAST(:date_from AS timestamptz))
+          AND (CAST(:date_to AS timestamptz) IS NULL OR l.created_at <= CAST(:date_to AS timestamptz))
+        ORDER BY l.created_at DESC
+        LIMIT :lim
+    """), {"tid": tenant_id, "name": name, "date_from": date_from, "date_to": date_to, "lim": limit})).mappings().all()
+    return [
+        ToolCallRecord(
+            created_at=r["created_at"],
+            chat_id=str(r["chat_id"]) if r["chat_id"] else None,
+            message_id=str(r["message_id"]) if r["message_id"] else None,
+            ok=bool(r["ok"]),
+            args_preview=r["args_preview"],
+            output_chars=r["output_chars"],
+            latency_ms=r["latency_ms"],
+            round=r["round"],
+        )
+        for r in rows
+    ]
+
+
 @router.get("/groups", response_model=list[str])
 async def list_tool_groups(
     tenant_id: uuid.UUID,

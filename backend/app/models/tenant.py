@@ -22,6 +22,11 @@ class Tenant(Base):
     throttle_queue_max: Mapped[int] = mapped_column(Integer, nullable=False, default=20)
     merge_messages_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     merge_window_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=1500)
+    # Voice service entitlements (licensing gate). Default True so existing
+    # tenants keep working; set False to deny the tenant that service — the
+    # /voice/stt or /voice/tts endpoint then returns 403.
+    stt_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    tts_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

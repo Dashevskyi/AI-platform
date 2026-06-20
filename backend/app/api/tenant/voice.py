@@ -28,6 +28,7 @@ from pydantic import BaseModel
 
 from app.api.deps import TenantAuthContext, get_current_tenant_auth_context
 from app.core.config import settings
+from app.services.voice.usage import require_voice_entitlement, record_voice_usage
 from app.core.ratelimit import voice_limiter
 from app.core.database import get_db
 from app.core.security import decrypt_value
@@ -652,6 +653,7 @@ async def speech_to_text(
     """Transcribe an audio blob to text. The browser sends what
     MediaRecorder produced (usually audio/webm). Whisper accepts it as-is."""
     _verify_tenant(tenant_id, auth.tenant)
+    require_voice_entitlement(auth.tenant, "stt")
     audio_bytes = await file.read()
     if not audio_bytes:
         raise HTTPException(status_code=400, detail="Empty audio")
@@ -676,7 +678,7 @@ async def speech_to_text(
 
     try:
         async with httpx.AsyncClient(timeout=settings.STT_TIMEOUT_SECONDS) as client:
-            data = {"model": (None, settings.STT_MODEL), "response_format": (None, "json")}
+            data = {"model": (None, settings.STT_MODEL), "response_format": (None, "verbose_json")}
             if effective_lang:
                 data["language"] = (None, effective_lang)
             if stt_cfg.initial_prompt:
@@ -689,6 +691,16 @@ async def speech_to_text(
             )
             resp.raise_for_status()
             payload = resp.json()
+            # Meter the audio processed (seconds) — the billable unit for STT.
+            # verbose_json returns `duration`; fall back to 0 if a server omits it.
+            try:
+                _stt_seconds = int(round(float(payload.get("duration") or 0)))
+            except (TypeError, ValueError):
+                _stt_seconds = 0
+            await record_voice_usage(
+                db, tenant_id=tenant_id, kind="stt", units=_stt_seconds, unit_type="seconds",
+                provider=settings.STT_MODEL, api_key_id=auth.api_key.id, chat_id=chat_id,
+            )
             text = (payload.get("text") or "").strip()
             if _is_hallucination(text):
                 logger.info("STT dropped hallucination: %r", text[:200])
@@ -880,6 +892,7 @@ async def text_to_speech(
          • Otherwise → local Fish Speech (sentence-chunked streaming).
     """
     _verify_tenant(tenant_id, auth.tenant)
+    require_voice_entitlement(auth.tenant, "tts")
     text = _sanitize_for_tts((body.text or "").strip())
     if not text:
         raise HTTPException(status_code=400, detail="Empty text")
@@ -893,6 +906,13 @@ async def text_to_speech(
             "opus": "audio/ogg", "aac": "audio/aac"}.get(fmt, "audio/mpeg")
 
     tts_cfg = await _load_tts_config(tenant_id, db, body.chat_id)
+
+    # Meter TTS by input characters (the billable unit) — recorded up front so
+    # it counts even if the client aborts the audio stream mid-way.
+    await record_voice_usage(
+        db, tenant_id=tenant_id, kind="tts", units=len(text), unit_type="chars",
+        provider=(tts_cfg.provider or "system"), api_key_id=auth.api_key.id, chat_id=body.chat_id,
+    )
 
     # ── ElevenLabs path ────────────────────────────────────────────────────────
     if tts_cfg.provider == "elevenlabs":

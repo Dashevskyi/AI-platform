@@ -39,6 +39,7 @@ def _key_to_response(k: TenantApiKey) -> TenantApiKeyResponse:
         assistant_name=getattr(k, "assistant_name", None),
         memory_prompt=k.memory_prompt,
         allowed_tool_ids=k.allowed_tool_ids,
+        actor_trusted=bool(getattr(k, "actor_trusted", False)),
         is_active=k.is_active,
         expires_at=k.expires_at,
         last_used_at=k.last_used_at,
@@ -159,6 +160,7 @@ async def create_key(
         assistant_id=assistant_uuid,
         memory_prompt=body.memory_prompt,
         allowed_tool_ids=body.allowed_tool_ids,
+        actor_trusted=bool(body.actor_trusted),
     )
     db.add(api_key)
     await db.flush()
@@ -174,6 +176,7 @@ async def create_key(
         assistant_id=str(api_key.assistant_id) if api_key.assistant_id else None,
         memory_prompt=api_key.memory_prompt,
         allowed_tool_ids=api_key.allowed_tool_ids,
+        actor_trusted=bool(api_key.actor_trusted),
         is_active=api_key.is_active,
         expires_at=api_key.expires_at,
         last_used_at=api_key.last_used_at,

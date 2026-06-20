@@ -96,19 +96,21 @@ def test_context_mode_invalid_default():
     assert p._normalize_context_mode(None) == "summary_plus_recent"
 
 
-# ── _with_language_system_tail ──────────────────────────────────────────────
-def test_language_tail_appended_for_russian():
-    msgs = [{"role": "user", "content": "x"}]
-    out = p._with_language_system_tail(msgs, "Привет, не работает интернет дома совсем")
-    assert len(out) == len(msgs) + 1
-    assert out[-1]["role"] == "system"
-    assert msgs == [{"role": "user", "content": "x"}]  # original not mutated
+# ── language pin (fixed response_language, not auto-detected from input) ─────
+def test_language_pin_uses_configured_language():
+    from app.services.llm.language import build_language_pin_text, normalize_language
+    # Pin follows the configured language, NOT the input text language.
+    assert "русском" in build_language_pin_text("ru")
+    assert "українською" in build_language_pin_text("uk")
+    assert "English" in build_language_pin_text("en")
 
 
-def test_language_tail_noop_for_english():
-    msgs = [{"role": "user", "content": "x"}]
-    out = p._with_language_system_tail(msgs, "Hello my internet is down at home please help")
-    assert out == msgs
+def test_language_pin_defaults_to_ru():
+    from app.services.llm.language import build_language_pin_text, normalize_language
+    assert normalize_language(None) == "ru"
+    assert normalize_language("EN-us") == "en"
+    assert normalize_language("garbage") == "ru"
+    assert "русском" in build_language_pin_text(None)
 
 
 # ── _is_lazy_response ───────────────────────────────────────────────────────

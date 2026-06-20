@@ -91,9 +91,12 @@ def _log_to_response(log: LLMRequestLog) -> LLMLogResponse:
 def _log_filters(
     tenant_id, *, provider_type=None, model_name=None, status_filter=None, served_by=None,
     chat_id=None, api_key_id=None, date_from=None, date_to=None, has_tool_calls=None,
+    correlation_id=None,
 ):
     """Shared WHERE clauses so the list and the summary reflect the same view."""
     clauses = [LLMRequestLog.tenant_id == tenant_id]
+    if correlation_id:
+        clauses.append(LLMRequestLog.correlation_id == correlation_id)
     if provider_type:
         clauses.append(LLMRequestLog.provider_type == provider_type)
     if model_name:
@@ -196,6 +199,7 @@ async def list_logs(
     date_from: datetime | None = Query(None),
     date_to: datetime | None = Query(None),
     has_tool_calls: bool | None = Query(None),
+    correlation_id: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
     await _verify_tenant(tenant_id, db)
@@ -205,7 +209,7 @@ async def list_logs(
     clauses = _log_filters(
         tenant_id, provider_type=provider_type, model_name=model_name, status_filter=status_filter,
         served_by=served_by, chat_id=chat_id, api_key_id=api_key_id, date_from=date_from,
-        date_to=date_to, has_tool_calls=has_tool_calls,
+        date_to=date_to, has_tool_calls=has_tool_calls, correlation_id=correlation_id,
     )
     query = select(LLMRequestLog).where(*clauses).order_by(LLMRequestLog.created_at.desc())
 

@@ -143,5 +143,15 @@ class TenantShellConfig(Base):
     voice_hold_delay_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)   # NULL → 1600
     voice_hold_phrases: Mapped[str | None] = mapped_column(Text, nullable=True)       # newline-separated; NULL → builtins
     tts_fish_url: Mapped[str | None] = mapped_column(String(500), nullable=True)  # custom Fish Speech base URL
+    # Deterministic anti-hallucination guard for sensitive (e.g. payment) links.
+    # Generic — patterns/domains live here, NOT in code. Shape:
+    #   {"enabled": true,
+    #    "sensitive_patterns": ["liqpay.ua", "pay.example.com"],  # substrings; a URL matching any is "sensitive"
+    #    "allowlist": ["cabinet.example.com"],                    # always-trusted substrings
+    #    "fallback_url": "https://cabinet.example.com",           # replace unverified sensitive URLs with this
+    #    "fallback_text": null}                                   # used if no fallback_url
+    # A sensitive URL in the model's answer that did NOT appear verbatim in any
+    # tool result / KB chunk this turn is treated as fabricated and rewritten.
+    link_guard: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))

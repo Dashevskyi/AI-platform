@@ -497,8 +497,13 @@ async def try_tier0(
     *,
     min_tool_score: float = 0.80,
     max_score_gap: float = 0.15,
+    tool_context: dict | None = None,
 ) -> Tier0Result | None:
-    """Run the Tier 0 router. Returns None to signal "fall back to LLM"."""
+    """Run the Tier 0 router. Returns None to signal "fall back to LLM".
+
+    `tool_context` is the per-request `_context` (actor, redact_fields, ids) the
+    main pipeline injects into tool configs. Tier 0 MUST forward it too, or the
+    deterministic path bypasses PII redaction and actor forced-filters."""
     if not (user_query and user_query.strip()):
         return None
     if not embedding_model:
@@ -721,9 +726,14 @@ async def try_tier0(
         if skip:
             continue
 
-        # Step 7 — execute the tool
+        # Step 7 — execute the tool. Forward the request _context (actor,
+        # redact_fields, ids) so PII redaction and actor forced-filters apply
+        # on the Tier 0 path exactly as on the LLM path.
+        _t0_cfg = top_tool.config_json
+        if tool_context is not None and isinstance(_t0_cfg, dict):
+            _t0_cfg = {**_t0_cfg, "_context": tool_context}
         try:
-            result = await execute_tool(top_tool.name, arguments, top_tool.config_json)
+            result = await execute_tool(top_tool.name, arguments, _t0_cfg)
         except Exception:
             logger.exception("[tier0] attempt %d execution failed", attempt_idx)
             continue
@@ -748,10 +758,16 @@ async def try_tier0(
             not_found_tpl = t0_cfg.get("not_found_template")
             if _result_is_empty(data, required_fields):
                 not_found_hit = True
-                rendered = (
-                    _render_not_found(not_found_tpl, entities, keyword_extracted, user_query)
-                    if not_found_tpl else None
-                )
+                if t0_cfg.get("not_found_fallthrough"):
+                    # Hand the miss to the LLM so it can clarify, suggest a
+                    # variant, or continue the dialog (agent-style) instead of
+                    # dead-ending on a static "не найдено". The static
+                    # not_found_template (if any) is ignored when this is set.
+                    rendered = None
+                elif not_found_tpl:
+                    rendered = _render_not_found(not_found_tpl, entities, keyword_extracted, user_query)
+                else:
+                    rendered = None
             else:
                 # Data IS present — render the normal template. If it fails here
                 # the template paths are wrong (a config error), NOT a "not found":

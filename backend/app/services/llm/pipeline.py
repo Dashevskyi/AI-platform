@@ -496,6 +496,153 @@ def _build_pinned_memory_block(memory_entries) -> str | None:
     )
 
 
+_ACTOR_ROLE_LABELS = {
+    "installer": "монтажник",
+    "technician": "техник",
+    "subscriber": "абонент",
+    "client": "клиент",
+    "dispatcher": "диспетчер",
+    "operator": "оператор",
+    "admin": "администратор",
+}
+
+
+def _filter_actor(actor, allowed):
+    """Keep only whitelisted actor fields (per-assistant `actor_fields`); drop
+    the rest so a channel can't smuggle fields an assistant didn't opt into.
+    `allowed` empty/None → pass the actor through unchanged (backward compat).
+    'attributes'/'geo' sub-objects are kept whole when their key is allowed."""
+    if not isinstance(actor, dict) or not allowed:
+        return actor
+    allowed_set = {str(a).strip() for a in allowed if str(a).strip()}
+    if not allowed_set:
+        return actor
+    return {k: v for k, v in actor.items() if k in allowed_set}
+
+
+# URL extractor: stops before whitespace and the markdown/quote delimiters
+# ] ) " ' < >  so it grabs the bare URL out of `[text](url)` too.
+_GUARD_URL_RE = re.compile(r"""https?://[^\s<>"')\]]+""", re.IGNORECASE)
+
+
+def _guard_unverified_links(
+    content: str,
+    trusted_sources: list[str],
+    guard_cfg: dict | None,
+    correlation_id: str,
+) -> tuple[str, list[str]]:
+    """Deterministic anti-hallucination backstop for sensitive (e.g. payment)
+    links. Any URL in the model's answer that matches a configured sensitive
+    pattern but did NOT appear verbatim in a tool result / KB chunk this turn is
+    treated as fabricated and rewritten to a safe fallback (or neutralised).
+
+    Model-independent: a weak model under pressure can produce an ugly answer,
+    but it can no longer hand the client a made-up payment URL.
+
+    `guard_cfg` shape (tenant `link_guard`, override per assistant):
+        {"enabled": true,
+         "sensitive_patterns": ["liqpay.ua", "pay.example.com"],
+         "allowlist": ["cabinet.example.com"],
+         "fallback_url": "https://cabinet.example.com",
+         "fallback_text": "..."}
+    Returns (sanitized_content, [stripped_urls]).
+    """
+    if not content or not isinstance(guard_cfg, dict):
+        return content, []
+    if guard_cfg.get("enabled") is False:
+        return content, []
+    patterns = [
+        str(p).lower() for p in (guard_cfg.get("sensitive_patterns") or [])
+        if isinstance(p, str) and str(p).strip()
+    ]
+    if not patterns:
+        return content, []
+    allowlist = [
+        str(a).lower() for a in (guard_cfg.get("allowlist") or [])
+        if isinstance(a, str) and str(a).strip()
+    ]
+    fallback_url = guard_cfg.get("fallback_url") or None
+    fallback_text = guard_cfg.get("fallback_text") or None
+    # Verbatim-trust corpus: everything the model was legitimately given this
+    # turn (tool outputs + KB) plus admin allowlist entries.
+    trusted_blob = "\n".join(s for s in trusted_sources if s)
+
+    out = content
+    stripped: list[str] = []
+    for raw in set(_GUARD_URL_RE.findall(content)):
+        url = raw.rstrip(".,;:!?")  # trailing sentence punctuation isn't part of the URL
+        low = url.lower()
+        if not any(p in low for p in patterns):
+            continue  # not a sensitive URL — leave informational links alone
+        if any(a in low for a in allowlist):
+            continue  # explicitly allowed
+        if url in trusted_blob:
+            continue  # came verbatim from a tool result / KB — verified
+        # Unverified sensitive URL → fabricated. Rewrite every occurrence.
+        stripped.append(url)
+        if fallback_url:
+            out = out.replace(url, fallback_url)
+        elif fallback_text:
+            out = out.replace(url, fallback_text)
+        else:
+            out = out.replace(url, "(ссылка удалена)")
+    if stripped:
+        logger.warning(
+            "[%s] link-guard: rewrote %d unverified sensitive URL(s): %s",
+            correlation_id, len(stripped), ", ".join(stripped)[:300],
+        )
+    return out, stripped
+
+
+def _build_actor_context_block(actor) -> str | None:
+    """The '## Текущий пользователь' system block: who the channel says it is
+    talking to (technician, subscriber, …), built from the request envelope —
+    NOT from the model. Trusted because it's verified by the channel, but the
+    model is told not to leak OTHER people's data without need/permission.
+
+    `actor` is a plain dict (the validated Actor schema). All fields optional;
+    returns None when there's nothing worth showing."""
+    if not isinstance(actor, dict):
+        return None
+    role_raw = (actor.get("role") or "").strip()
+    role_label = _ACTOR_ROLE_LABELS.get(role_raw.lower(), role_raw) if role_raw else ""
+    lines: list[str] = []
+    if role_label:
+        lines.append(f"Роль: {role_label}")
+    name = (actor.get("display_name") or "").strip()
+    if name:
+        lines.append(f"Имя: {name}")
+    ext = (actor.get("external_id") or "").strip()
+    if ext:
+        lines.append(f"ID в системе: {ext}")
+    attrs = actor.get("attributes")
+    if isinstance(attrs, dict):
+        for k, v in attrs.items():
+            if v is None or str(v).strip() == "":
+                continue
+            lines.append(f"{str(k).strip()}: {str(v).strip()}")
+    geo = actor.get("geo")
+    if isinstance(geo, dict) and geo.get("lat") is not None and geo.get("lng") is not None:
+        try:
+            lat = round(float(geo["lat"]), 6)
+            lng = round(float(geo["lng"]), 6)
+            acc = geo.get("accuracy_m")
+            acc_txt = f" (±{round(float(acc))} м)" if acc not in (None, "") else ""
+            lines.append(f"Геопозиция (текущая): {lat}, {lng}{acc_txt}")
+        except (TypeError, ValueError):
+            pass
+    if not lines:
+        return None
+    return (
+        "## Текущий пользователь (верифицирован каналом)\n"
+        + "\n".join(lines)
+        + "\n\nЭто проверенные каналом данные о том, с кем ты говоришь — доверяй им как "
+        "личности собеседника и используй для ответа (в т.ч. геопозицию для вопросов "
+        "«рядом со мной»). НЕ разглашай данные ДРУГИХ людей/абонентов без явной "
+        "необходимости и прав."
+    )
+
+
 def _build_datetime_block(config, correlation_id: str) -> str | None:
     """The '## Текущая дата и время' system block, in the tenant's timezone.
     Non-fatal: returns None if the date can't be computed. Pure (no DB)."""
@@ -687,6 +834,7 @@ async def chat_completion(
     on_event=None,
     merged_message_ids: list[str] | None = None,
     voice_mode: bool = False,
+    actor: dict | None = None,
 ) -> dict:
     """Public entrypoint: applies tenant throttle then runs pipeline."""
     tenant = None
@@ -709,11 +857,11 @@ async def chat_completion(
         async with throttle.slot():
             return await PipelineRun(
                 tenant_id, chat_id, user_content, db, user_message_id, api_key_id, on_event,
-                merged_message_ids, voice_mode=voice_mode,
+                merged_message_ids, voice_mode=voice_mode, actor=actor,
             ).run()
     return await PipelineRun(
         tenant_id, chat_id, user_content, db, user_message_id, api_key_id, on_event,
-        merged_message_ids, voice_mode=voice_mode,
+        merged_message_ids, voice_mode=voice_mode, actor=actor,
     ).run()
 
 
@@ -723,7 +871,8 @@ class PipelineRun:
     become methods. ToolExecCtx is the per-loop slice of this same state."""
 
     def __init__(self, tenant_id, chat_id, user_content, db, user_message_id=None,
-                 api_key_id=None, on_event=None, merged_message_ids=None, voice_mode=False):
+                 api_key_id=None, on_event=None, merged_message_ids=None, voice_mode=False,
+                 actor=None):
         self.tenant_id = tenant_id
         self.chat_id = chat_id
         self.user_content = user_content
@@ -732,6 +881,7 @@ class PipelineRun:
         self.api_key_id = api_key_id
         self.on_event = on_event
         self.merged_message_ids = merged_message_ids
+        self.actor = actor
         self.voice_mode = voice_mode
         self.correlation_id = ""  # set at the start of run()
 
@@ -770,6 +920,7 @@ async def _chat_completion_inner(self) -> dict:
     on_event = self.on_event
     merged_message_ids = self.merged_message_ids
     voice_mode = self.voice_mode
+    actor = self.actor
     self.correlation_id = correlation_id = str(uuid.uuid4())
 
     # Per-turn debug trace — accumulated through the pipeline, written to
@@ -809,6 +960,9 @@ async def _chat_completion_inner(self) -> dict:
     from app.services.llm.effective_config import build_effective_config
     config = await build_effective_config(db, _shell, tenant_id, chat_id)
     self.assistant_id = getattr(config, "assistant_id", None)
+    # Per-assistant actor whitelist: keep only the actor fields this assistant
+    # declares (`actor_fields`), drop the rest. Empty/unset → pass all (compat).
+    actor = _filter_actor(actor, getattr(config, "actor_fields", None))
 
     # 1a. Tier 0 routing — try the deterministic shortcut FIRST. If the query
     # is unambiguous (high-confidence single tool + required entities present
@@ -826,6 +980,16 @@ async def _chat_completion_inner(self) -> dict:
                 embedding_model=getattr(config, "embedding_model_name", None),
                 min_tool_score=float(getattr(config, "tier0_min_tool_score", 0.80) or 0.80),
                 max_score_gap=float(getattr(config, "tier0_max_score_gap", 0.15) or 0.15),
+                # Same _context the LLM path injects — so Tier 0 honours PII
+                # redaction (redact_fields) and actor forced-filters too.
+                tool_context={
+                    "tenant_id": str(tenant_id),
+                    "chat_id": str(chat_id),
+                    "api_key_id": str(api_key_id) if api_key_id else None,
+                    "timezone": (getattr(config, "timezone", None) or None),
+                    "actor": actor if isinstance(actor, dict) else None,
+                    "redact_fields": (getattr(config, "redact_fields", None) or None),
+                },
             )
         except Exception:
             logger.exception("[tier0] router crashed — falling back to LLM (non-fatal)")
@@ -1145,6 +1309,14 @@ async def _chat_completion_inner(self) -> dict:
     needs_tools = _query_needs_tools(user_content, chat_attachments)
     # Resolve API-key tool access early — empty allowed_tool_ids means key has no tool access
     allowed_tool_ids = await _load_allowed_tool_ids(db, tenant_id, api_key_id)
+    # Also enforce the ASSISTANT's tool scope. It was loaded into EffectiveConfig
+    # but never applied — so a scoped assistant (e.g. telegram-bot → [my_services])
+    # could still call ANY tenant tool. Effective allow-set = key ∩ assistant;
+    # NULL on a side = no restriction from it; both NULL = all tenant tools.
+    _assistant_scope = getattr(config, "assistant_allowed_tool_ids", None)
+    if _assistant_scope is not None:
+        _assistant_set = {str(t) for t in _assistant_scope}
+        allowed_tool_ids = _assistant_set if allowed_tool_ids is None else (allowed_tool_ids & _assistant_set)
     key_blocks_tools = allowed_tool_ids is not None and len(allowed_tool_ids) == 0
 
     if config.tools_policy == "never":
@@ -1251,6 +1423,12 @@ async def _chat_completion_inner(self) -> dict:
             "chat_id": str(chat_id),
             "api_key_id": str(api_key_id) if api_key_id else None,
             "timezone": (getattr(config, "timezone", None) or None),
+            # Channel-verified identity — tools may force-filter on it
+            # (`{actor.external_id}` in static_filters) or pass it through.
+            "actor": actor if isinstance(actor, dict) else None,
+            # Assistant-level PII denylist — field names stripped from every
+            # tool result before it reaches the model (see _apply_redaction).
+            "redact_fields": (getattr(config, "redact_fields", None) or None),
         }
 
     # 7. Build messages
@@ -1345,6 +1523,13 @@ async def _chat_completion_inner(self) -> dict:
                 "## Память API-ключа\n"
                 + "\n".join(f"- {item}" for item in api_key_memory_items),
             )
+
+    # === [BLOCK-ACTOR] verified identity/context of the asker (from channel) ===
+    # Who the request is on behalf of (technician + live geo, subscriber, …).
+    # Built from the request envelope, not the model — trusted, channel-verified.
+    _actor_block_text = _build_actor_context_block(actor)
+    if _actor_block_text:
+        _sys("BLOCK-ACTOR verified user/context", _actor_block_text)
 
     _memory_block_text: str | None = None
     _kb_block_text: str | None = None
@@ -2267,9 +2452,16 @@ async def _chat_completion_inner(self) -> dict:
             messages.append({
                 "role": "system",
                 "content": (
-                    "Достигнут лимит вызовов инструментов в этом раунде. "
-                    "Сформулируй ответ пользователю на основе уже полученных данных. "
-                    "Если данных недостаточно — честно скажи об этом и предложи следующие шаги. "
+                    "Ты не успел завершить задачу за отведённые вызовы инструментов в этом "
+                    "ходу. НЕ обрывайся на полуслове — обратись к пользователю обычным, "
+                    "человеческим языком и заверши мысль:\n"
+                    "1) коротко скажи, что уже удалось выяснить или сделать;\n"
+                    "2) если данных не хватает или нужно уточнение — задай ОДИН конкретный "
+                    "вопрос. Пользователь ответит, и ты продолжишь с этого места в следующем "
+                    "сообщении (диалог сохраняется);\n"
+                    "3) если уже можно дать частичный или полный ответ — дай его.\n"
+                    "Не упоминай «лимиты вызовов», «раунды», «инструменты» и прочие технические "
+                    "детали — говори как помощник, который хочет довести задачу до конца. "
                     + (
                         "Разрешён ровно один tool — plan_update(done=[...], failed=[...]): "
                         "отметь им фактически выполненные шаги плана. Другие tools НЕ вызывай."
@@ -2473,6 +2665,24 @@ async def _chat_completion_inner(self) -> dict:
 
     if not resp:
         raise ValueError(f"LLM call failed: {error_text}")
+
+    # Deterministic anti-hallucination backstop: rewrite any sensitive (payment)
+    # URL the model produced that wasn't in a tool result / KB chunk this turn.
+    # Single chokepoint — protects the non-streaming response AND the persisted
+    # message (both read resp.content). Runs before summaries/context-card so
+    # those don't capture a fabricated link either.
+    _guard_cfg = getattr(config, "link_guard", None)
+    if _guard_cfg and resp.content:
+        _trusted = [o.get("output", "") for o in tool_outputs_current_request]
+        _trusted += [(getattr(c, "content", "") or "") for c in kb_chunks]
+        _trusted += [str(a) for a in (_guard_cfg.get("allowlist") or [])]
+        _clean, _stripped = _guard_unverified_links(
+            resp.content, _trusted, _guard_cfg, correlation_id
+        )
+        if _stripped:
+            resp.content = _clean
+            await _emit("link_guard", {"stripped": _stripped})
+            debug_trace["link_guard"] = {"stripped": _stripped}
 
     response_summary = _compact_text(resp.content, max_chars=500)
     tool_result_summary = _build_tool_result_summary(tool_outputs_current_request)
@@ -3904,11 +4114,16 @@ def _public_tool_def(tool_config: dict) -> dict:
     if not isinstance(tool_config, dict):
         return tool_config
     public: dict = {}
-    if "type" in tool_config:
-        public["type"] = tool_config["type"]
     if isinstance(tool_config.get("function"), dict):
+        # Always emit `type` — OpenAI-spec providers reject a tool entry without
+        # it ("missing field `type`"). Default to "function" when the stored
+        # config omits a top-level type (tools created by the agent / direct
+        # insert often have only `function` + `x_backend_config`).
+        public["type"] = tool_config.get("type") or "function"
         public["function"] = json.loads(json.dumps(tool_config["function"]))
         _augment_public_tool_definition(public["function"], tool_config)
+    elif "type" in tool_config:
+        public["type"] = tool_config["type"]
     return public or tool_config
 
 

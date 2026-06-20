@@ -46,6 +46,8 @@ def _tenant_to_response(t: Tenant) -> TenantResponse:
         throttle_queue_max=t.throttle_queue_max,
         merge_messages_enabled=t.merge_messages_enabled,
         merge_window_ms=t.merge_window_ms,
+        stt_enabled=t.stt_enabled,
+        tts_enabled=t.tts_enabled,
         created_at=t.created_at,
         updated_at=t.updated_at,
     )

@@ -429,6 +429,38 @@ def _apply_selectable_fields(
     return result
 
 
+def _apply_redaction(tool_name: str, result: ToolResult, tool_config: dict | None) -> ToolResult:
+    """Assistant-level PII denylist: recursively strip configured field names
+    from EVERY tool's output before it reaches the model. The list comes from
+    the assistant config via `_context.redact_fields` (set by the pipeline), so
+    it applies uniformly to all tools the assistant can call — a backstop on top
+    of per-tool `result_processing` and tool-scoping.
+
+    JSON-key based (matches the output aliases the admin defines). Free-text
+    values (e.g. a phone written inside a `comment`) are NOT scrubbed here —
+    that needs the upstream controls (don't SELECT the column) or a regex pass."""
+    if not isinstance(tool_config, dict):
+        return result
+    ctx = tool_config.get("_context") or {}
+    redact = ctx.get("redact_fields")
+    if not isinstance(redact, (list, tuple)) or not redact:
+        return result
+    drop = {str(f).strip() for f in redact if str(f).strip()}
+    output = result.output or ""
+    if not drop or not output:
+        return result
+    try:
+        parsed = json.loads(output)
+    except (json.JSONDecodeError, ValueError):
+        return result  # non-JSON output — leave as-is
+    transformed = _transform_json_for_result(parsed, drop, None)
+    new_output = json.dumps(transformed, ensure_ascii=False)
+    if new_output != output:
+        logger.info("[redaction] %s: stripped assistant-denylisted fields %s", tool_name, sorted(drop))
+        return ToolResult(success=result.success, output=new_output, error=result.error)
+    return result
+
+
 def _apply_result_processing(
     tool_name: str,
     result: ToolResult,
@@ -543,6 +575,9 @@ async def execute_tool(tool_name: str, arguments: dict, tool_config: dict | None
         # LLM-requested field projection runs first (smaller payload for the
         # subsequent generic transforms to chew on).
         result = _apply_selectable_fields(tool_name, arguments, result, tool_config)
+        # Redact BEFORE result_processing: max_chars truncation can leave the
+        # output non-JSON, and redaction needs to parse it to strip keys.
+        result = _apply_redaction(tool_name, result, tool_config)
         return _apply_result_processing(tool_name, result, tool_config)
     except asyncio.TimeoutError:
         # Log the actual tool name + args so we can see WHICH call timed out
@@ -867,7 +902,92 @@ def _build_records_output(
     return json.dumps(payload, ensure_ascii=False, indent=2, default=str)
 
 
-def _build_records_query(arguments: dict, runtime: dict, db_url: str) -> tuple[str, dict, list[str], int | None, dict[str, str]]:
+_ACTOR_TPL_RE = re.compile(r"\{actor\.([a-zA-Z0-9_.]+)\}")
+
+
+def _resolve_actor_value(actor: dict | None, path: str):
+    """Walk a dotted path (e.g. 'external_id', 'geo.lat') into the verified
+    actor dict. Returns None if any segment is missing."""
+    cur = actor
+    for part in path.split("."):
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(part)
+    return cur
+
+
+def _resolve_actor_template(value, actor: dict | None):
+    """Substitute `{actor.<path>}` placeholders in a config string with values
+    from the channel-verified actor.
+
+    SECURITY: used for platform-forced filters (e.g. scoping a query to the
+    caller's own client_id). If any placeholder can't be resolved — no actor,
+    missing field — this RAISES, so the caller FAILS CLOSED: a scoping filter
+    must never silently disappear and widen the query to everyone. The model
+    cannot influence these (placeholders live in admin config, resolved from
+    the verified actor, not from model arguments)."""
+    if not isinstance(value, str) or "{actor." not in value:
+        return value
+    missing: list[str] = []
+
+    def _repl(m):
+        v = _resolve_actor_value(actor, m.group(1))
+        if v is None or (isinstance(v, str) and v.strip() == ""):
+            missing.append(m.group(1))
+            return ""
+        return str(v)
+
+    out = _ACTOR_TPL_RE.sub(_repl, value)
+    if missing:
+        raise ValueError(
+            "Не удалось подставить данные пользователя для "
+            + ", ".join("{actor." + p + "}" for p in missing)
+            + " — запрос отклонён (нет верифицированного контекста)."
+        )
+    return out
+
+
+def _build_order_by(sort_by, default_column: str, db_kind: str) -> str:
+    """Build an ORDER BY clause from a flexible `sort_by` config.
+
+    Accepts: a bare column string ("cs.id"), a "col desc" string, a list of
+    such strings, or a list of {"column", "direction"} objects. Falls back to
+    ascending on `default_column`. Only ASC/DESC directions are honoured;
+    column names go through identifier validation/quoting.
+    """
+    if sort_by is None or sort_by == "":
+        entries: list = [default_column]
+    elif isinstance(sort_by, (list, tuple)):
+        entries = list(sort_by)
+    else:
+        entries = [sort_by]
+
+    parts: list[str] = []
+    for entry in entries:
+        column = None
+        direction = "asc"
+        if isinstance(entry, dict):
+            column = str(entry.get("column") or "").strip()
+            direction = str(entry.get("direction") or "asc").strip().lower()
+        elif isinstance(entry, str):
+            text = entry.strip()
+            match = re.match(r"^(.*?)\s+(asc|desc)$", text, re.IGNORECASE)
+            if match:
+                column = match.group(1).strip()
+                direction = match.group(2).lower()
+            else:
+                column = text
+        if not column:
+            continue
+        direction_sql = "DESC" if direction == "desc" else "ASC"
+        parts.append(f"{_quote_identifier_for_db(column, db_kind)} {direction_sql}")
+
+    if not parts:
+        parts.append(f"{_quote_identifier_for_db(default_column, db_kind)} ASC")
+    return ", ".join(parts)
+
+
+def _build_records_query(arguments: dict, runtime: dict, db_url: str, actor: dict | None = None) -> tuple[str, dict, list[str], int | None, dict[str, str]]:
     db_kind = _database_kind(db_url)
     table_name = str(runtime.get("table") or runtime.get("view") or "").strip()
     if not table_name:
@@ -875,8 +995,17 @@ def _build_records_query(arguments: dict, runtime: dict, db_url: str) -> tuple[s
     table_alias = str(runtime.get("table_alias") or "").strip() or None
 
     filter_fields = runtime.get("filter_fields")
-    if not isinstance(filter_fields, dict) or not filter_fields:
-        raise ValueError("В конфигурации инструмента не указан filter_fields")
+    if filter_fields is None:
+        filter_fields = {}
+    if not isinstance(filter_fields, dict):
+        raise ValueError("filter_fields должен быть объектом")
+    # A search tool needs SOME way to narrow results: either whitelist filters
+    # or free-text query over search_columns. A query-only tool (no filters) is
+    # valid as long as it declares search_columns.
+    _search_cols_cfg = runtime.get("search_columns")
+    _has_search_cols = isinstance(_search_cols_cfg, list) and len(_search_cols_cfg) > 0
+    if not filter_fields and not _has_search_cols:
+        raise ValueError("В конфигурации инструмента нужен filter_fields или search_columns")
 
     result_columns = runtime.get("result_columns")
     if not isinstance(result_columns, list) or not result_columns:
@@ -978,14 +1107,86 @@ def _build_records_query(arguments: dict, runtime: dict, db_url: str) -> tuple[s
     static_filters = runtime.get("static_filters")
     if isinstance(static_filters, dict):
         for alias, raw_value in static_filters.items():
-            if not _is_scalar(raw_value):
-                continue
+            # Forced filter from the verified actor: `{actor.external_id}` →
+            # the caller's own id, resolved server-side. Fails CLOSED (raises)
+            # if the actor/field is absent, so a self-scoping filter can never
+            # silently turn into "return everyone". The model cannot touch this.
+            if isinstance(raw_value, str) and "{actor." in raw_value:
+                raw_value = _resolve_actor_template(raw_value, actor)
             column_name = str(alias).strip()
             if not column_name:
                 continue
-            param_name = f"static_{re.sub(r'[^a-zA-Z0-9_]', '_', column_name)}"
-            conditions.append(f"{_quote_identifier_for_db(column_name, db_kind)} = :{param_name}")
-            params[param_name] = raw_value
+            col_sql = _quote_identifier_for_db(column_name, db_kind)
+            base = re.sub(r'[^a-zA-Z0-9_]', '_', column_name)
+            # Multi-value (a list, or a comma-separated string after actor
+            # resolution) → IN; single scalar → equality. Lets one forced filter
+            # scope to several ids at once (e.g. a phone owning several client
+            # accounts → client_id IN (...)).
+            if isinstance(raw_value, (list, tuple)):
+                values = [str(v).strip() for v in raw_value if str(v).strip()]
+            elif isinstance(raw_value, str) and "," in raw_value:
+                values = [v.strip() for v in raw_value.split(",") if v.strip()]
+            else:
+                values = None
+            if values is not None:
+                if not values:
+                    continue
+                ph = []
+                for i, v in enumerate(values):
+                    p = f"static_{base}_{i}"
+                    ph.append(f":{p}")
+                    params[p] = v
+                conditions.append(f"{col_sql} IN ({', '.join(ph)})")
+            else:
+                if not _is_scalar(raw_value):
+                    continue
+                p = f"static_{base}"
+                conditions.append(f"{col_sql} = :{p}")
+                params[p] = raw_value
+
+    # Forced compound checks against the verified actor — e.g. require the
+    # record's phone to match `{actor.phone}` IN ADDITION to the id filter
+    # (defence in depth: id alone isn't enough if it drifted from the phone).
+    # Parameterized (no injection) and fail-closed (raises if the actor field
+    # is missing). Config: actor_match: [{columns:[...], value:"{actor.x}", mode:"eq|contains"}]
+    actor_match = runtime.get("actor_match")
+    if isinstance(actor_match, list):
+        for idx, am in enumerate(actor_match):
+            if not isinstance(am, dict):
+                continue
+            cols = am.get("columns") or ([am.get("column")] if am.get("column") else [])
+            cols = [str(c).strip() for c in cols if str(c).strip()]
+            val = am.get("value")
+            if isinstance(val, str) and "{actor." in val:
+                val = _resolve_actor_template(val, actor)  # fail-closed
+            if not cols or val in (None, ""):
+                continue
+            mode = str(am.get("mode") or "eq").strip().lower()
+            p = f"actor_match_{idx}"
+            terms = []
+            if mode == "phone":
+                # Normalize both sides to the last 9 digits (national number),
+                # so 380XXXXXXXXX / 0XXXXXXXXX / +380… all compare equal.
+                core = re.sub(r"\D", "", str(val))[-9:]
+                if not core:
+                    continue
+                params[p] = core
+                for c in cols:
+                    cq = _quote_identifier_for_db(c, db_kind)
+                    if db_kind == "postgresql":
+                        terms.append(f"RIGHT(REGEXP_REPLACE(CAST({cq} AS TEXT), '[^0-9]', '', 'g'), 9) = :{p}")
+                    else:
+                        terms.append(f"RIGHT(REGEXP_REPLACE(CAST({cq} AS CHAR), '[^0-9]', ''), 9) = :{p}")
+            elif mode == "contains":
+                params[p] = f"%{val}%"
+                for c in cols:
+                    terms.append(_contains_expr(c, p, db_kind))
+            else:
+                params[p] = val
+                for c in cols:
+                    terms.append(f"{_quote_identifier_for_db(c, db_kind)} = :{p}")
+            if terms:
+                conditions.append("(" + " OR ".join(terms) + ")")
 
     date_window = runtime.get("date_window")
     if isinstance(date_window, dict):
@@ -1035,19 +1236,30 @@ def _build_records_query(arguments: dict, runtime: dict, db_url: str) -> tuple[s
             if not left_column or not right_column:
                 raise ValueError(f"У joins[{idx}] должны быть left_column и right_column")
             join_keyword = "LEFT JOIN" if join_type == "left" else "INNER JOIN"
+            on_clause = (
+                f"{_quote_identifier_for_db(left_column, db_kind)} = "
+                f"{_quote_identifier_for_db(right_column, db_kind)}"
+            )
+            # Optional extra ON condition (admin-authored raw SQL, like the
+            # expressions allowed in result_columns) — e.g. restrict a self-join
+            # by object_type or exclude the row itself. Without this the join
+            # degrades to a bare key match and pulls in unintended rows.
+            extra_on = str(join_cfg.get("extra_on") or "").strip()
+            if extra_on:
+                on_clause += f" AND ({extra_on})"
             join_clauses.append(
                 f"{join_keyword} {_quote_table_with_alias(join_table, join_alias, db_kind)} "
-                f"ON {_quote_identifier_for_db(left_column, db_kind)} = {_quote_identifier_for_db(right_column, db_kind)}"
+                f"ON {on_clause}"
             )
 
     select_cols = ", ".join(select_column_exprs)
-    sort_by = str(runtime.get("sort_by") or output_columns[0]).strip()
+    order_by = _build_order_by(runtime.get("sort_by"), output_columns[0], db_kind)
     sql = (
         f"SELECT {select_cols} "
         f"FROM {quoted_table} "
         f"{' '.join(join_clauses)} "
         f"WHERE {' AND '.join(conditions)} "
-        f"ORDER BY {_quote_identifier_for_db(sort_by, db_kind)} "
+        f"ORDER BY {order_by} "
     )
     if limit is not None:
         sql += "LIMIT :limit_plus_one"
@@ -1094,7 +1306,7 @@ def _render_api_payload(
     return rendered
 
 
-def _build_api_request(arguments: dict, runtime: dict, data_source: dict | None = None) -> tuple[str, str, dict, dict, dict | None, float, str | None]:
+def _build_api_request(arguments: dict, runtime: dict, data_source: dict | None = None, actor: dict | None = None) -> tuple[str, str, dict, dict, dict | None, float, str | None]:
     data_source_config = data_source.get("config_json") if data_source and isinstance(data_source.get("config_json"), dict) else {}
     data_source_secret = data_source.get("secret_json") if data_source and isinstance(data_source.get("secret_json"), dict) else {}
 
@@ -1214,6 +1426,8 @@ def _build_api_request(arguments: dict, runtime: dict, data_source: dict | None 
     static_query = runtime.get("static_query")
     if isinstance(static_query, dict):
         for key, raw_value in static_query.items():
+            if isinstance(raw_value, str) and "{actor." in raw_value:
+                raw_value = _resolve_actor_template(raw_value, actor)  # fail-closed
             if _is_scalar(raw_value):
                 final_query[str(key)] = raw_value
 
@@ -1258,6 +1472,8 @@ def _build_api_request(arguments: dict, runtime: dict, data_source: dict | None 
         static_body = runtime.get("static_body")
         if isinstance(static_body, dict):
             for key, raw_value in static_body.items():
+                if isinstance(raw_value, str) and "{actor." in raw_value:
+                    raw_value = _resolve_actor_template(raw_value, actor)  # fail-closed
                 # do not override values explicitly passed by the model
                 if str(key) not in final_body:
                     final_body[str(key)] = raw_value
@@ -1410,17 +1626,18 @@ async def tool_search_records(arguments: dict, tool_config: dict | None = None) 
     SQL is built server-side from runtime config. The model never sends raw SQL.
     """
     runtime = _extract_runtime_config(tool_config)
+    actor = (tool_config or {}).get("_context", {}).get("actor") if isinstance(tool_config, dict) else None
 
     try:
         db_url = await _resolve_database_url(runtime)
-        sql, params, result_columns, limit, column_descriptions = _build_records_query(arguments, runtime, db_url)
+        sql, params, result_columns, limit, column_descriptions = _build_records_query(arguments, runtime, db_url, actor=actor)
         rows = await _fetch_sql_rows(db_url, sql, params)
         return ToolResult(success=True, output=_build_records_output(rows, limit, result_columns, column_descriptions))
     except ValueError as e:
         return ToolResult(success=False, output="", error=str(e))
 
 
-async def _fetch_api_single(arguments: dict, runtime: dict) -> tuple[bool, str, str]:
+async def _fetch_api_single(arguments: dict, runtime: dict, actor: dict | None = None) -> tuple[bool, str, str]:
     """Single HTTP call — shared by tool_fetch_api_data and its batch path.
     Returns (success, output, error)."""
     try:
@@ -1429,7 +1646,7 @@ async def _fetch_api_single(arguments: dict, runtime: dict) -> tuple[bool, str, 
             data_source = await _load_tenant_data_source(str(runtime.get("data_source_id")))
             if str(data_source.get("kind") or "").strip().lower() != "http_api":
                 return (False, "", "Указанный источник данных не является HTTP API")
-        method, url, headers, _query_params, body, timeout_seconds, result_path = _build_api_request(arguments, runtime, data_source)
+        method, url, headers, _query_params, body, timeout_seconds, result_path = _build_api_request(arguments, runtime, data_source, actor=actor)
     except ValueError as e:
         return (False, "", str(e))
 
@@ -1547,6 +1764,7 @@ async def tool_fetch_api_data(arguments: dict, tool_config: dict | None = None) 
     "ports 1-18" in one call instead of 18.
     """
     runtime = _extract_runtime_config(tool_config)
+    actor = (tool_config or {}).get("_context", {}).get("actor") if isinstance(tool_config, dict) else None
 
     # Expand batch path-params if any.
     expanded = _expand_path_batch(arguments, runtime)
@@ -1555,7 +1773,7 @@ async def tool_fetch_api_data(arguments: dict, tool_config: dict | None = None) 
 
         async def _limited_fetch(args: dict):
             async with sem:
-                return await _fetch_api_single(args, runtime)
+                return await _fetch_api_single(args, runtime, actor=actor)
 
         results = await asyncio.gather(
             *[_limited_fetch(args) for args in expanded],
@@ -1629,7 +1847,7 @@ async def tool_fetch_api_data(arguments: dict, tool_config: dict | None = None) 
             data_source = await _load_tenant_data_source(str(runtime.get("data_source_id")))
             if str(data_source.get("kind") or "").strip().lower() != "http_api":
                 raise ValueError("Указанный источник данных не является HTTP API")
-        method, url, headers, _query_params, body, timeout_seconds, result_path = _build_api_request(arguments, runtime, data_source)
+        method, url, headers, _query_params, body, timeout_seconds, result_path = _build_api_request(arguments, runtime, data_source, actor=actor)
     except ValueError as e:
         return ToolResult(success=False, output="", error=str(e))
 

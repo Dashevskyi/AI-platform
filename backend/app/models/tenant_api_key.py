@@ -22,6 +22,12 @@ class TenantApiKey(Base):
     assistant_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("assistants.id"), nullable=True, index=True)
     memory_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     allowed_tool_ids: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    # Whether the request's `actor` (verified identity) is TRUSTED from this key.
+    # Only server-to-server integrations (a CRM backend that authenticated the
+    # user) should be trusted — a browser/embedded key is attacker-controlled,
+    # so its `actor` is dropped (forced-filter tools then fail closed). Secure
+    # default: FALSE.
+    actor_trusted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

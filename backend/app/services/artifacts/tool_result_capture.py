@@ -22,6 +22,8 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
+from sqlalchemy import text as sa_text
+
 from app.core.config import settings as app_settings
 from app.core.database import async_session
 from app.models.artifact import Artifact
@@ -49,6 +51,30 @@ def _should_capture(tool_name: str) -> bool:
     if tool_name.startswith("search_attachment_"):
         return False
     return True
+
+
+async def _tool_is_groundable(tenant_id, tool_name: str) -> bool:
+    """Fail-safe default: tool results are NOT promoted to grounding artifacts
+    unless the tool EXPLICITLY opts in with `groundable: true` in its config.
+
+    Rationale: most tools return live state (subscriber services/balance/
+    payments, network/port status) that goes stale — grounding a cached copy
+    makes the model answer from an old snapshot instead of re-querying. So the
+    safe default is "don't ground"; a forgotten flag fails safe (model just
+    re-queries). Opt in ONLY for stable reference data that's useful to
+    re-reference within a session (e.g. a large topology export)."""
+    if not tool_name:
+        return False
+    try:
+        async with async_session() as db:
+            val = (await db.execute(sa_text(
+                "SELECT config_json->>'groundable' FROM tenant_tools "
+                "WHERE tenant_id = :t AND name = :n AND deleted_at IS NULL LIMIT 1"
+            ), {"t": tenant_id, "n": tool_name})).scalar()
+        return str(val).strip().lower() in ("true", "1", "t", "yes")
+    except Exception:
+        logger.exception("[tool-result-capture] groundable lookup failed (non-fatal)")
+        return False
 
 
 def _short_args(arguments: dict | str | None, max_chars: int = 120) -> str:
@@ -179,6 +205,9 @@ async def capture_tool_result_as_artifact(
     """Persist a tool result as an Artifact row in its own session. Returns
     the new artifact id, or None when we didn't capture (or failed silently)."""
     if not _should_capture(tool_name):
+        return None
+    # Fail-safe: ground ONLY tools that explicitly opted in (groundable: true).
+    if not await _tool_is_groundable(tenant_id, tool_name):
         return None
     if not output or len(output) < MIN_TOOL_RESULT_CHARS:
         return None

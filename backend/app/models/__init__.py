@@ -23,6 +23,8 @@ from app.models.artifact import Artifact
 from app.models.background_job import BackgroundJob
 from app.models.pending_tool_action import PendingToolAction
 from app.models.assistant import Assistant
+from app.models.data_source_schema_note import DataSourceSchemaNote
+from app.models.voice_usage import VoiceUsage
 
 __all__ = [
     "AdminUser", "Tenant", "TenantApiKey", "TenantApiKeyGroup", "TenantShellConfig",
@@ -31,4 +33,5 @@ __all__ = [
     "LLMModel", "TenantCustomModel", "TenantModelConfig",
     "MessageAttachment", "MessageAttachmentChunk", "GPUMetricSnapshot",
     "Artifact", "BackgroundJob", "PendingToolAction", "Assistant",
+    "DataSourceSchemaNote", "VoiceUsage",
 ]

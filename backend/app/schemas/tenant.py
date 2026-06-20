@@ -20,6 +20,8 @@ class TenantUpdate(BaseModel):
     throttle_queue_max: int | None = None
     merge_messages_enabled: bool | None = None
     merge_window_ms: int | None = None
+    stt_enabled: bool | None = None
+    tts_enabled: bool | None = None
 
 
 class TenantResponse(BaseModel):
@@ -34,6 +36,8 @@ class TenantResponse(BaseModel):
     throttle_queue_max: int = 20
     merge_messages_enabled: bool = False
     merge_window_ms: int = 1500
+    stt_enabled: bool = True
+    tts_enabled: bool = True
     created_at: datetime
     updated_at: datetime
 
@@ -47,6 +51,8 @@ class TenantApiKeyCreate(BaseModel):
     assistant_id: str | None = None
     memory_prompt: str | None = None
     allowed_tool_ids: list[str] | None = None
+    # Trust the request `actor` from this key (server-to-server CRM only).
+    actor_trusted: bool = False
 
 
 class TenantApiKeyUpdate(BaseModel):
@@ -57,6 +63,7 @@ class TenantApiKeyUpdate(BaseModel):
     assistant_id: str | None = None
     memory_prompt: str | None = None
     allowed_tool_ids: list[str] | None = None
+    actor_trusted: bool | None = None
 
 
 class TenantApiKeyGroupCreate(BaseModel):
@@ -94,6 +101,7 @@ class TenantApiKeyResponse(BaseModel):
     assistant_name: str | None = None
     memory_prompt: str | None
     allowed_tool_ids: list[str] | None
+    actor_trusted: bool = False
     is_active: bool
     expires_at: datetime | None
     last_used_at: datetime | None

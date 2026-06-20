@@ -44,6 +44,16 @@ OVERRIDABLE_FIELDS: set[str] = {
     "tool_limit_auto", "tool_limit_max_failures", "tool_limit_max_per_tool", "tool_limit_plan_rounds",
     "tier0_enabled", "tier0_min_tool_score", "tier0_max_score_gap",
     "pii_routing_enabled",
+    # Assistant-level PII denylist: field names stripped from every tool result
+    # before it reaches the model (security backstop; see executor._apply_redaction).
+    "redact_fields",
+    # Whitelist of actor fields this assistant accepts (others dropped before
+    # the actor reaches the prompt/tools; see pipeline._filter_actor).
+    "actor_fields",
+    # Deterministic anti-hallucination guard for sensitive (payment) links:
+    # a sensitive URL the model emits that wasn't in any tool result / KB chunk
+    # this turn is rewritten to a safe fallback (see pipeline._guard_unverified_links).
+    "link_guard",
     # Voice / TTS (consumed once voice path is assistant-aware — phase 4).
     "tts_provider", "tts_voice_id", "tts_model", "tts_speed", "tts_pitch", "tts_fish_url",
     "voice_hold_enabled", "voice_hold_delay_ms", "voice_hold_phrases",
