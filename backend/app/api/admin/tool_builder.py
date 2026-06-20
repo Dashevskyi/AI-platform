@@ -17,7 +17,7 @@ import json
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -402,7 +402,8 @@ class CreateProposedRequest(BaseModel):
 
 @router.post("/create")
 async def create_proposed_tool(
-    tenant_id: uuid.UUID, body: CreateProposedRequest, db: AsyncSession = Depends(get_db),
+    tenant_id: uuid.UUID, body: CreateProposedRequest,
+    background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Persist an agent-proposed tool. Created DISABLED unless explicitly enabled."""
     name = (body.name or "").strip()
@@ -423,4 +424,9 @@ async def create_proposed_tool(
     db.add(tool)
     await db.flush()
     await db.refresh(tool)
+    # Embed the new tool so it's visible to semantic tool-routing — mirrors the
+    # admin tools.py create path. Without this, agent-built tools were invisible
+    # to semantic selection and only reachable via the non-embedded fallback.
+    from app.services.tools.embedder import embed_tool
+    background_tasks.add_task(embed_tool, tool.id)
     return {"id": str(tool.id), "name": tool.name, "is_active": tool.is_active}
