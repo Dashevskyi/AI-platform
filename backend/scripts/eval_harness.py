@@ -35,11 +35,14 @@ API = "http://127.0.0.1:8000"
 TENANT = "403d219f-0f4a-4782-a884-0e25f8bfe241"
 SRC_ASSISTANT = "320a6f9c-5f8c-4d7d-8e15-0815b6df0a09"  # telegram-bot — config is cloned
 
-# llm_models ids to compare
+# llm_models ids to compare.
+# NB: the old "deepseek-chat" record (77cf6397) was deactivated 2026-06-20 — the
+# alias is deprecated by DeepSeek (→ v4-flash) and dies 2026-07-24, so there is
+# no longer a separate cloud "V3" to compare against. V4-Flash is the client
+# model; Qwen3-14B is the local SFT baseline.
 MODELS = {
-    "V3 (deepseek-chat)": "77cf6397-f01f-428b-99a3-02a0f72dd247",
-    "V4-Flash":           "6fabeaf0-ed48-40df-a790-8987d3b8cd0a",
-    "Qwen3-14B":          "00259f49-b6bb-49a7-af38-56e5ff2de27b",
+    "V4-Flash":  "6fabeaf0-ed48-40df-a790-8987d3b8cd0a",
+    "Qwen3-14B": "00259f49-b6bb-49a7-af38-56e5ff2de27b",
 }
 
 # Each case is run REPEATS times per model — models are probabilistic, so a
@@ -129,9 +132,82 @@ CASES = [
     },
 ]
 
+# ---------------- operator profile (throwaway clone, no prod assistant) ----------------
+# There is no operator assistant in prod (telegram-bot has only 4 client tools),
+# so the harness builds its OWN throwaway operator clone ('__eval_op__') with the
+# network/topology tools attached. Operator cases measure TOOL SELECTION — the
+# known weak spot (esp. Qwen3-14B) and the precise SFT target — so checks are
+# expect_tool, not exact fact-match (no verified operator dataset needed; the
+# tool name is recorded in debug.tool_calls whether or not the call succeeds).
+# NB: search_welding_points (0da5fbb8) is soft-deleted in prod (no active welding
+# tool exists), so it's intentionally NOT here — attaching a deleted tool just
+# makes a case unwinnable. switch_state_log_search needed an embedding backfill
+# (agent-created tools weren't embedded — fixed in tool_builder /create 2026-06-20).
+OP_TOOL_IDS = [
+    "91c42860-aa2e-478d-928f-daf56e369751",  # search_electric_on_switch
+    "9031f8a0-6284-4114-92d0-1bd10ea3ef39",  # switch_state_log_search
+    "401c9591-88ed-418b-87cd-641e97ca6e85",  # switch_ports_status
+    "46706271-6ffc-4874-a0d4-43fb33aaf579",  # topology_path
+    "4f0ac663-e568-48eb-9f4c-af1973e53826",  # topology_neighbors
+    "0259bc4e-b03c-4690-9d2a-a441586284ab",  # topology_find_mac
+    "3ed6ae92-2ef0-42f8-9c39-802b66f451d6",  # search_dev_by_mac
+]
+
+OP_PROMPT = (
+    "Ти — асистент для інженерів та операторів мережі інтернет-провайдера. "
+    "Використовуй доступні інструменти (світчі, порти, топологія, муфти/точки зварювання, "
+    "запитка абонентів) щоб відповісти на технічний запит оператора. "
+    "Завжди обирай НАЙВІДПОВІДНІШИЙ інструмент під задачу. Відповідай списком, без таблиць."
+)
+
+OP_ACTOR = {"external_id": "op-eval", "role": "operator", "display_name": "інженер (eval)"}
+
+OP_CASES = [
+    {
+        "id": "op_electric_on_switch",
+        "content": "покажи абонентів із запиткою (electric) на світчі sw-core-01",
+        "actor": OP_ACTOR, "no_table": True,
+        "expect_tool": "search_electric_on_switch",
+    },
+    {
+        "id": "op_switch_state_log",
+        "content": "коли востаннє світч sw-core-01 змінював стан? покажи лог змін стану",
+        "actor": OP_ACTOR, "no_table": True,
+        "expect_tool": "switch_state_log_search",
+    },
+    {
+        "id": "op_switch_ports",
+        "content": "покажи стан портів на світчі sw-core-01",
+        "actor": OP_ACTOR, "no_table": True,
+        "expect_tool": "switch_ports_status",
+    },
+    {
+        "id": "op_topology_path",
+        "content": "побудуй шлях у топології мережі від пристрою olt-01 до cpe-555",
+        "actor": OP_ACTOR, "no_table": True,
+        "expect_tool": "topology_path",
+    },
+    {
+        "id": "op_find_mac",
+        "content": "де в мережі знаходиться пристрій з MAC 00:11:22:33:44:55?",
+        "actor": OP_ACTOR, "no_table": True,
+        # MAC lookup is legitimately served by either topology or device search.
+        "expect_tool": ["topology_find_mac", "search_dev_by_mac"],
+    },
+]
+
 # ---------------- deterministic checks ----------------
 
 _ROW = re.compile(r"^\s*\|.*\|.*$", re.M)
+
+# A URL that looks like a payment link. The only legitimate way a payment URL
+# reaches the user is via the get_payment_link tool (cabinet → liqpay); any
+# payment URL in a response that did NOT call that tool is fabricated and must
+# be caught (this is the link_guard invariant expressed as an assert).
+_PAY_URL = re.compile(
+    r"https?://\S*(?:liqpay|portmone|easypay|pay|invoice|bill|оплат|сплат|payment)\S*",
+    re.I,
+)
 
 
 def has_md_table(s: str) -> bool:
@@ -145,11 +221,17 @@ def run_checks(case: dict, response: str, tools_called: set) -> dict:
     out = {}
     if case.get("no_table"):
         out["no_table"] = not has_md_table(response)
+    # link_guard invariant: no payment URL unless get_payment_link was called.
+    if "get_payment_link" not in tools_called:
+        out["no_fabricated_pay_url"] = not bool(_PAY_URL.search(response or ""))
     if "expect_tool" in case:
         et = case["expect_tool"]
-        out["tool"] = (et is None and not tools_called) or (et in tools_called) if et is None else (et in tools_called)
         if et is None:
-            out["tool"] = True  # no specific tool required (general-info case)
+            out["tool"] = True                       # general-info case — any/no tool is fine
+        elif isinstance(et, (list, tuple, set)):
+            out["tool"] = bool(set(et) & tools_called)   # any of several acceptable tools
+        else:
+            out["tool"] = et in tools_called
     low = (response or "").lower()
     for sub in case.get("must_contain", []):
         out[f"has·{sub}"] = sub.lower() in low
@@ -190,7 +272,13 @@ async def judge_case(judge_key, case: dict, response: str) -> bool:
                     "response_format": {"type": "json_object"},
                 },
             )
-        out = json.loads(r.json()["choices"][0]["message"]["content"])
+        raw = r.json()["choices"][0]["message"]["content"]
+        try:
+            out = json.loads(raw)
+        except json.JSONDecodeError:
+            # some models append text after the JSON ("Extra data") — take the
+            # first decoded object instead of failing the whole verdict.
+            out, _ = json.JSONDecoder().raw_decode(raw[raw.index("{"):])
         return bool(out.get("pass"))
     except Exception as e:
         print(f"    [judge error: {str(e)[:80]}]")
@@ -199,38 +287,99 @@ async def judge_case(judge_key, case: dict, response: str) -> bool:
 
 # ---------------- harness plumbing ----------------
 
-async def setup(s) -> tuple[str, str]:
-    """Find-or-refresh a clone '__eval__' assistant + a fresh throwaway key."""
-    src = (await s.execute(text(
-        "SELECT overrides, allowed_tool_ids FROM assistants WHERE id=:a"), {"a": SRC_ASSISTANT})).mappings().first()
-    ov = json.dumps(src["overrides"])
-    tl = json.dumps(src["allowed_tool_ids"]) if src["allowed_tool_ids"] is not None else None
+EVAL_KEY_NAMES = ["__eval_key__", "__eval_op_key__"]
+
+
+async def _ensure_clone(s, name: str, overrides_json: str, tool_ids_json: str | None) -> str:
+    """Find-or-refresh a throwaway clone assistant with the given overrides+tools."""
     ev = (await s.execute(text(
-        "SELECT id FROM assistants WHERE tenant_id=:t AND name='__eval__'"), {"t": TENANT})).scalar()
+        "SELECT id FROM assistants WHERE tenant_id=:t AND name=:n"), {"t": TENANT, "n": name})).scalar()
     if not ev:
         ev = str(uuid.uuid4())
         await s.execute(text(
             "INSERT INTO assistants (id,tenant_id,name,overrides,allowed_tool_ids,is_active,is_default,created_at)"
-            " VALUES (:id,:t,'__eval__',CAST(:ov AS jsonb),CAST(:tl AS jsonb),true,false,now())"),
-            {"id": ev, "t": TENANT, "ov": ov, "tl": tl})
+            " VALUES (:id,:t,:n,CAST(:ov AS jsonb),CAST(:tl AS jsonb),true,false,now())"),
+            {"id": ev, "t": TENANT, "n": name, "ov": overrides_json, "tl": tool_ids_json})
     else:
         await s.execute(text(
             "UPDATE assistants SET overrides=CAST(:ov AS jsonb), allowed_tool_ids=CAST(:tl AS jsonb) WHERE id=:id"),
-            {"ov": ov, "tl": tl, "id": str(ev)})
-    # deactivate (not delete — chats FK-reference old keys) then make a fresh one
-    await s.execute(text("UPDATE tenant_api_keys SET is_active=false WHERE tenant_id=:t AND name='__eval_key__'"), {"t": TENANT})
+            {"ov": overrides_json, "tl": tool_ids_json, "id": str(ev)})
+    return str(ev)
+
+
+async def _fresh_key(s, key_name: str, assistant_id: str) -> str:
+    """Deactivate any prior key of this name, mint a fresh actor-trusted one."""
+    await s.execute(text("UPDATE tenant_api_keys SET is_active=false WHERE tenant_id=:t AND name=:n"),
+                    {"t": TENANT, "n": key_name})
     raw, prefix, kh = generate_api_key()
     await s.execute(text(
         "INSERT INTO tenant_api_keys (id,tenant_id,name,key_prefix,key_hash,assistant_id,actor_trusted,is_active,created_at)"
-        " VALUES (:id,:t,'__eval_key__',:p,:h,:a,true,true,now())"),
-        {"id": str(uuid.uuid4()), "t": TENANT, "p": prefix, "h": kh, "a": str(ev)})
+        " VALUES (:id,:t,:n,:p,:h,:a,true,true,now())"),
+        {"id": str(uuid.uuid4()), "t": TENANT, "n": key_name, "p": prefix, "h": kh, "a": str(assistant_id)})
+    return raw
+
+
+async def setup(s) -> list[dict]:
+    """Build two throwaway profiles: a CLIENT clone (from the telegram-bot
+    assistant, 4 client tools) and an OPERATOR clone (network/topology tools).
+    Each profile = {profile, assistant, key, cases}."""
+    src = (await s.execute(text(
+        "SELECT overrides, allowed_tool_ids FROM assistants WHERE id=:a"), {"a": SRC_ASSISTANT})).mappings().first()
+    cli_ov = json.dumps(src["overrides"])
+    cli_tl = json.dumps(src["allowed_tool_ids"]) if src["allowed_tool_ids"] is not None else None
+    cli_a = await _ensure_clone(s, "__eval__", cli_ov, cli_tl)
+    cli_k = await _fresh_key(s, "__eval_key__", cli_a)
+
+    # Guard: a soft-deleted / inactive / unembedded tool silently breaks tool
+    # selection — surface it instead of producing mysterious 0/3 failures.
+    bad = (await s.execute(text(
+        "SELECT name, deleted_at IS NOT NULL del, NOT is_active inact, embedding IS NULL noemb"
+        " FROM tenant_tools WHERE id = ANY(:ids)"
+        " AND (deleted_at IS NOT NULL OR NOT is_active OR embedding IS NULL)"),
+        {"ids": OP_TOOL_IDS})).mappings().all()
+    for b in bad:
+        print(f"  [WARN] op tool '{b['name']}' unusable: deleted={b['del']} inactive={b['inact']} no_embedding={b['noemb']}")
+
+    op_ov = json.dumps({"system_prompt": OP_PROMPT, "enable_thinking": False})
+    op_a = await _ensure_clone(s, "__eval_op__", op_ov, json.dumps(OP_TOOL_IDS))
+    op_k = await _fresh_key(s, "__eval_op_key__", op_a)
+
     await s.commit()
-    return str(ev), raw
+    return [
+        {"profile": "client",   "assistant": cli_a, "key": cli_k, "cases": CASES},
+        {"profile": "operator", "assistant": op_a,  "key": op_k,  "cases": OP_CASES},
+    ]
+
+
+# Child tables that FK-reference chats (no ON DELETE CASCADE) — must be cleared
+# before the chats themselves. ORDER MATTERS: llm_request_logs/message_attachments
+# FK-reference messages.id, so messages must be deleted LAST among the children.
+_CHAT_CHILDREN = (
+    "llm_request_logs", "message_attachments", "artifacts",
+    "memory_entries", "pending_tool_actions", "messages",
+)
 
 
 async def teardown(s):
-    # deactivate the throwaway key (can't DELETE — eval chats reference it)
-    await s.execute(text("UPDATE tenant_api_keys SET is_active=false WHERE tenant_id=:t AND name='__eval_key__'"), {"t": TENANT})
+    """Fully delete every throwaway eval chat (this run AND any backlog from
+    earlier runs) so the harness leaves no residue in the prod DB. All chats
+    created via any '__eval_key__' key are eval-only and safe to remove."""
+    key_ids = [r[0] for r in (await s.execute(text(
+        "SELECT id FROM tenant_api_keys WHERE tenant_id=:t AND name = ANY(:names)"),
+        {"t": TENANT, "names": EVAL_KEY_NAMES})).all()]
+    if key_ids:
+        chat_ids = [r[0] for r in (await s.execute(text(
+            "SELECT id FROM chats WHERE tenant_id=:t AND api_key_id = ANY(:k)"),
+            {"t": TENANT, "k": key_ids})).all()]
+        if chat_ids:
+            for child in _CHAT_CHILDREN:
+                await s.execute(text(f"DELETE FROM {child} WHERE chat_id = ANY(:c)"), {"c": chat_ids})
+            await s.execute(text("DELETE FROM chats WHERE id = ANY(:c)"), {"c": chat_ids})
+        # any stray logs referencing the keys directly (chat_id NULL) → clear too
+        await s.execute(text("DELETE FROM llm_request_logs WHERE api_key_id = ANY(:k)"), {"k": key_ids})
+        # keys are now unreferenced → delete them too (keep the table tidy)
+        await s.execute(text("DELETE FROM tenant_api_keys WHERE id = ANY(:k)"), {"k": key_ids})
+        print(f"  [teardown] removed {len(chat_ids)} eval chats + {len(key_ids)} keys")
     await s.commit()
 
 
@@ -267,29 +416,32 @@ async def main():
     Session = async_sessionmaker(eng)
     results = {}  # label -> list[(case_id, pass_count, repeats, failed_checks)]
     async with Session() as s:
-        ev, key = await setup(s)
+        profiles = await setup(s)
         judge_key = await _load_judge_key(s)
         try:
             for label, model_id in MODELS.items():
-                await set_model(s, ev, model_id)
+                for prof in profiles:
+                    await set_model(s, prof["assistant"], model_id)
                 print(f"\n=== {label} (×{REPEATS}) ===")
                 results[label] = []
-                for case in CASES:
-                    passes, failed = 0, set()
-                    for _ in range(REPEATS):
-                        cid, resp = await run_case(key, case)
-                        tools = await tools_for_chat(s, cid)
-                        checks = run_checks(case, resp, tools)
-                        if case.get("judge"):
-                            checks["judge"] = await judge_case(judge_key, case, resp)
-                        if all(checks.values()):
-                            passes += 1
-                        else:
-                            failed.update(k for k, v in checks.items() if not v)
-                    mark = "✓" if passes == REPEATS else ("~" if passes else "✗")
-                    print(f"  {mark} {case['id']:<18} {passes}/{REPEATS}"
-                          + (f"  fails: {sorted(failed)}" if failed else ""))
-                    results[label].append((case["id"], passes, REPEATS, sorted(failed)))
+                for prof in profiles:
+                    print(f"  -- {prof['profile']} --")
+                    for case in prof["cases"]:
+                        passes, failed = 0, set()
+                        for _ in range(REPEATS):
+                            cid, resp = await run_case(prof["key"], case)
+                            tools = await tools_for_chat(s, cid)
+                            checks = run_checks(case, resp, tools)
+                            if case.get("judge"):
+                                checks["judge"] = await judge_case(judge_key, case, resp)
+                            if all(checks.values()):
+                                passes += 1
+                            else:
+                                failed.update(k for k, v in checks.items() if not v)
+                        mark = "✓" if passes == REPEATS else ("~" if passes else "✗")
+                        print(f"    {mark} {case['id']:<22} {passes}/{REPEATS}"
+                              + (f"  fails: {sorted(failed)}" if failed else ""))
+                        results[label].append((case["id"], passes, REPEATS, sorted(failed)))
         finally:
             await teardown(s)
     await eng.dispose()
@@ -304,11 +456,11 @@ async def main():
         clean = sum(1 for r in rows if r[1] == r[2])
         print(f"  {label:<22} {pas}/{runs} runs ({100 * pas // max(runs, 1)}%)  | стабильно-чистых кейсов {clean}/{len(rows)}")
     print("\n  per-case pass/repeats:")
-    ids = [c["id"] for c in CASES]
-    print("    " + f"{'case':<20}" + "".join(f"{l[:11]:<13}" for l in labels))
+    ids = [c["id"] for c in CASES] + [c["id"] for c in OP_CASES]
+    print("    " + f"{'case':<24}" + "".join(f"{l[:11]:<13}" for l in labels))
     for i, cid in enumerate(ids):
         cells = "".join(f"{results[l][i][1]}/{results[l][i][2]}".ljust(13) for l in labels)
-        print(f"    {cid:<20}{cells}")
+        print(f"    {cid:<24}{cells}")
 
 
 if __name__ == "__main__":
