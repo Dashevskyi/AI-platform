@@ -484,7 +484,9 @@ def load_corpus(path="scripts/eval_corpus.csv") -> list[dict]:
     with open(path, encoding="utf-8-sig") as f:
         for i, row in enumerate(csv.DictReader(f, delimiter=";")):
             exp = (row["expect"] or "").strip()
-            c = {"id": f"c{i:03d}", "content": row["question"], "profile": row["profile"],
+            prof = row["profile"]
+            c = {"id": f"c{i:03d}", "content": row["question"], "profile": prof,
+                 "actor": A_131 if prof == "client" else OP_ACTOR,
                  "no_table": True, "holdout": (row.get("holdout") or "").strip() == "Y"}
             if exp == "NONE":
                 c["no_tool"] = True
