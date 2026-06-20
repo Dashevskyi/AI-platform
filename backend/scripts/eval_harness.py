@@ -516,8 +516,13 @@ async def main_corpus():
                     prof = pmap.get(case["profile"]) or pmap["operator"]
                     passed, fails, called_any = False, set(), set()
                     for _ in range(REPEATS_CORPUS):
-                        cid, resp = await run_case(prof["key"], case)
-                        tools = await tools_for_chat(s, cid)
+                        try:
+                            cid, resp = await run_case(prof["key"], case)
+                            tools = await tools_for_chat(s, cid)
+                        except Exception as e:
+                            # one slow/hung case must not abort a 400-case baseline
+                            fails.add(f"error:{type(e).__name__}")
+                            continue
                         called_any |= tools
                         checks = run_checks(case, resp, tools)
                         if all(checks.values()):
