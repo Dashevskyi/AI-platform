@@ -1278,6 +1278,13 @@ function RoundsView(props: {
   const totalPrompt = rounds.reduce((s, r) => s + (r.prompt_tokens || 0), 0);
   const totalCompletion = rounds.reduce((s, r) => s + (r.completion_tokens || 0), 0);
   const totalLatency = rounds.reduce((s, r) => s + (r.latency_ms || 0), 0);
+  // Peak context occupancy: the largest prompt (input) token count across the
+  // rounds — i.e. how full the context window got at its worst this request.
+  const peakRound = rounds.reduce(
+    (best, r) => ((r.prompt_tokens || 0) > (best?.prompt_tokens || 0) ? r : best),
+    rounds[0],
+  );
+  const maxPromptTokens = peakRound?.prompt_tokens || 0;
 
   const renderCallList = (calls: DebugToolCall[]) => {
     if (!calls.length) {
@@ -1351,6 +1358,12 @@ function RoundsView(props: {
                 <Text size="xs" c="dimmed">
                   Σ completion: <Text component="span" fw={600} c="bright">{_fmtN(totalCompletion)}</Text>
                 </Text>
+                <Tooltip label="Максимум prompt-токенов среди раундов — пик занятости контекстного окна за этот запрос">
+                  <Text size="xs" c="dimmed" style={{ cursor: 'help' }}>
+                    Пик контекста: <Text component="span" fw={600} c="bright">{_fmtN(maxPromptTokens)}</Text>
+                    {rounds.length > 1 && peakRound ? <Text component="span" c="dimmed"> (R{peakRound.round})</Text> : null}
+                  </Text>
+                </Tooltip>
                 <Text size="xs" c="dimmed">
                   Σ latency: <Text component="span" fw={600} c="bright">{_fmtN(totalLatency)}ms</Text>
                 </Text>
@@ -1866,7 +1879,7 @@ function TokenBreakdownView(props: {
   );
 }
 
-function LogDetailView({ logDetail }: { logDetail: LLMLogDetail }) {
+export function LogDetailView({ logDetail }: { logDetail: LLMLogDetail }) {
   const toolExecution = (logDetail.normalized_response as Record<string, unknown> | null)?.tool_execution as
     ToolExecutionEntry[] | undefined;
   const promptLayout = (logDetail.normalized_request as Record<string, unknown> | null)?.prompt_layout;

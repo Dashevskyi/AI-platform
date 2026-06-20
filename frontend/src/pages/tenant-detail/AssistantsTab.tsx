@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import {
   Stack, Card, Text, Group, Button, TextInput, Textarea, Select, MultiSelect,
-  Badge, ActionIcon, Switch, Loader, Alert, Divider, Code, Modal,
+  Badge, ActionIcon, Switch, Loader, Alert, Divider, Code, Modal, TagsInput,
 } from '@mantine/core';
 import { IconPlus, IconTrash, IconRobot, IconDeviceFloppy, IconPencil } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
@@ -66,6 +66,16 @@ function AssistantEditor({
   const setOvBool = (key: string, val: string) => setD((p) => {
     const o = { ...p.overrides };
     if (val === INHERIT) delete o[key]; else o[key] = val === 'true';
+    return { ...p, overrides: o };
+  });
+  const ovArr = (key: string): string[] => {
+    const v = d.overrides[key];
+    return Array.isArray(v) ? (v as string[]) : [];
+  };
+  const setOvArr = (key: string, val: string[]) => setD((p) => {
+    const o = { ...p.overrides };
+    const clean = val.map((s) => s.trim()).filter(Boolean);
+    if (clean.length === 0) delete o[key]; else o[key] = clean;
     return { ...p, overrides: o };
   });
 
@@ -143,6 +153,24 @@ function AssistantEditor({
         data={toolOptions} searchable clearable
         value={d.allowed_tool_ids ?? []}
         onChange={(v) => setD((p) => ({ ...p, allowed_tool_ids: v.length ? v : null }))}
+      />
+
+      <TagsInput
+        label="Скрывать поля (PII-денлист)"
+        description="Имена полей, которые вырезаются из вывода ЛЮБОГО инструмента до показа модели (напр. phone, balance, dogovor_num). По имени ключа; пусто = ничего не скрывать."
+        placeholder="введите имя поля и Enter"
+        value={ovArr('redact_fields')}
+        onChange={(v) => setOvArr('redact_fields', v)}
+        clearable
+      />
+
+      <TagsInput
+        label="Разрешённые поля actor (whitelist)"
+        description="Какие поля идентичности (actor) этот ассистент принимает: external_id, phone, role, geo, display_name. Остальное канал прислать может, но платформа их отбросит. Пусто = принимать все."
+        placeholder="external_id, phone… (Enter)"
+        value={ovArr('actor_fields')}
+        onChange={(v) => setOvArr('actor_fields', v)}
+        clearable
       />
 
       <Text size="xs" c="dimmed">

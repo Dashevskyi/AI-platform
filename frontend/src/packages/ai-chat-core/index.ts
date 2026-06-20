@@ -38,6 +38,7 @@ export type { UseWhisperLiveOptions, UseWhisperLiveResult, WhisperLiveState, Whi
 
 export type {
   Chat,
+  ChatActor,
   Message,
   MessageSend,
   PaginatedResponse,

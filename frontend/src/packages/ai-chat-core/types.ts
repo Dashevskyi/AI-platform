@@ -53,11 +53,25 @@ export interface Message {
   created_at: string;
 }
 
+/** Channel-verified identity of the asker. The platform renders it into a
+ *  trusted system block and tools may force-filter on it ({actor.external_id}).
+ *  Supplied by the channel/CRM — or, in the admin test chat, by the operator. */
+export interface ChatActor {
+  external_id?: string;
+  role?: string;
+  phone?: string;
+  display_name?: string;
+  attributes?: Record<string, string>;
+  geo?: { lat: number; lng: number; accuracy_m?: number };
+}
+
 export interface MessageSend {
   content: string;
   idempotency_key?: string;
   /** When true — request came from voice (STT). Backend forces enable_thinking=false. */
   voice_mode?: boolean;
+  /** Verified identity/context of the asker (technician, subscriber, …). */
+  actor?: ChatActor | null;
 }
 
 export interface AttachmentBrief {

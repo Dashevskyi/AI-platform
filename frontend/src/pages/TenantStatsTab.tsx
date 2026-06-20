@@ -18,6 +18,7 @@ import { useQuery } from '@tanstack/react-query';
 import { BarChart } from '@mantine/charts';
 import { statsApi } from '../shared/api/endpoints';
 import type { DailyModelStats, BreakdownRow } from '../shared/api/types';
+import { VoiceUsagePanel } from './tenant-detail/VoiceUsagePanel';
 
 function BreakdownCard({ title, rows }: { title: string; rows: BreakdownRow[] }) {
   return (
@@ -252,6 +253,8 @@ export function StatsTab({ tenantId }: { tenantId: string }) {
         <BreakdownCard title="По моделям" rows={data?.by_model || []} />
         <BreakdownCard title="По API-ключам" rows={data?.by_key || []} />
       </SimpleGrid>
+
+      <VoiceUsagePanel tenantId={tenantId} />
     </Stack>
   );
 }

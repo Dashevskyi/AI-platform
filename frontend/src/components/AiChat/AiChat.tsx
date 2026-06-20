@@ -22,6 +22,7 @@ import {
 } from '@mantine/core';
 import {
   IconSend,
+  IconUser,
   IconPlus,
   IconMessageCircle,
   IconInfoCircle,
@@ -42,6 +43,7 @@ import {
   IconBrain,
   IconFlag,
   IconFlagFilled,
+  IconFileText,
 } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
 import type { Message, AttachmentBrief } from '../../shared/api/types';
@@ -52,6 +54,7 @@ import {
   useAiChatAttachments,
   useAiChatSend,
   getAiChatApi,
+  type ChatActor,
 } from '../../packages/ai-chat-core';
 import { ArtifactsPanel } from './ArtifactsPanel';
 import { MicButton } from './MicButton';
@@ -106,6 +109,10 @@ export type AiChatProps = {
   /** Called after a new chat is created via the "New chat" button.
    *  Caller is expected to navigate / re-route to the new chat. */
   onChatCreated?: (chatId: string) => void;
+  /** Superadmin-only: open the LLM request log for a specific message. When
+   *  provided, a small "log" icon is shown on assistant messages. The host
+   *  (page) gates this by role so the embeddable client UI never gets it. */
+  onOpenMessageLog?: (message: Message) => void;
 };
 
 function defaultFeatures(mode: AiChatMode, overrides: AiChatFeatures = {}): Required<AiChatFeatures> {
@@ -199,11 +206,16 @@ export function AiChat({
   features: featuresOverride,
   onMessageSent,
   onChatCreated,
+  onOpenMessageLog,
 }: AiChatProps) {
   const features = defaultFeatures(mode, featuresOverride);
   const activeChatId = chatId || null;
 
   const [messageText, setMessageText] = useState('');
+  // Admin-only actor simulation (test forced-filter / geo tools). NEVER exposed
+  // in end-user/embedded mode — a client-set actor would be spoofable identity.
+  const [actorOpen, setActorOpen] = useState(false);
+  const [actorDraft, setActorDraft] = useState({ external_id: '', role: '', phone: '', display_name: '', lat: '', lng: '' });
   const [showDebug, setShowDebug] = useState(false);
   const [showArtifacts, setShowArtifacts] = useState(false);
   const [voiceModeOpen, setVoiceModeOpen] = useState(false);
@@ -275,10 +287,27 @@ export function AiChat({
   );
   const { attachments } = useAiChatAttachments(tenantId, activeChatId, connection);
 
+  // Build the simulated actor — ADMIN MODE ONLY. In end-user/embedded mode this
+  // is always null: the verified actor must come from the trusted channel (CRM),
+  // never from the client UI, or identity could be spoofed.
+  const actor = useMemo<ChatActor | null>(() => {
+    if (mode !== 'admin') return null;
+    const a: ChatActor = {};
+    if (actorDraft.external_id.trim()) a.external_id = actorDraft.external_id.trim();
+    if (actorDraft.role.trim()) a.role = actorDraft.role.trim();
+    if (actorDraft.phone.trim()) a.phone = actorDraft.phone.trim();
+    if (actorDraft.display_name.trim()) a.display_name = actorDraft.display_name.trim();
+    const lat = parseFloat(actorDraft.lat);
+    const lng = parseFloat(actorDraft.lng);
+    if (!Number.isNaN(lat) && !Number.isNaN(lng)) a.geo = { lat, lng };
+    return Object.keys(a).length ? a : null;
+  }, [mode, actorDraft]);
+
   const sendApi = useAiChatSend({
     tenantId,
     chatId: activeChatId,
     streaming: true,
+    actor,
     ...connection,
     onError: (err) => {
       notifications.show({
@@ -789,6 +818,7 @@ export function AiChat({
                           ? (localStorage.getItem('auth_token') || undefined)
                           : undefined
                       }
+                      onOpenLog={onOpenMessageLog ? () => onOpenMessageLog(msg) : undefined}
                     />
                   ))}
                   {sendMutation.isPending && (
@@ -896,6 +926,54 @@ export function AiChat({
               p="md"
               style={{ borderTop: drafts.length > 0 ? undefined : '1px solid var(--mantine-color-default-border)' }}
             >
+              {/* Actor simulation — ADMIN ONLY (never in the embedded client). */}
+              {mode === 'admin' && activeChatId && (
+                <Box mb="xs">
+                  <Group gap={6}>
+                    <Button
+                      variant="subtle" size="compact-xs" color="gray"
+                      leftSection={<IconUser size={13} />}
+                      onClick={() => setActorOpen((o) => !o)}
+                    >
+                      Actor (тест идентичности)
+                    </Button>
+                    {actor && (
+                      <Badge size="xs" color="teal" variant="light">
+                        {[actor.role, actor.external_id].filter(Boolean).join(' · ') || 'активен'}
+                      </Badge>
+                    )}
+                  </Group>
+                  {actorOpen && (
+                    <Paper withBorder p="xs" radius="sm" mt={6}>
+                      <Text size="xs" c="dimmed" mb={6}>
+                        Симуляция верифицированного пользователя — только для теста forced-filter
+                        (<code>{'{actor.external_id}'}</code>) и гео-инструментов. В реальном канале
+                        actor задаёт CRM на сервере, не клиент.
+                      </Text>
+                      <Group grow gap="xs">
+                        <TextInput size="xs" label="external_id" placeholder="id клиента (можно через запятую)" value={actorDraft.external_id}
+                          onChange={(e) => setActorDraft((d) => ({ ...d, external_id: e.currentTarget.value }))} />
+                        <TextInput size="xs" label="phone" placeholder="380… / 0…" value={actorDraft.phone}
+                          onChange={(e) => setActorDraft((d) => ({ ...d, phone: e.currentTarget.value }))} />
+                        <TextInput size="xs" label="role" placeholder="installer / subscriber" value={actorDraft.role}
+                          onChange={(e) => setActorDraft((d) => ({ ...d, role: e.currentTarget.value }))} />
+                        <TextInput size="xs" label="ФИО" value={actorDraft.display_name}
+                          onChange={(e) => setActorDraft((d) => ({ ...d, display_name: e.currentTarget.value }))} />
+                      </Group>
+                      <Group grow gap="xs" mt={6} align="flex-end">
+                        <TextInput size="xs" label="geo lat" value={actorDraft.lat}
+                          onChange={(e) => setActorDraft((d) => ({ ...d, lat: e.currentTarget.value }))} />
+                        <TextInput size="xs" label="geo lng" value={actorDraft.lng}
+                          onChange={(e) => setActorDraft((d) => ({ ...d, lng: e.currentTarget.value }))} />
+                        <Button size="xs" variant="default"
+                          onClick={() => setActorDraft({ external_id: '', role: '', phone: '', display_name: '', lat: '', lng: '' })}>
+                          Очистить
+                        </Button>
+                      </Group>
+                    </Paper>
+                  )}
+                </Box>
+              )}
               <Group gap="sm">
                 {features.showFiles && (
                   <>
@@ -1247,6 +1325,7 @@ function MessageBubble({
   mode,
   apiKey,
   authBearer,
+  onOpenLog,
 }: {
   message: Message;
   tenantId?: string;
@@ -1256,6 +1335,7 @@ function MessageBubble({
   authBearer?: string;
   showReasoning?: boolean;
   showStats?: boolean;
+  onOpenLog?: () => void;
 }) {
   const isUser = message.role === 'user';
   const isSystem = message.role === 'system';
@@ -1378,6 +1458,13 @@ function MessageBubble({
             </Text>
             {isAssistant && (
               <Group gap={6} wrap="nowrap">
+                {onOpenLog && (
+                  <Tooltip label="Лог этого ответа">
+                    <ActionIcon variant="subtle" color="gray" size="sm" onClick={onOpenLog} aria-label="Открыть лог ответа">
+                      <IconFileText size={14} />
+                    </ActionIcon>
+                  </Tooltip>
+                )}
                 {tenantId && apiBase != null && mode && (
                   <SpeakButton
                     tenantId={tenantId}

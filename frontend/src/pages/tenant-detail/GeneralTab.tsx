@@ -39,6 +39,8 @@ export function GeneralTab({ tenantId }: GeneralTabProps) {
   const [throttleQueueMax, setThrottleQueueMax] = useState(20);
   const [mergeEnabled, setMergeEnabled] = useState(false);
   const [mergeWindowMs, setMergeWindowMs] = useState(1500);
+  const [sttEnabled, setSttEnabled] = useState(true);
+  const [ttsEnabled, setTtsEnabled] = useState(true);
   const [dirty, setDirty] = useState(false);
 
   useEffect(() => {
@@ -55,6 +57,8 @@ export function GeneralTab({ tenantId }: GeneralTabProps) {
       setThrottleQueueMax(tenant.throttle_queue_max);
       setMergeEnabled(tenant.merge_messages_enabled);
       setMergeWindowMs(tenant.merge_window_ms);
+      setSttEnabled(tenant.stt_enabled);
+      setTtsEnabled(tenant.tts_enabled);
       setDirty(false);
     }
   }, [tenant]);
@@ -83,6 +87,8 @@ export function GeneralTab({ tenantId }: GeneralTabProps) {
         throttle_queue_max: throttleQueueMax,
         merge_messages_enabled: mergeEnabled,
         merge_window_ms: mergeWindowMs,
+        stt_enabled: sttEnabled,
+        tts_enabled: ttsEnabled,
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['tenants', tenantId] });
@@ -220,6 +226,21 @@ export function GeneralTab({ tenantId }: GeneralTabProps) {
               </Text>
             </Stack>
           )}
+
+          <Divider my={4} label="Голосовые сервисы (лицензия)" labelPosition="left" />
+
+          <Switch
+            label="Распознавание речи (STT)"
+            description="Доступ к /voice/stt. Выключено → тенант получает 403; учёт по секундам аудио."
+            checked={sttEnabled}
+            onChange={(e) => markDirty(setSttEnabled)(e.currentTarget.checked)}
+          />
+          <Switch
+            label="Синтез речи (TTS)"
+            description="Доступ к /voice/tts. Выключено → тенант получает 403; учёт по символам текста."
+            checked={ttsEnabled}
+            onChange={(e) => markDirty(setTtsEnabled)(e.currentTarget.checked)}
+          />
 
           <Group justify="flex-end">
             <Button

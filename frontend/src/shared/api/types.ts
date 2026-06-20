@@ -64,6 +64,8 @@ export interface Tenant {
   throttle_queue_max: number;
   merge_messages_enabled: boolean;
   merge_window_ms: number;
+  stt_enabled: boolean;
+  tts_enabled: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -85,6 +87,8 @@ export interface TenantUpdate {
   throttle_queue_max?: number;
   merge_messages_enabled?: boolean;
   merge_window_ms?: number;
+  stt_enabled?: boolean;
+  tts_enabled?: boolean;
 }
 
 export interface TenantApiKey {
@@ -98,6 +102,7 @@ export interface TenantApiKey {
   assistant_name?: string | null;
   memory_prompt: string | null;
   allowed_tool_ids: string[] | null;
+  actor_trusted: boolean;
   is_active: boolean;
   expires_at: string | null;
   last_used_at: string | null;
@@ -111,6 +116,7 @@ export interface TenantApiKeyCreate {
   assistant_id?: string | null;
   memory_prompt?: string;
   allowed_tool_ids?: string[] | null;
+  actor_trusted?: boolean;
 }
 
 export interface TenantApiKeyCreated extends TenantApiKey {
@@ -125,6 +131,7 @@ export interface TenantApiKeyUpdate {
   assistant_id?: string | null;
   memory_prompt?: string | null;
   allowed_tool_ids?: string[] | null;
+  actor_trusted?: boolean;
 }
 
 export interface TenantApiKeyGroup {

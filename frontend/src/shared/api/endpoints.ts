@@ -268,10 +268,34 @@ export const toolsApi = {
     const res = await apiClient.get(`/api/admin/tenants/${tenantId}/tools/metrics`, { params });
     return res.data;
   },
+  calls: async (
+    tenantId: string,
+    name: string,
+    filters?: { status?: 'success' | 'error'; limit?: number; date_from?: string; date_to?: string },
+  ): Promise<ToolCallRecord[]> => {
+    const params: Record<string, unknown> = { name };
+    if (filters?.status) params.status = filters.status;
+    if (filters?.limit) params.limit = filters.limit;
+    if (filters?.date_from) params.date_from = filters.date_from;
+    if (filters?.date_to) params.date_to = filters.date_to;
+    const res = await apiClient.get(`/api/admin/tenants/${tenantId}/tools/calls`, { params });
+    return res.data;
+  },
   delete: async (tenantId: string, toolId: string): Promise<void> => {
     await apiClient.delete(`/api/admin/tenants/${tenantId}/tools/${toolId}`);
   },
 };
+
+export interface ToolCallRecord {
+  created_at: string;
+  chat_id: string | null;
+  message_id: string | null;
+  ok: boolean;
+  args_preview: string | null;
+  output_chars: number | null;
+  latency_ms: number | null;
+  round: number | null;
+}
 
 export interface SimulateResponse {
   tool_called: boolean;
@@ -307,6 +331,104 @@ export interface SemanticTestResponse {
   top_k: number;
   results: SemanticTestRow[];
 }
+
+// ─── Tool-builder agent (chat → search_records tool) ──────────────────────────
+export interface ToolBuilderMessage {
+  role: 'user' | 'assistant' | 'tool';
+  content: string;
+}
+export interface ToolBuilderTraceStep {
+  tool: string;
+  args: Record<string, unknown>;
+  result_preview: string;
+}
+export interface ToolBuilderProposal {
+  name: string;
+  description: string | null;
+  config_json: Record<string, unknown>;
+}
+export interface ToolBuilderChatResponse {
+  reply: string;
+  trace: ToolBuilderTraceStep[];
+  proposed: ToolBuilderProposal | null;
+}
+
+export const toolBuilderApi = {
+  chat: async (tenantId: string, messages: ToolBuilderMessage[]): Promise<ToolBuilderChatResponse> => {
+    const res = await apiClient.post(`/api/admin/tenants/${tenantId}/tool-builder/chat`, { messages });
+    return res.data;
+  },
+  create: async (
+    tenantId: string,
+    body: { name: string; description?: string | null; config_json: Record<string, unknown>; is_active?: boolean },
+  ): Promise<{ id: string; name: string; is_active: boolean }> => {
+    const res = await apiClient.post(`/api/admin/tenants/${tenantId}/tool-builder/create`, body);
+    return res.data;
+  },
+};
+
+// ─── Voice usage (STT/TTS metering) ───────────────────────────────────────────
+export interface VoiceUsageRow {
+  kind: 'stt' | 'tts';
+  unit_type: string;       // 'chars' | 'seconds'
+  provider: string | null;
+  calls: number;
+  units: number;
+  cost_usd: number;
+}
+
+export const voiceApi = {
+  usage: async (
+    tenantId: string,
+    filters?: { date_from?: string; date_to?: string },
+  ): Promise<{ items: VoiceUsageRow[] }> => {
+    const params: Record<string, unknown> = {};
+    if (filters?.date_from) params.date_from = filters.date_from;
+    if (filters?.date_to) params.date_to = filters.date_to;
+    const res = await apiClient.get(`/api/admin/tenants/${tenantId}/voice/usage`, { params });
+    return res.data;
+  },
+};
+
+// ─── Schema notes (semantic layer over a data source) ─────────────────────────
+export interface SchemaNote {
+  id: string;
+  table_name: string | null;
+  column_name: string | null;
+  description: string | null;
+  references: string | null;
+  source: string;
+}
+export interface SchemaNotesResponse {
+  notes: SchemaNote[];
+  digest: string;
+  count: number;
+}
+
+export const schemaNotesApi = {
+  list: async (tenantId: string, dataSourceId: string): Promise<SchemaNotesResponse> => {
+    const res = await apiClient.get(`/api/admin/tenants/${tenantId}/data-sources/${dataSourceId}/schema-notes`);
+    return res.data;
+  },
+  upsert: async (
+    tenantId: string,
+    dataSourceId: string,
+    body: { table_name?: string | null; column_name?: string | null; description?: string | null; references?: string | null },
+  ): Promise<SchemaNote> => {
+    const res = await apiClient.put(`/api/admin/tenants/${tenantId}/data-sources/${dataSourceId}/schema-notes`, body);
+    return res.data;
+  },
+  remove: async (tenantId: string, dataSourceId: string, noteId: string): Promise<void> => {
+    await apiClient.delete(`/api/admin/tenants/${tenantId}/data-sources/${dataSourceId}/schema-notes/${noteId}`);
+  },
+  seed: async (
+    tenantId: string,
+    dataSourceId: string,
+  ): Promise<{ columns_seeded: number; relations_seeded: number; total: number }> => {
+    const res = await apiClient.post(`/api/admin/tenants/${tenantId}/data-sources/${dataSourceId}/schema-notes/seed`);
+    return res.data;
+  },
+};
 
 export const dataSourcesApi = {
   list: async (tenantId: string, page = 1, pageSize = 50): Promise<PaginatedResponse<TenantDataSource>> => {
@@ -544,6 +666,7 @@ export interface LogFilters {
   status?: string;     // 'success' | 'error'
   served_by?: string;  // 'tier0_template' | 'llm'
   has_tool_calls?: boolean;
+  correlation_id?: string;
 }
 
 function logParams(filters?: LogFilters): Record<string, unknown> {
@@ -555,6 +678,7 @@ function logParams(filters?: LogFilters): Record<string, unknown> {
   if (filters?.status) params.status = filters.status;
   if (filters?.served_by) params.served_by = filters.served_by;
   if (filters?.has_tool_calls !== undefined) params.has_tool_calls = filters.has_tool_calls;
+  if (filters?.correlation_id) params.correlation_id = filters.correlation_id;
   return params;
 }
 

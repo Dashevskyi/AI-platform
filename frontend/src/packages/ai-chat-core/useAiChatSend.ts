@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { getAiChatApi } from './api';
 import type {
   AuthMode,
+  ChatActor,
   ConnectionOptions,
   Message,
   SendArgs,
@@ -41,6 +42,10 @@ export type UseAiChatSendOptions = ConnectionOptions & {
   /** Reserved for future use: per-attachment processing progress.
    *  Will fire when the backend exposes attachment_processing SSE events. */
   onAttachmentProgress?: (fileId: string, ev: AttachmentProgressEvent) => void;
+  /** Verified identity/context of the asker, sent with every message. The
+   *  channel/CRM provides it in production; the admin test chat lets the
+   *  operator set it to exercise actor-dependent tools ({actor.external_id}). */
+  actor?: ChatActor | null;
 };
 
 export type UseAiChatSendResult = {
@@ -79,6 +84,7 @@ export function useAiChatSend(options: UseAiChatSendOptions): UseAiChatSendResul
     onComplete,
     onError,
     onSuccess,
+    actor,
     // onAttachmentProgress, // reserved
   } = options;
 
@@ -144,7 +150,7 @@ export function useAiChatSend(options: UseAiChatSendOptions): UseAiChatSendResul
         }
 
         if (!streamingMode) {
-          const msg = await api.sendMessage(tenantId, chatId, { content, idempotency_key: idemKey, voice_mode: voiceMode });
+          const msg = await api.sendMessage(tenantId, chatId, { content, idempotency_key: idemKey, voice_mode: voiceMode, actor: actor ?? null });
           onComplete?.(msg);
           onSuccess?.('Сообщение отправлено');
           return;
@@ -160,7 +166,7 @@ export function useAiChatSend(options: UseAiChatSendOptions): UseAiChatSendResul
         await api.sendMessageStream(
           tenantId,
           chatId,
-          { content, idempotency_key: idemKey, voice_mode: voiceMode },
+          { content, idempotency_key: idemKey, voice_mode: voiceMode, actor: actor ?? null },
           (eventType, payload) => {
             const ev: StreamEvent = { type: eventType, payload, ts: Date.now() };
             setStreamEvents((prev) => [...prev, ev]);
@@ -242,6 +248,7 @@ export function useAiChatSend(options: UseAiChatSendOptions): UseAiChatSendResul
       onComplete,
       onError,
       onSuccess,
+      actor,
     ],
   );
 

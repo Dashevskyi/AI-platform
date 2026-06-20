@@ -31,6 +31,7 @@ import {
   Checkbox,
   Box,
   HoverCard,
+  ScrollArea,
 } from '@mantine/core';
 import {
   IconPlus,
@@ -59,6 +60,8 @@ import {
   IconBolt,
   IconSearch,
   IconRobot,
+  IconWand,
+  IconBook2,
 } from '@tabler/icons-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { notifications } from '@mantine/notifications';
@@ -73,6 +76,9 @@ import {
 } from '../shared/api/endpoints';
 import type { BuiltinToolItem, SimulateResponse } from '../shared/api/endpoints';
 import { ParametersEditor, type JsonSchema as JsonSchemaType } from '../components/Tools/ParametersEditor';
+import { ToolBuilderModal } from '../components/Tools/ToolBuilderModal';
+import { SchemaNotesModal } from '../components/Tools/SchemaNotesModal';
+import { ToolCallsModal } from '../components/Tools/ToolCallsModal';
 import { Tier0TemplateEditor, type Tier0Template } from '../components/Tier0TemplateEditor';
 import type {
   TenantApiKey,
@@ -200,7 +206,17 @@ export function TenantDetailPage() {
       </Group>
 
       <Tabs defaultValue={has('logs') ? 'overview' : 'general'} keepMounted={false}>
-        <Tabs.List>
+        <Box
+          style={{
+            position: 'sticky',
+            // Stick just below the fixed AppShell header (60px), not under it.
+            top: 'var(--app-shell-header-height, 60px)',
+            zIndex: 3,
+            background: 'var(--mantine-color-body)',
+          }}
+        >
+          <ScrollArea type="auto" scrollbarSize={6} offsetScrollbars="x">
+            <Tabs.List style={{ flexWrap: 'nowrap', width: 'max-content', minWidth: '100%' }}>
           {has('logs') && <Tabs.Tab value="overview">Обзор</Tabs.Tab>}
           <Tabs.Tab value="general">Общее</Tabs.Tab>
           {has('keys') && <Tabs.Tab value="keys">API Ключи</Tabs.Tab>}
@@ -218,7 +234,9 @@ export function TenantDetailPage() {
           {isSuperadmin && <Tabs.Tab value="stats">Статистика</Tabs.Tab>}
           {has('users') && <Tabs.Tab value="users">Пользователи</Tabs.Tab>}
           {isSuperadmin && <Tabs.Tab value="api-info">API</Tabs.Tab>}
-        </Tabs.List>
+            </Tabs.List>
+          </ScrollArea>
+        </Box>
 
         {has('logs') && (
           <Tabs.Panel value="overview" pt="md">
@@ -320,6 +338,7 @@ function ApiKeysTab({ tenantId }: { tenantId: string }) {
   const [keyMemoryPrompt, setKeyMemoryPrompt] = useState('');
   const [keyAllowedToolsRestricted, setKeyAllowedToolsRestricted] = useState(false);
   const [keyAllowedToolIds, setKeyAllowedToolIds] = useState<string[]>([]);
+  const [keyActorTrusted, setKeyActorTrusted] = useState(false);
   const [editKey, setEditKey] = useState<TenantApiKey | null>(null);
   const [rawKey, setRawKey] = useState('');
   const [rawKeyModalOpen, setRawKeyModalOpen] = useState(false);
@@ -400,6 +419,7 @@ function ApiKeysTab({ tenantId }: { tenantId: string }) {
       assistant_id: keyAssistantId,
       memory_prompt: keyMemoryPrompt || undefined,
       allowed_tool_ids: keyAllowedToolsRestricted ? keyAllowedToolIds : null,
+      actor_trusted: keyActorTrusted,
     }),
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['tenants', tenantId, 'keys'] });
@@ -410,6 +430,7 @@ function ApiKeysTab({ tenantId }: { tenantId: string }) {
       setKeyMemoryPrompt('');
       setKeyAllowedToolsRestricted(false);
       setKeyAllowedToolIds([]);
+      setKeyActorTrusted(false);
       setRawKey(result.raw_key);
       setRawKeyModalOpen(true);
     },
@@ -423,6 +444,7 @@ function ApiKeysTab({ tenantId }: { tenantId: string }) {
       keysApi.update(tenantId, keyId, payload),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['tenants', tenantId, 'keys'] });
+      setCreateOpen(false);
       setEditKey(null);
       setKeyName('');
       setKeyGroupId(null);
@@ -430,6 +452,7 @@ function ApiKeysTab({ tenantId }: { tenantId: string }) {
       setKeyMemoryPrompt('');
       setKeyAllowedToolsRestricted(false);
       setKeyAllowedToolIds([]);
+      setKeyActorTrusted(false);
       notifications.show({ title: 'Обновлено', message: 'API ключ обновлён', color: 'green' });
     },
     onError: () => {
@@ -522,6 +545,7 @@ function ApiKeysTab({ tenantId }: { tenantId: string }) {
     setKeyMemoryPrompt('');
     setKeyAllowedToolsRestricted(false);
     setKeyAllowedToolIds([]);
+    setKeyActorTrusted(false);
     setCreateOpen(true);
   };
 
@@ -534,6 +558,7 @@ function ApiKeysTab({ tenantId }: { tenantId: string }) {
     const keyPermissions = normalizePermissionList(key.allowed_tool_ids);
     setKeyAllowedToolsRestricted(keyPermissions.restricted);
     setKeyAllowedToolIds(keyPermissions.ids);
+    setKeyActorTrusted(!!key.actor_trusted);
     setCreateOpen(true);
   };
 
@@ -780,6 +805,7 @@ function ApiKeysTab({ tenantId }: { tenantId: string }) {
                   assistant_id: keyAssistantId,
                   memory_prompt: keyMemoryPrompt || null,
                   allowed_tool_ids: keyAllowedToolsRestricted ? keyAllowedToolIds : null,
+                  actor_trusted: keyActorTrusted,
                 },
               });
             } else {
@@ -822,6 +848,13 @@ function ApiKeysTab({ tenantId }: { tenantId: string }) {
               styles={{ input: { resize: 'vertical', whiteSpace: 'pre-wrap' } }}
               value={keyMemoryPrompt}
               onChange={(e) => setKeyMemoryPrompt(e.currentTarget.value)}
+            />
+            <Switch
+              label="Доверять actor (идентичность пользователя)"
+              description="Включай ТОЛЬКО для server-to-server интеграции (CRM-бэкенд, который сам аутентифицировал пользователя). Тогда платформа примет actor из запроса и тулы смогут фильтровать по нему ({actor.external_id}). НЕ включай для встраиваемого/браузерного ключа — клиент сможет подделать идентичность. По умолчанию выключено."
+              checked={keyActorTrusted}
+              onChange={(e) => setKeyActorTrusted(e.currentTarget.checked)}
+              color="orange"
             />
             <Switch
               label="Ограничить доступ к tools"
@@ -1223,6 +1256,7 @@ type SearchJoinRow = {
   alias: string;
   left_column: string;
   right_column: string;
+  extra_on: string;
 };
 
 type SearchStaticFilterRow = {
@@ -1527,6 +1561,7 @@ function readSearchJoinRows(config: Record<string, unknown> | null | undefined):
     alias: typeof j.alias === 'string' ? j.alias : '',
     left_column: typeof j.left_column === 'string' ? j.left_column : '',
     right_column: typeof j.right_column === 'string' ? j.right_column : '',
+    extra_on: typeof j.extra_on === 'string' ? j.extra_on : '',
   }));
 }
 
@@ -1638,6 +1673,7 @@ function applySearchRecordsEditor(
       ...(j.alias.trim() ? { alias: j.alias.trim() } : {}),
       left_column: j.left_column.trim(),
       right_column: j.right_column.trim(),
+      ...(j.extra_on.trim() ? { extra_on: j.extra_on.trim() } : {}),
     }));
   if (validJoins.length > 0) runtime.joins = validJoins;
   else delete runtime.joins;
@@ -3060,6 +3096,9 @@ function ToolsTab({ tenantId }: { tenantId: string }) {
   const queryClient = useQueryClient();
   const [page, setPage] = useState(1);
   const [modalOpen, setModalOpen] = useState(false);
+  const [builderOpen, setBuilderOpen] = useState(false);
+  const [schemaNotesOpen, setSchemaNotesOpen] = useState(false);
+  const [callsTool, setCallsTool] = useState<{ name: string; config_json: Record<string, unknown> } | null>(null);
   const [editId, setEditId] = useState<string | null>(null);
   const [toolName, setToolName] = useState('');
   const [toolDesc, setToolDesc] = useState('');
@@ -3808,9 +3847,29 @@ function ToolsTab({ tenantId }: { tenantId: string }) {
             <Text size="xs" c="dimmed">Найдено: {data.total_count}</Text>
           )}
         </Group>
-        <Button leftSection={<IconPlus size={16} />} size="sm" onClick={openCreate}>
-          Добавить инструмент
-        </Button>
+        <Group gap="xs">
+          <Button
+            leftSection={<IconBook2 size={16} />}
+            size="sm"
+            variant="light"
+            color="indigo"
+            onClick={() => setSchemaNotesOpen(true)}
+          >
+            Справочник схемы
+          </Button>
+          <Button
+            leftSection={<IconWand size={16} />}
+            size="sm"
+            variant="light"
+            color="teal"
+            onClick={() => setBuilderOpen(true)}
+          >
+            Конструктор (агент)
+          </Button>
+          <Button leftSection={<IconPlus size={16} />} size="sm" onClick={openCreate}>
+            Добавить инструмент
+          </Button>
+        </Group>
       </Group>
 
       {isLoading ? (
@@ -3903,9 +3962,17 @@ function ToolsTab({ tenantId }: { tenantId: string }) {
                               if (!m) return <Text size="sm" c="dimmed">—</Text>;
                               const lat = m.avg_latency_ms;
                               return (
-                                <Tooltip label={`${m.calls} вызов(ов), ${m.errors} ошиб.`}>
-                                  <Group gap={6} wrap="nowrap">
-                                    <Text size="sm">{m.calls}</Text>
+                                <Tooltip label={`${m.calls} вызов(ов), ${m.errors} ошиб. — клик: параметры вызовов`}>
+                                  <Group
+                                    gap={6}
+                                    wrap="nowrap"
+                                    style={{ cursor: 'pointer' }}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setCallsTool({ name: m.name, config_json: (tool.config_json || {}) as Record<string, unknown> });
+                                    }}
+                                  >
+                                    <Text size="sm" td="underline">{m.calls}</Text>
                                     <Badge size="xs" variant="light"
                                       color={m.success_rate >= 0.9 ? 'green' : m.success_rate >= 0.7 ? 'yellow' : 'red'}>
                                       {(m.success_rate * 100).toFixed(0)}%
@@ -4137,7 +4204,7 @@ function ToolsTab({ tenantId }: { tenantId: string }) {
                         variant="light"
                         size="xs"
                         leftSection={<IconPlus size={14} />}
-                        onClick={() => setSearchJoinRows([...searchJoinRows, { type: 'left', table: '', alias: '', left_column: '', right_column: '' }])}
+                        onClick={() => setSearchJoinRows([...searchJoinRows, { type: 'left', table: '', alias: '', left_column: '', right_column: '', extra_on: '' }])}
                       >
                         Добавить
                       </Button>
@@ -4152,6 +4219,7 @@ function ToolsTab({ tenantId }: { tenantId: string }) {
                             <Table.Th w={80}>Алиас</Table.Th>
                             <Table.Th>Левая колонка</Table.Th>
                             <Table.Th>Правая колонка</Table.Th>
+                            <Table.Th>Доп. условие (extra_on)</Table.Th>
                             <Table.Th w={44}></Table.Th>
                           </Table.Tr>
                         </Table.Thead>
@@ -4200,6 +4268,11 @@ function ToolsTab({ tenantId }: { tenantId: string }) {
                               <Table.Td>
                                 <Autocomplete placeholder="s.id" value={row.right_column} data={activeColumnSuggestions} limit={20} onChange={(val) => {
                                   const next = [...searchJoinRows]; next[index] = { ...row, right_column: val }; setSearchJoinRows(next);
+                                }} />
+                              </Table.Td>
+                              <Table.Td>
+                                <TextInput placeholder="напр. s.object_type='welding'" value={row.extra_on} onChange={(e) => {
+                                  const next = [...searchJoinRows]; next[index] = { ...row, extra_on: e.currentTarget.value }; setSearchJoinRows(next);
                                 }} />
                               </Table.Td>
                               <Table.Td>
@@ -4472,6 +4545,43 @@ function ToolsTab({ tenantId }: { tenantId: string }) {
                           <Text size="xs" c="dimmed">Нет статических фильтров</Text>
                         )}
                       </div>
+                      {(() => {
+                        let actorMatch: Array<Record<string, unknown>> = [];
+                        let actorStatics: Array<[string, string]> = [];
+                        try {
+                          const parsed = JSON.parse(configJson);
+                          const rt = isRecord(parsed?.x_backend_config) ? parsed.x_backend_config : {};
+                          if (Array.isArray(rt.actor_match)) actorMatch = rt.actor_match as Array<Record<string, unknown>>;
+                          if (isRecord(rt.static_filters)) {
+                            actorStatics = (Object.entries(rt.static_filters) as Array<[string, unknown]>)
+                              .filter(([, v]) => typeof v === 'string' && (v as string).includes('{actor.')) as Array<[string, string]>;
+                          }
+                        } catch { /* ignore */ }
+                        if (!actorMatch.length && !actorStatics.length) return null;
+                        return (
+                          <Alert color="teal" variant="light" icon={<IconInfoCircle size={14} />} p="xs">
+                            <Text size="xs" fw={600} mb={2}>Защита по actor (привязка к пользователю)</Text>
+                            {actorStatics.map(([k, v], i) => (
+                              <Text key={`s${i}`} size="xs">
+                                • форс-фильтр <Code>{k}</Code> = <Code>{v}</Code>{v.includes(',') || v.includes('external_id') ? ' (список → IN)' : ''}
+                              </Text>
+                            ))}
+                            {actorMatch.map((am, i) => {
+                              const cols = (Array.isArray(am.columns) ? am.columns : [am.column]).filter(Boolean).join(' / ');
+                              const mode = String(am.mode || 'eq');
+                              const modeLabel = mode === 'phone' ? 'номер (нормализовано)' : mode === 'contains' ? 'вхождение' : 'точно';
+                              return (
+                                <Text key={`m${i}`} size="xs">
+                                  • совпадение <Code>{cols}</Code> с <Code>{String(am.value)}</Code> — {modeLabel}
+                                </Text>
+                              );
+                            })}
+                            <Text size="xs" c="dimmed" mt={2}>
+                              Задаются в сыром config_json (вкладка «JSON»). Без actor тул ничего не вернёт (fail-closed).
+                            </Text>
+                          </Alert>
+                        );
+                      })()}
                       <div>
                         <Group justify="space-between" mb={4}>
                           <Text size="xs" fw={600} c="dimmed" tt="uppercase">Окно по дате</Text>
@@ -5680,6 +5790,21 @@ function ToolsTab({ tenantId }: { tenantId: string }) {
           </Group>
         </Stack>
       </Modal>
+      <ToolBuilderModal
+        tenantId={tenantId}
+        opened={builderOpen}
+        onClose={() => setBuilderOpen(false)}
+      />
+      <SchemaNotesModal
+        tenantId={tenantId}
+        opened={schemaNotesOpen}
+        onClose={() => setSchemaNotesOpen(false)}
+      />
+      <ToolCallsModal
+        tenantId={tenantId}
+        tool={callsTool}
+        onClose={() => setCallsTool(null)}
+      />
     </Stack>
   );
 }
