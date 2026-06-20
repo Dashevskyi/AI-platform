@@ -498,16 +498,25 @@ async def try_tier0(
     min_tool_score: float = 0.80,
     max_score_gap: float = 0.15,
     tool_context: dict | None = None,
+    candidate_ids: "Sequence | None" = None,
 ) -> Tier0Result | None:
     """Run the Tier 0 router. Returns None to signal "fall back to LLM".
 
     `tool_context` is the per-request `_context` (actor, redact_fields, ids) the
     main pipeline injects into tool configs. Tier 0 MUST forward it too, or the
-    deterministic path bypasses PII redaction and actor forced-filters."""
+    deterministic path bypasses PII redaction and actor forced-filters.
+
+    `candidate_ids` is the effective allow-set (API-key ∩ assistant) — Tier 0
+    MUST only route to tools the current assistant can actually call, else it can
+    short-circuit to an out-of-scope tool (e.g. an operator asking for
+    "абоненти" matched tenant-wide `search_clients`), leaving the model with an
+    empty catalog. None = no restriction (all tenant tools)."""
     if not (user_query and user_query.strip()):
         return None
     if not embedding_model:
         return None  # need embeddings to do semantic match
+    if candidate_ids is not None and len(candidate_ids) == 0:
+        return None  # assistant/key has no tool access — nothing for Tier 0 to do
 
     t_start = time.perf_counter()
 
@@ -524,6 +533,7 @@ async def try_tier0(
             query=user_query,
             db=db,
             embedding_model=embedding_model,
+            candidate_ids=candidate_ids,
             top_k=5,
         )
     except Exception:

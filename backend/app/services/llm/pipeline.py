@@ -971,6 +971,16 @@ async def _chat_completion_inner(self) -> dict:
     # ~100-300ms vs 1-2s. If anything is uncertain → returns None and we
     # fall through to the full pipeline below.
     if getattr(config, "tier0_enabled", False):
+        # Effective tool allow-set (API-key ∩ assistant) — Tier 0 must respect it,
+        # else it can route to an out-of-scope tenant tool and leave the model
+        # with an empty catalog. Mirrors the scope logic applied below for the
+        # LLM path. None = no restriction; empty set = no tool access.
+        _t0_allowed = await _load_allowed_tool_ids(db, tenant_id, api_key_id)
+        _t0_scope = getattr(config, "assistant_allowed_tool_ids", None)
+        if _t0_scope is not None:
+            _t0_set = {str(t) for t in _t0_scope}
+            _t0_allowed = _t0_set if _t0_allowed is None else (_t0_allowed & _t0_set)
+        _t0_candidates = None if _t0_allowed is None else [uuid.UUID(x) for x in _t0_allowed]
         try:
             from app.services.llm.tier0_router import try_tier0
             tier0_result = await try_tier0(
@@ -980,6 +990,7 @@ async def _chat_completion_inner(self) -> dict:
                 embedding_model=getattr(config, "embedding_model_name", None),
                 min_tool_score=float(getattr(config, "tier0_min_tool_score", 0.80) or 0.80),
                 max_score_gap=float(getattr(config, "tier0_max_score_gap", 0.15) or 0.15),
+                candidate_ids=_t0_candidates,
                 # Same _context the LLM path injects — so Tier 0 honours PII
                 # redaction (redact_fields) and actor forced-filters too.
                 tool_context={
