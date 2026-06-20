@@ -139,19 +139,11 @@ CASES = [
 # known weak spot (esp. Qwen3-14B) and the precise SFT target — so checks are
 # expect_tool, not exact fact-match (no verified operator dataset needed; the
 # tool name is recorded in debug.tool_calls whether or not the call succeeds).
-# NB: search_welding_points (0da5fbb8) is soft-deleted in prod (no active welding
-# tool exists), so it's intentionally NOT here — attaching a deleted tool just
-# makes a case unwinnable. switch_state_log_search needed an embedding backfill
-# (agent-created tools weren't embedded — fixed in tool_builder /create 2026-06-20).
-OP_TOOL_IDS = [
-    "91c42860-aa2e-478d-928f-daf56e369751",  # search_electric_on_switch
-    "9031f8a0-6284-4114-92d0-1bd10ea3ef39",  # switch_state_log_search
-    "401c9591-88ed-418b-87cd-641e97ca6e85",  # switch_ports_status
-    "46706271-6ffc-4874-a0d4-43fb33aaf579",  # topology_path
-    "4f0ac663-e568-48eb-9f4c-af1973e53826",  # topology_neighbors
-    "0259bc4e-b03c-4690-9d2a-a441586284ab",  # topology_find_mac
-    "3ed6ae92-2ef0-42f8-9c39-802b66f451d6",  # search_dev_by_mac
-]
+# Operator clone gets the FULL active tool set of the tenant (resolved at setup
+# via _active_tool_ids), not a hand-picked few — so the eval exercises the
+# realistic ~45-tool routing scenario (semantic floor/topk actually kick in),
+# matching real operator traffic. Soft-deleted/unembedded tools are excluded by
+# the query; agent-created tools now embed on /create (fixed 2026-06-20).
 
 OP_PROMPT = (
     "Ти — асистент для інженерів та операторів мережі інтернет-провайдера. "
@@ -330,18 +322,21 @@ async def setup(s) -> list[dict]:
     cli_a = await _ensure_clone(s, "__eval__", cli_ov, cli_tl)
     cli_k = await _fresh_key(s, "__eval_key__", cli_a)
 
-    # Guard: a soft-deleted / inactive / unembedded tool silently breaks tool
-    # selection — surface it instead of producing mysterious 0/3 failures.
-    bad = (await s.execute(text(
-        "SELECT name, deleted_at IS NOT NULL del, NOT is_active inact, embedding IS NULL noemb"
-        " FROM tenant_tools WHERE id = ANY(:ids)"
-        " AND (deleted_at IS NOT NULL OR NOT is_active OR embedding IS NULL)"),
-        {"ids": OP_TOOL_IDS})).mappings().all()
-    for b in bad:
-        print(f"  [WARN] op tool '{b['name']}' unusable: deleted={b['del']} inactive={b['inact']} no_embedding={b['noemb']}")
+    # Operator clone = ALL active, non-deleted tenant tools (realistic ~45-tool
+    # routing). Exclude the client self-service tools (forced-filter by actor —
+    # they belong to the client persona, not an operator).
+    _client_tool_ids = set(src["allowed_tool_ids"] or [])
+    op_rows = (await s.execute(text(
+        "SELECT id, name, embedding IS NULL noemb FROM tenant_tools"
+        " WHERE tenant_id=:t AND is_active=true AND deleted_at IS NULL"), {"t": TENANT})).mappings().all()
+    op_tool_ids = [str(r["id"]) for r in op_rows if str(r["id"]) not in _client_tool_ids]
+    for r in op_rows:
+        if r["noemb"] and str(r["id"]) not in _client_tool_ids:
+            print(f"  [WARN] op tool '{r['name']}' has no embedding — only reachable via fallback")
+    print(f"  operator clone: {len(op_tool_ids)} tools")
 
     op_ov = json.dumps({"system_prompt": OP_PROMPT, "enable_thinking": False})
-    op_a = await _ensure_clone(s, "__eval_op__", op_ov, json.dumps(OP_TOOL_IDS))
+    op_a = await _ensure_clone(s, "__eval_op__", op_ov, json.dumps(op_tool_ids))
     op_k = await _fresh_key(s, "__eval_op_key__", op_a)
 
     await s.commit()

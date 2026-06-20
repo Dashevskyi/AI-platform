@@ -52,7 +52,8 @@ async def main():
                ORDER BY lower(trim(m.content)), m.created_at DESC"""),
             {"t": TENANT, "e": evk or ["00000000-0000-0000-0000-000000000000"]})).all()
 
-    questions = [r[0].strip() for r in rows if not is_noise(r[0])]
+    # Collapse whitespace (tabs/newlines inside a message would break the TSV).
+    questions = sorted({" ".join((r[0] or "").split()) for r in rows if not is_noise(r[0])})
 
     # Attach a candidate tool (top semantic match, tenant-wide). Human reviews.
     labelled = []
@@ -63,13 +64,18 @@ async def main():
             top = res[0].name if res else ""
             score = round(getattr(res[0], "_semantic_score", 0.0), 3) if res else 0.0
             second = res[1].name if len(res) > 1 else ""
-            labelled.append((q, top, score, second))
+            second_sc = round(getattr(res[1], "_semantic_score", 0.0), 3) if len(res) > 1 else 0.0
+            labelled.append((q, top, score, second, second_sc))
 
     labelled.sort(key=lambda x: (x[1], -x[2]))
-    # TSV: question \t candidate_tool \t score \t runner_up \t [review: keep_tool] \t [holdout?]
-    print("question\tcandidate_tool\tscore\trunner_up\texpect_tool(review)\tholdout")
-    for q, top, score, second in labelled:
-        print(f"{q}\t{top}\t{score}\t{second}\t\t")
+    # expect_tool is PRE-FILLED with the candidate — reviewer corrects in place.
+    # flag = LOW when the pick is shaky (weak score or close runner-up) → review first.
+    # TSV: question, candidate_tool, score, runner_up, gap, flag, expect_tool(prefilled), holdout
+    print("question\tcandidate_tool\tscore\trunner_up\tgap\tflag\texpect_tool\tholdout")
+    for q, top, score, second, second_sc in labelled:
+        gap = round(score - second_sc, 3)
+        flag = "LOW" if (score < 0.5 or gap < 0.05) else ""
+        print(f"{q}\t{top}\t{score}\t{second}\t{gap}\t{flag}\t{top}\t")
 
     # Histogram to stderr so it doesn't pollute the TSV.
     from collections import Counter
