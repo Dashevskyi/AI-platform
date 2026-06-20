@@ -209,6 +209,16 @@ def has_md_table(s: str) -> bool:
     return bool(_ROW.search(s)) and bool(re.search(r"\|[\s:|-]*-{2,}", s))
 
 
+# Infrastructure tools the model may call on ANY turn — not network/client data
+# fetches. Excluded from the strict no_tool check (and KB retrieval is legit for
+# KB questions). A conversational/KB case fails no_tool only if it pulls a real
+# DATA tool.
+META_TOOLS = {
+    "search_kb", "recall_memory", "recall_chat", "describe_tool", "plan",
+    "plan_update", "memory_save", "get_artifact", "find_artifacts", "get_message",
+}
+
+
 def run_checks(case: dict, response: str, tools_called: set) -> dict:
     out = {}
     if case.get("no_table"):
@@ -216,6 +226,10 @@ def run_checks(case: dict, response: str, tools_called: set) -> dict:
     # link_guard invariant: no payment URL unless get_payment_link was called.
     if "get_payment_link" not in tools_called:
         out["no_fabricated_pay_url"] = not bool(_PAY_URL.search(response or ""))
+    # Strict no-tool: a conversational/KB/dialog case must not pull a DATA tool
+    # (meta/infra tools and KB retrieval don't count as a violation).
+    if case.get("no_tool"):
+        out["no_tool"] = not (set(tools_called) - META_TOOLS)
     if "expect_tool" in case:
         et = case["expect_tool"]
         if et is None:
@@ -458,5 +472,85 @@ async def main():
         print(f"    {cid:<24}{cells}")
 
 
+# ---------------- corpus mode (the ~400-case real test set) ----------------
+
+REPEATS_CORPUS = 1   # big set — single pass for a baseline; bump for stability
+
+
+def load_corpus(path="scripts/eval_corpus.csv") -> list[dict]:
+    """Load the frozen real-question corpus (question;profile;expect;holdout)."""
+    import csv
+    out = []
+    with open(path, encoding="utf-8-sig") as f:
+        for i, row in enumerate(csv.DictReader(f, delimiter=";")):
+            exp = (row["expect"] or "").strip()
+            c = {"id": f"c{i:03d}", "content": row["question"], "profile": row["profile"],
+                 "no_table": True, "holdout": (row.get("holdout") or "").strip() == "Y"}
+            if exp == "NONE":
+                c["no_tool"] = True
+            elif exp == "KB":
+                c["no_tool"] = True; c["kb"] = True
+            else:
+                c["expect_tool"] = exp.split("|") if "|" in exp else exp
+            out.append(c)
+    return out
+
+
+async def main_corpus():
+    corpus = load_corpus()
+    eng = create_async_engine(DB)
+    Session = async_sessionmaker(eng)
+    results = {}   # label -> list of (case, passed_bool)
+    async with Session() as s:
+        profiles = await setup(s)
+        pmap = {p["profile"]: p for p in profiles}
+        try:
+            for label, model_id in MODELS.items():
+                for prof in profiles:
+                    await set_model(s, prof["assistant"], model_id)
+                print(f"\n=== {label} · corpus ({len(corpus)} cases ×{REPEATS_CORPUS}) ===", flush=True)
+                results[label] = []
+                for n, case in enumerate(corpus):
+                    prof = pmap.get(case["profile"]) or pmap["operator"]
+                    passed, fails, called_any = False, set(), set()
+                    for _ in range(REPEATS_CORPUS):
+                        cid, resp = await run_case(prof["key"], case)
+                        tools = await tools_for_chat(s, cid)
+                        called_any |= tools
+                        checks = run_checks(case, resp, tools)
+                        if all(checks.values()):
+                            passed = True
+                        else:
+                            fails.update(k for k, v in checks.items() if not v)
+                    results[label].append((case, passed, sorted(called_any), sorted(fails)))
+                    if (n + 1) % 50 == 0:
+                        print(f"    .. {n + 1}/{len(corpus)}", flush=True)
+        finally:
+            await teardown(s)
+    await eng.dispose()
+
+    # ---- summary + failure dump ----
+    def pct(rows):
+        return f"{sum(p for _, p, _, _ in rows)}/{len(rows)} ({100 * sum(p for _, p, _, _ in rows) // max(len(rows), 1)}%)"
+    print("\n================ CORPUS SUMMARY ================")
+    for label, rows in results.items():
+        train = [r for r in rows if not r[0]["holdout"]]
+        hold = [r for r in rows if r[0]["holdout"]]
+        tool_cases = [r for r in rows if "expect_tool" in r[0]]
+        notool = [r for r in rows if r[0].get("no_tool")]
+        print(f"\n  {label}")
+        print(f"    overall {pct(rows)} | train {pct(train)} | holdout {pct(hold)}")
+        print(f"    tool-selection {pct(tool_cases)} | no-tool(strict) {pct(notool)}")
+        fpath = f"/tmp/corpus_fails_{label.split()[0]}.tsv"
+        with open(fpath, "w", encoding="utf-8") as f:
+            f.write("expected\tcalled\tfails\tquestion\n")
+            for case, p, called, fails in rows:
+                if not p:
+                    exp = case.get("expect_tool") or ("NO_TOOL" if case.get("no_tool") else "?")
+                    f.write(f"{exp}\t{','.join(called)}\t{','.join(fails)}\t{case['content']}\n")
+        print(f"    failures → {fpath}")
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    import sys
+    asyncio.run(main_corpus() if "corpus" in sys.argv else main())

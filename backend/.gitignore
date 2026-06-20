@@ -1,0 +1,4 @@
+
+# eval corpus contains real subscriber PII — keep local, regenerate from DB
+scripts/eval_corpus*.csv
+backend/scripts/eval_corpus*.csv
