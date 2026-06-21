@@ -43,6 +43,7 @@ from app.api.admin.assistants import router as assistants_router
 from app.api.admin.data_introspect import router as data_introspect_router
 from app.api.admin.schema_notes import router as schema_notes_router
 from app.api.admin.tool_builder import router as tool_builder_router
+from app.api.admin.tool_audit import router as tool_audit_router
 from app.api.admin.tts_local import router as tts_local_router
 from app.api.admin.stats import router as stats_router
 from app.api.admin.audit import router as audit_router
@@ -196,6 +197,7 @@ app.include_router(assistants_router)
 app.include_router(data_introspect_router)
 app.include_router(schema_notes_router)
 app.include_router(tool_builder_router)
+app.include_router(tool_audit_router)
 app.include_router(tts_local_router)
 app.include_router(stats_router)
 app.include_router(audit_router)
