@@ -22,6 +22,7 @@ Extend: add dicts to CASES; add check fns to run_checks().
 import asyncio
 import json
 import re
+import time
 import uuid
 
 import httpx
@@ -41,8 +42,10 @@ SRC_ASSISTANT = "320a6f9c-5f8c-4d7d-8e15-0815b6df0a09"  # telegram-bot — confi
 # no longer a separate cloud "V3" to compare against. V4-Flash is the client
 # model; Qwen3-14B is the local SFT baseline.
 MODELS = {
-    "V4-Flash":  "6fabeaf0-ed48-40df-a790-8987d3b8cd0a",
-    "Qwen3-14B": "00259f49-b6bb-49a7-af38-56e5ff2de27b",
+    "V4-Flash":       "6fabeaf0-ed48-40df-a790-8987d3b8cd0a",
+    # Qwen3-14B (00259f49) retired from .9:8000 — replaced by 30B-A3B-2507 there.
+    # 14B corpus baseline already recorded (65%). Re-add if re-served.
+    "Qwen3-30B-2507": "36bfe847-bac7-4bf1-9805-a0d0254eef07",
 }
 
 # Each case is run REPEATS times per model — models are probabilistic, so a
@@ -536,6 +539,7 @@ async def main_corpus():
                 for n, case in enumerate(corpus):
                     prof = pmap.get(case["profile"]) or pmap["operator"]
                     passed, fails, called_any = False, set(), set()
+                    t0 = time.perf_counter()
                     for _ in range(REPEATS_CORPUS):
                         try:
                             cid, resp = await run_case(prof["key"], case)
@@ -550,7 +554,8 @@ async def main_corpus():
                             passed = True
                         else:
                             fails.update(k for k, v in checks.items() if not v)
-                    results[label].append((case, passed, sorted(called_any), sorted(fails)))
+                    dt = (time.perf_counter() - t0) / max(REPEATS_CORPUS, 1)  # sec/case
+                    results[label].append((case, passed, sorted(called_any), sorted(fails), dt))
                     if (n + 1) % 50 == 0:
                         print(f"    .. {n + 1}/{len(corpus)}", flush=True)
         finally:
@@ -559,7 +564,16 @@ async def main_corpus():
 
     # ---- summary + failure dump ----
     def pct(rows):
-        return f"{sum(p for _, p, _, _ in rows)}/{len(rows)} ({100 * sum(p for _, p, _, _ in rows) // max(len(rows), 1)}%)"
+        return f"{sum(p for _, p, *_ in rows)}/{len(rows)} ({100 * sum(p for _, p, *_ in rows) // max(len(rows), 1)}%)"
+
+    def timing(rows):
+        ts = sorted(r[4] for r in rows)
+        if not ts:
+            return "n/a"
+        avg = sum(ts) / len(ts)
+        med = ts[len(ts) // 2]
+        return f"avg {avg:.1f}s | median {med:.1f}s | total {sum(ts) / 60:.1f}min"
+
     print("\n================ CORPUS SUMMARY ================")
     for label, rows in results.items():
         train = [r for r in rows if not r[0]["holdout"]]
@@ -569,13 +583,14 @@ async def main_corpus():
         print(f"\n  {label}")
         print(f"    overall {pct(rows)} | train {pct(train)} | holdout {pct(hold)}")
         print(f"    tool-selection {pct(tool_cases)} | no-tool(strict) {pct(notool)}")
+        print(f"    speed: {timing(rows)}")
         fpath = f"/tmp/corpus_fails_{label.split()[0]}.tsv"
         with open(fpath, "w", encoding="utf-8") as f:
-            f.write("expected\tcalled\tfails\tquestion\n")
-            for case, p, called, fails in rows:
+            f.write("expected\tcalled\tfails\tsec\tquestion\n")
+            for case, p, called, fails, dt in rows:
                 if not p:
                     exp = case.get("expect_tool") or ("NO_TOOL" if case.get("no_tool") else "?")
-                    f.write(f"{exp}\t{','.join(called)}\t{','.join(fails)}\t{case['content']}\n")
+                    f.write(f"{exp}\t{','.join(called)}\t{','.join(fails)}\t{dt:.1f}\t{case['content']}\n")
         print(f"    failures → {fpath}")
 
 
