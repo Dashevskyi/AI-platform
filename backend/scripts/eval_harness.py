@@ -147,9 +147,12 @@ CASES = [
 
 OP_PROMPT = (
     "Ти — асистент для інженерів та операторів мережі інтернет-провайдера. "
-    "Використовуй доступні інструменти (світчі, порти, топологія, муфти/точки зварювання, "
-    "запитка абонентів) щоб відповісти на технічний запит оператора. "
-    "Завжди обирай НАЙВІДПОВІДНІШИЙ інструмент під задачу. Відповідай списком, без таблиць."
+    "На БУДЬ-ЯКИЙ запит даних ти ЗАВЖДИ викликаєш найвідповідніший інструмент — "
+    "НІКОЛИ не відповідай з памʼяті й не вигадуй дані. "
+    "Обирай найбільш КОНКРЕТНИЙ інструмент під задачу: клієнт за телефоном/адресою, "
+    "світч за іменем, стан портів, топологія/звʼязки, запитка (electric), DHCP/IP, пінг тощо. "
+    "Якщо для виклику бракує параметра (напр. dev_id) — спершу знайди його відповідним інструментом, "
+    "потім виклич цільовий. Відповідай по суті, без зайвого."
 )
 
 OP_ACTOR = {"external_id": "op-eval", "role": "operator", "display_name": "інженер (eval)"}
@@ -331,7 +334,12 @@ async def setup(s) -> list[dict]:
     Each profile = {profile, assistant, key, cases}."""
     src = (await s.execute(text(
         "SELECT overrides, allowed_tool_ids FROM assistants WHERE id=:a"), {"a": SRC_ASSISTANT})).mappings().first()
-    cli_ov = json.dumps(src["overrides"])
+    # Disable Tier 0 on the eval clones (overridable per-assistant — prod shell
+    # config untouched). Tier 0 is deterministic & model-agnostic: if it fires,
+    # we're NOT testing the LLM's tool selection. We measure the model; the
+    # tier0-on production view is a separate concern.
+    _cli = dict(src["overrides"] or {}); _cli["tier0_enabled"] = False
+    cli_ov = json.dumps(_cli)
     cli_tl = json.dumps(src["allowed_tool_ids"]) if src["allowed_tool_ids"] is not None else None
     cli_a = await _ensure_clone(s, "__eval__", cli_ov, cli_tl)
     cli_k = await _fresh_key(s, "__eval_key__", cli_a)
@@ -349,7 +357,7 @@ async def setup(s) -> list[dict]:
             print(f"  [WARN] op tool '{r['name']}' has no embedding — only reachable via fallback")
     print(f"  operator clone: {len(op_tool_ids)} tools")
 
-    op_ov = json.dumps({"system_prompt": OP_PROMPT, "enable_thinking": False})
+    op_ov = json.dumps({"system_prompt": OP_PROMPT, "enable_thinking": False, "tier0_enabled": False})
     op_a = await _ensure_clone(s, "__eval_op__", op_ov, json.dumps(op_tool_ids))
     op_k = await _fresh_key(s, "__eval_op_key__", op_a)
 
@@ -411,12 +419,22 @@ async def run_case(key: str, case: dict) -> str:
 
 
 async def tools_for_chat(s, cid: str) -> set:
-    dbg = (await s.execute(text(
-        "SELECT debug FROM llm_request_logs WHERE chat_id=:c ORDER BY created_at DESC LIMIT 1"), {"c": cid})).scalar()
+    row = (await s.execute(text(
+        "SELECT debug, model_name FROM llm_request_logs WHERE chat_id=:c"
+        " ORDER BY created_at DESC LIMIT 1"), {"c": cid})).mappings().first()
+    dbg = (row or {}).get("debug") or {}
     names = set()
-    for tc in ((dbg or {}).get("tool_calls") or []):
+    for tc in (dbg.get("tool_calls") or []):
         if isinstance(tc, dict) and tc.get("name"):
             names.add(tc["name"])
+    # Tier 0 executes a tool DETERMINISTICALLY, skipping the LLM — it's logged as
+    # model_name='tier0' with debug.tier0.tool and NO tool_calls. Count it as a
+    # real tool call, else clean entity queries (phone/IP/host — Tier 0's forte)
+    # falsely score as "no tool called".
+    if (row or {}).get("model_name") == "tier0":
+        t0 = (dbg.get("tier0") or {}).get("tool")
+        if t0:
+            names.add(t0)
     return names
 
 
@@ -487,7 +505,10 @@ def load_corpus(path="scripts/eval_corpus.csv") -> list[dict]:
             prof = row["profile"]
             c = {"id": f"c{i:03d}", "content": row["question"], "profile": prof,
                  "actor": A_131 if prof == "client" else OP_ACTOR,
-                 "no_table": True, "holdout": (row.get("holdout") or "").strip() == "Y"}
+                 # no_table only for the client (Telegram) persona — operators are
+                 # fine with tables; applying it там tanked V4-Flash unfairly.
+                 "no_table": prof == "client",
+                 "holdout": (row.get("holdout") or "").strip() == "Y"}
             if exp == "NONE":
                 c["no_tool"] = True
             elif exp == "KB":
