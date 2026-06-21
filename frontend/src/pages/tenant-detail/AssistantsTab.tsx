@@ -3,9 +3,10 @@ import {
   Stack, Card, Text, Group, Button, TextInput, Textarea, Select, MultiSelect,
   Badge, ActionIcon, Switch, Loader, Alert, Divider, Code, Modal, TagsInput,
 } from '@mantine/core';
-import { IconPlus, IconTrash, IconRobot, IconDeviceFloppy, IconPencil } from '@tabler/icons-react';
+import { IconPlus, IconTrash, IconRobot, IconDeviceFloppy, IconPencil, IconClipboardCheck } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
 import { assistantsApi, toolsApi, modelsApi, type Assistant } from '../../shared/api/endpoints';
+import { AssistantAuditModal } from '../../components/Tools/AssistantAuditModal';
 
 // Tri-state select: "" = inherit (key removed from overrides), else override.
 const INHERIT = '';
@@ -51,6 +52,7 @@ function AssistantEditor({
 }) {
   const [d, setD] = useState<Draft>(toDraft(assistant));
   const [saving, setSaving] = useState(false);
+  const [auditOpen, setAuditOpen] = useState(false);
   useEffect(() => { setD(toDraft(assistant)); }, [assistant]);
 
   const ovStr = (key: string) => (d.overrides[key] as string | undefined) ?? INHERIT;
@@ -182,8 +184,17 @@ function AssistantEditor({
         {!assistant.is_default
           ? <Button variant="subtle" color="red" leftSection={<IconTrash size={14} />} onClick={remove}>Удалить</Button>
           : <span />}
-        <Button leftSection={<IconDeviceFloppy size={14} />} loading={saving} onClick={save}>Сохранить</Button>
+        <Group gap="xs">
+          <Button variant="default" leftSection={<IconClipboardCheck size={14} />} onClick={() => setAuditOpen(true)}>
+            Аудит роутинга
+          </Button>
+          <Button leftSection={<IconDeviceFloppy size={14} />} loading={saving} onClick={save}>Сохранить</Button>
+        </Group>
       </Group>
+      <AssistantAuditModal
+        tenantId={tenantId} assistantId={assistant.id} assistantName={assistant.name}
+        opened={auditOpen} onClose={() => setAuditOpen(false)}
+      />
     </Stack>
   );
 }

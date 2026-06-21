@@ -1072,3 +1072,31 @@ export const gpuApi = {
     return r.data;
   },
 };
+
+export interface AuditCaseResult {
+  question: string;
+  expect_tool: string | null;
+  surfaced: { name: string; score: number }[];
+  tier0: { decision?: { fired?: boolean; tool?: string | null }; enabled?: boolean };
+  verdict: { level: 'ok' | 'warn' | 'error' | 'info'; msg: string };
+}
+export interface AuditResult {
+  assistant: { id: string; name: string; tool_count: number };
+  tier0_enabled: boolean;
+  summary: Record<string, number>;
+  results: AuditCaseResult[];
+}
+
+export const toolAuditApi = {
+  preview: async (
+    tenantId: string,
+    assistantId: string,
+    cases: { question: string; expect_tool?: string | null }[],
+  ): Promise<AuditResult> => {
+    const r = await apiClient.post(
+      `/api/admin/tenants/${tenantId}/assistants/${assistantId}/tool-audit/preview`,
+      { cases },
+    );
+    return r.data;
+  },
+};
