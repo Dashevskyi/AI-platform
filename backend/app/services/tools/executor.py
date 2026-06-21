@@ -178,6 +178,61 @@ def _validate_arguments_against_schema(
     )
 
 
+def _coerce_value(v, types: list):
+    """Coerce a single value toward the declared schema type(s). Conservative:
+    widen→string is free (preserves identifiers like phones/contracts); narrow
+    string→number ONLY when lossless (no leading zeros / sign noise)."""
+    if "string" in types and not isinstance(v, str):
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        if isinstance(v, (int, float)):
+            return str(v)
+    if "integer" in types and isinstance(v, str):
+        s = v.strip()
+        if re.fullmatch(r"-?\d+", s) and str(int(s)) == s:   # lossless only
+            return int(s)
+    if "number" in types and isinstance(v, str):
+        s = v.strip()
+        try:
+            f = float(s)
+            if s == repr(f) or s == str(f):
+                return f
+        except ValueError:
+            pass
+    if "boolean" in types and not isinstance(v, bool):
+        if v in (0, 1):
+            return bool(v)
+        if isinstance(v, str) and v.strip().lower() in ("true", "false"):
+            return v.strip().lower() == "true"
+    return v
+
+
+def _coerce_arguments_to_schema(tool_name: str, arguments: dict, tool_config: dict | None) -> None:
+    """Best-effort coercion of TOP-LEVEL args toward their DECLARED type
+    (config_json.function.parameters), in place, BEFORE validation. Always toward
+    the schema type, never the reverse. Identifiers declared as string stay string
+    (number→str). Irreducible mismatches are left for validation to surface."""
+    if not isinstance(tool_config, dict) or not isinstance(arguments, dict):
+        return
+    fn = tool_config.get("function")
+    props = ((fn or {}).get("parameters") or {}).get("properties") if isinstance(fn, dict) else None
+    if not isinstance(props, dict):
+        return
+    changed = []
+    for key, spec in props.items():
+        if key not in arguments or not isinstance(spec, dict) or not spec.get("type"):
+            continue
+        typ = spec["type"]
+        types = typ if isinstance(typ, list) else [typ]
+        v = arguments[key]
+        nv = _coerce_value(v, types)
+        if type(nv) is not type(v) or nv != v:
+            arguments[key] = nv
+            changed.append(f"{key}: {type(v).__name__}→{type(nv).__name__}")
+    if changed:
+        logger.info("[arg-coerce] %s: %s", tool_name, ", ".join(changed))
+
+
 def _get_at_path(obj, path: str):
     """Walk obj by dotted path. Returns (value, exists)."""
     cur = obj
@@ -537,6 +592,10 @@ async def execute_tool(tool_name: str, arguments: dict, tool_config: dict | None
     # the "string '1-18' instead of integer" class of bugs before we waste a
     # round-trip to the backend API and come back with HTTP 404. The model
     # gets a precise error message and self-corrects on the next round.
+    # Coerce args toward their declared types FIRST (number→string for string
+    # fields, lossless string→number, etc.) — removes a class of harmless type
+    # mismatches before the strict validation below rejects them.
+    _coerce_arguments_to_schema(tool_name, arguments, tool_config)
     validation_error = _validate_arguments_against_schema(tool_name, arguments, tool_config)
     if validation_error:
         logger.info("[tool-validation] %s rejected: %s", tool_name, validation_error[:200])

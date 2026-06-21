@@ -736,7 +736,7 @@ from app.services.tools.executor import execute_tool
 from app.services.kb.embedder import search_kb_chunks
 from app.services.llm.model_resolver import resolve_model
 from app.services.llm.context_compressor import RECENT_MESSAGES_FULL, trim_tool_definitions
-from app.services.llm.system_blocks import STATIC_SYSTEM_BLOCKS
+from app.services.llm.system_blocks import STATIC_SYSTEM_BLOCKS, effective_system_blocks
 from app.services.throttle import get_or_create_throttle, ThrottleRejected
 from app.services.jobs.queue import enqueue as enqueue_job
 from app.models.tenant import Tenant
@@ -1498,7 +1498,7 @@ async def _chat_completion_inner(self) -> dict:
     # === [HARDCODED-2,3,4,8,7] static, tenant-agnostic instruction blocks ===
     # Moved to app/services/llm/system_blocks.py (separates prompt content from
     # orchestration). Order preserved; always appended (formerly `if True`).
-    for _label, _text in STATIC_SYSTEM_BLOCKS:
+    for _label, _text in effective_system_blocks(config):
         _sys(_label, _text)
 
     # Collect long_term memory items from API key and its group (scoped to chats with this key)

@@ -46,7 +46,10 @@ STATIC_SYSTEM_BLOCKS: list[tuple[str, str]] = [
         "tool_call = пустой ответ.\n"
         "ТЫ вызываешь tools, не пользователь — никогда не пиши «вызови tool X».\n"
         "После ошибки/пустого результата tool — сразу делай следующий вызов, "
-        "не сообщай о намерении. Цепочка 2-3 tool_calls подряд — норма."
+        "не сообщай о намерении. Цепочка 2-3 tool_calls подряд — норма.\n"
+        "Даже ПОСЛЕ обсуждения/спора/уточнения с пользователем: на запрос данных "
+        "снова вызывай нужный tool (действие), а не объясняй вместо вызова — "
+        "предыдущая дискуссия не отменяет необходимости свежего вызова."
     ),
     (
         "HARDCODED-4 markdown format",
@@ -94,3 +97,25 @@ STATIC_SYSTEM_BLOCKS: list[tuple[str, str]] = [
         "Не вызывай тот же tool с теми же аргументами повторно."
     ),
 ]
+
+
+def default_system_blocks_json() -> list[dict]:
+    """Defaults as editable records (for the settings UI to prefill when unset)."""
+    return [{"label": lbl, "content": txt, "enabled": True} for lbl, txt in STATIC_SYSTEM_BLOCKS]
+
+
+def effective_system_blocks(config) -> list[tuple[str, str]]:
+    """Blocks to actually inject: tenant/assistant `system_blocks` override if set,
+    else the code DEFAULTS (STATIC_SYSTEM_BLOCKS). Accepts records ({label,content,
+    enabled}) or [label, content] pairs; disabled/empty records are dropped."""
+    raw = getattr(config, "system_blocks", None)
+    if not raw or not isinstance(raw, list):
+        return STATIC_SYSTEM_BLOCKS
+    out: list[tuple[str, str]] = []
+    for item in raw:
+        if isinstance(item, dict):
+            if item.get("enabled", True) and (item.get("content") or "").strip():
+                out.append((item.get("label", ""), item["content"]))
+        elif isinstance(item, (list, tuple)) and len(item) == 2 and item[1]:
+            out.append((item[0], item[1]))
+    return out or STATIC_SYSTEM_BLOCKS

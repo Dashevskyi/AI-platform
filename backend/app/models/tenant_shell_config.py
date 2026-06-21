@@ -153,5 +153,8 @@ class TenantShellConfig(Base):
     # A sensitive URL in the model's answer that did NOT appear verbatim in any
     # tool result / KB chunk this turn is treated as fabricated and rewritten.
     link_guard: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Editable override of the static system-prompt blocks. NULL → code defaults
+    # (STATIC_SYSTEM_BLOCKS). List of {label, content, enabled}. See system_blocks.py.
+    system_blocks: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
