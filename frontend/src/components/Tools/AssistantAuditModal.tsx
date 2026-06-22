@@ -194,7 +194,7 @@ export function AssistantAuditModal({ tenantId, assistantId, assistantName, open
                   </Table.Tr>
                   {preview[c.id] && (
                     <Table.Tr key={c.id + '-pv'}>
-                      <Table.Td colSpan={6} bg="var(--mantine-color-gray-0)">
+                      <Table.Td colSpan={6} bg="light-dark(var(--mantine-color-gray-0), var(--mantine-color-dark-6))">
                         <Group gap={4}>
                           <Text size="xs" c="dimmed">каталог (что уйдёт модели):</Text>
                           {preview[c.id].map((s) => (
