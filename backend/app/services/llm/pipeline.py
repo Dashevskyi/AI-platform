@@ -300,10 +300,34 @@ class ToolExecCtx:
     round_breakdown: list = None
     tool_routing_temperature: float = 0.0
     effective_temperature: float = 0.3
+    # When True, round 0 sends tool_choice="required" — forces the model to call
+    # a tool (anti "answers from memory / cheats" on a data-intent query). Set by
+    # the orchestrator from force_tool_on_data_intent + a strong semantic match.
+    force_tool_choice: bool = False
     # Auto tool-limit bookkeeping (per request). name → call count; failures
     # is a 1-element list used as a mutable int box.
     tool_call_counts: dict = None
     failed_calls: list = None
+
+
+def _round_extra_body(ctx: ToolExecCtx, round_num: int, voice_mode: bool) -> dict:
+    """thinking kwargs + (round 0 only) tool_choice='required' to force a tool
+    call on a data-intent query. Only round 0 forces — later rounds stay 'auto'
+    so the model can finalize instead of looping tool calls forever."""
+    eb = dict(_resolve_thinking_kwargs(
+        getattr(ctx.config, "enable_thinking", "on"), ctx.user_content, bool(ctx.tool_defs),
+        voice_mode=voice_mode,
+    ) or {})
+    # tool_choice="required" ONLY for non-thinking local models. Thinking models
+    # (DeepSeek V4 thinks by default) reject tool_choice ("Thinking mode does not
+    # support this tool_choice" → 400), and they don't need forcing anyway.
+    if round_num == 0 and ctx.tool_defs and ctx.force_tool_choice:
+        _ctk = eb.get("chat_template_kwargs") or {}
+        _thinking_on = bool(_ctk.get("enable_thinking") or _ctk.get("thinking"))
+        _is_deepseek = "deepseek" in (ctx.model_name or "").lower()
+        if not _thinking_on and not _is_deepseek:
+            eb["tool_choice"] = "required"
+    return eb
 
 
 async def _run_provider_round(ctx: ToolExecCtx, round_num: int, *, voice_mode: bool = False):
@@ -320,10 +344,7 @@ async def _run_provider_round(ctx: ToolExecCtx, round_num: int, *, voice_mode: b
         max_tokens=ctx.config.max_tokens,
         tools=ctx.tool_defs,
         on_chunk=ctx.chunk_cb,
-        extra_body=_resolve_thinking_kwargs(
-            getattr(ctx.config, "enable_thinking", "on"), ctx.user_content, bool(ctx.tool_defs),
-            voice_mode=voice_mode,
-        ),
+        extra_body=_round_extra_body(ctx, round_num, voice_mode),
     )
     latency_ms = int((time.time() - t0) * 1000)
     pt = int(resp.prompt_tokens or 0)
@@ -1963,6 +1984,20 @@ async def _chat_completion_inner(self) -> dict:
         })
 
     # Merge tenant tools + attachment search tools only when the request and model support tools.
+    # Data-intent signal: the best semantic match among the selected tools. High
+    # → the query needs a tool → (if force_tool_on_data_intent) we'll force a
+    # tool call on round 0. NB: when the tool set is ≤ budget, semantic search
+    # doesn't run (scores stay 0) → no force, which is fine.
+    _sel_top_score = max((float(getattr(t, "_semantic_score", 0.0) or 0.0) for t in (tools or [])), default=0.0)
+    # Entity signal (phone/IP/MAC/...) — a high-precision data-intent marker that
+    # semantic score misses (greetings score ~0.43, higher than some real data
+    # queries). Force a tool only on entities OR a STRONG semantic match, so we
+    # never force on conversational turns.
+    try:
+        from app.services.preprocessing.entities import extract_entities as _extract_entities
+        _data_intent_entities = _extract_entities(user_content or "").has_any()
+    except Exception:
+        _data_intent_entities = False
     all_tool_defs = [_public_tool_def(t.config_json) for t in tools if t.config_json] if tools else []
     all_tool_defs = all_tool_defs + attachment_tool_defs
     # Builtin tools — system toolset (memory/artifacts/RAG). Always exposed
@@ -2204,6 +2239,12 @@ async def _chat_completion_inner(self) -> dict:
             current_round_ref=current_round_ref, round_breakdown=round_breakdown,
             tool_routing_temperature=tool_routing_temperature, effective_temperature=effective_temperature,
             tool_call_counts={}, failed_calls=[0],
+            force_tool_choice=(
+                bool(getattr(config, "force_tool_on_data_intent", False))
+                and bool(tool_defs)
+                and (_data_intent_entities
+                     or _sel_top_score >= float(getattr(config, "data_intent_floor", 0.6) or 0.6))
+            ),
         )
 
         # Initial LLM call — let the auto-router pick light/heavy first
