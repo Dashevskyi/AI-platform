@@ -3553,9 +3553,10 @@ function ToolsTab({ tenantId }: { tenantId: string }) {
       setApiBodyRows([]);
       setApiStaticBodyRows([]);
       setApiBodyFormat('json');
-      setApiArgFormatRows([]);
-      // NOTE: tier0Template is already set above (line ~3229) for ALL tool types.
-      // Do NOT reset it here — it would wipe the config for search_records / cmd tools.
+      // NOTE: do NOT reset apiArgFormatRows / tier0Template here — both are set
+      // above for ALL tool types (lines ~3524/3525). Resetting in this non-API
+      // branch wiped arg_formats for search_records / cmd tools (they showed empty
+      // and a save deleted them). tier0Template had the same bug, already fixed.
     }
     setActiveTab('params');
     setTestArgsJson(buildInitialTestArgs(JSON.stringify(tool.config_json ?? {}, null, 2)));
