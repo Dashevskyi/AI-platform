@@ -25,6 +25,7 @@ from app.models.pending_tool_action import PendingToolAction
 from app.models.assistant import Assistant
 from app.models.data_source_schema_note import DataSourceSchemaNote
 from app.models.voice_usage import VoiceUsage
+from app.models.assistant_audit import AssistantAuditCase, AssistantAuditRun
 
 __all__ = [
     "AdminUser", "Tenant", "TenantApiKey", "TenantApiKeyGroup", "TenantShellConfig",
@@ -33,5 +34,5 @@ __all__ = [
     "LLMModel", "TenantCustomModel", "TenantModelConfig",
     "MessageAttachment", "MessageAttachmentChunk", "GPUMetricSnapshot",
     "Artifact", "BackgroundJob", "PendingToolAction", "Assistant",
-    "DataSourceSchemaNote", "VoiceUsage",
+    "DataSourceSchemaNote", "VoiceUsage", "AssistantAuditCase", "AssistantAuditRun",
 ]
