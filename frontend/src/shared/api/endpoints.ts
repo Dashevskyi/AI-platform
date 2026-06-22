@@ -1100,3 +1100,44 @@ export const toolAuditApi = {
     return r.data;
   },
 };
+
+export interface AuditCaseRow {
+  id: string;
+  active: boolean;
+  question: string;
+  expected_tools: string[];
+  actor: { role?: string; external_id?: string; phone?: string } | null;
+  notes: string | null;
+  order_index: number;
+  last_result: {
+    passed: boolean; pass_rate: number; repeats: number; called: string[];
+    debug?: any; ts?: string;
+  } | null;
+}
+
+const auditBase = (t: string, a: string) => `/api/admin/tenants/${t}/assistants/${a}/tool-audit`;
+
+export const auditSuiteApi = {
+  list: async (t: string, a: string): Promise<{ cases: AuditCaseRow[] }> =>
+    (await apiClient.get(`${auditBase(t, a)}/cases`)).data,
+  create: async (t: string, a: string, body: Partial<AuditCaseRow>): Promise<AuditCaseRow> =>
+    (await apiClient.post(`${auditBase(t, a)}/cases`, body)).data,
+  update: async (t: string, a: string, id: string, body: Partial<AuditCaseRow>): Promise<AuditCaseRow> =>
+    (await apiClient.patch(`${auditBase(t, a)}/cases/${id}`, body)).data,
+  remove: async (t: string, a: string, id: string): Promise<void> => {
+    await apiClient.delete(`${auditBase(t, a)}/cases/${id}`);
+  },
+  run: async (t: string, a: string, id: string, repeats = 1): Promise<AuditCaseRow['last_result']> =>
+    (await apiClient.post(`${auditBase(t, a)}/cases/${id}/run`, null, { params: { repeats } })).data,
+  toolLog: async (t: string, a: string, id: string): Promise<any> =>
+    (await apiClient.get(`${auditBase(t, a)}/cases/${id}/tool-log`)).data,
+  seed: async (t: string, a: string, limit = 30): Promise<{ created: number; scanned: number }> =>
+    (await apiClient.post(`${auditBase(t, a)}/seed-from-logs`, { limit })).data,
+  snapshot: async (t: string, a: string): Promise<any> =>
+    (await apiClient.post(`${auditBase(t, a)}/runs`)).data,
+  stats: async (t: string, a: string): Promise<{
+    active: number; ran: number; passed: number; pass_pct: number;
+    by_tool: { total_failed: number; by_tool: { tool: string; misses: number; share: number; called_instead: Record<string, number> }[] };
+    trend: { ts: string | null; passed: number; total: number }[];
+  }> => (await apiClient.get(`${auditBase(t, a)}/stats`)).data,
+};
