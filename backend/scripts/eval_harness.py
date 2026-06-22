@@ -340,7 +340,14 @@ async def setup(s) -> list[dict]:
     # config untouched). Tier 0 is deterministic & model-agnostic: if it fires,
     # we're NOT testing the LLM's tool selection. We measure the model; the
     # tier0-on production view is a separate concern.
-    _cli = dict(src["overrides"] or {}); _cli["tier0_enabled"] = False
+    # Disable Tier 0 + memory/cross-chat recall on the eval clones. Each case runs
+    # in its own throwaway chat, but memory recall leaks facts ACROSS cases (case 1
+    # finds switch_id → case 2 recalls it → skips search_equipment → false fail).
+    # Isolation = every case starts cold, judged on its own.
+    _cli = dict(src["overrides"] or {})
+    _cli["tier0_enabled"] = False
+    _cli["memory_enabled"] = False
+    _cli["recall_cross_chat_enabled"] = False
     cli_ov = json.dumps(_cli)
     cli_tl = json.dumps(src["allowed_tool_ids"]) if src["allowed_tool_ids"] is not None else None
     cli_a = await _ensure_clone(s, "__eval__", cli_ov, cli_tl)
@@ -359,7 +366,8 @@ async def setup(s) -> list[dict]:
             print(f"  [WARN] op tool '{r['name']}' has no embedding — only reachable via fallback")
     print(f"  operator clone: {len(op_tool_ids)} tools")
 
-    op_ov = json.dumps({"system_prompt": OP_PROMPT, "enable_thinking": False, "tier0_enabled": False})
+    op_ov = json.dumps({"system_prompt": OP_PROMPT, "enable_thinking": False, "tier0_enabled": False,
+                        "memory_enabled": False, "recall_cross_chat_enabled": False})
     op_a = await _ensure_clone(s, "__eval_op__", op_ov, json.dumps(op_tool_ids))
     op_k = await _fresh_key(s, "__eval_op_key__", op_a)
 
