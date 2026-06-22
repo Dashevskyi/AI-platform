@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, Fragment } from 'react';
 import {
   Modal, Button, Group, Stack, Text, Badge, Table, ScrollArea, Loader, Switch,
-  TextInput, ActionIcon, Tooltip, NumberInput, Progress, Alert, Divider, Popover, Select,
+  TextInput, ActionIcon, Tooltip, NumberInput, Progress, Alert, Divider, Popover, Select, Autocomplete,
 } from '@mantine/core';
 import {
   IconPlayerPlay, IconSearch, IconClipboardList, IconTrash, IconPlus, IconDownload, IconRefresh,
@@ -12,6 +12,7 @@ import { auditSuiteApi, toolAuditApi, type AuditCaseRow } from '../../shared/api
 
 interface Props {
   tenantId: string; assistantId: string; assistantName: string;
+  toolOptions: { value: string; label: string }[];
   opened: boolean; onClose: () => void;
 }
 
@@ -24,12 +25,13 @@ function verdictBadge(c: AuditCaseRow) {
 }
 
 // Ordered, reorderable list of expected tools (order = call order for multi-round).
-function ToolsOrderEditor({ value, onChange }: { value: string[]; onChange: (v: string[]) => void }) {
+function ToolsOrderEditor({ value, onChange, options }: { value: string[]; onChange: (v: string[]) => void; options: string[] }) {
   const [add, setAdd] = useState('');
   const move = (i: number, d: number) => {
     const j = i + d; if (j < 0 || j >= value.length) return;
     const v = [...value]; [v[i], v[j]] = [v[j], v[i]]; onChange(v);
   };
+  const commit = (val: string) => { const t = val.trim(); if (t) onChange([...value, t]); setAdd(''); };
   return (
     <Stack gap={2}>
       {value.map((t, i) => (
@@ -41,9 +43,11 @@ function ToolsOrderEditor({ value, onChange }: { value: string[]; onChange: (v: 
           <ActionIcon size="xs" variant="subtle" color="red" onClick={() => onChange(value.filter((_, k) => k !== i))}><IconX size={12} /></ActionIcon>
         </Group>
       ))}
-      <TextInput size="xs" variant="filled" placeholder="+ тул (a|b = любой), Enter" value={add}
-        onChange={(e) => setAdd(e.currentTarget.value)}
-        onKeyDown={(e) => { if (e.key === 'Enter' && add.trim()) { onChange([...value, add.trim()]); setAdd(''); } }} />
+      <Autocomplete size="xs" placeholder="+ тул (поиск; a|b = любой)" data={options} value={add}
+        maxDropdownHeight={220} limit={12}
+        onChange={setAdd}
+        onOptionSubmit={(val) => commit(val)}
+        onKeyDown={(e) => { if (e.key === 'Enter' && add.trim() && !options.includes(add.trim())) commit(add); }} />
     </Stack>
   );
 }
@@ -69,7 +73,8 @@ function ActorEditor({ value, onChange }: { value: AuditCaseRow['actor']; onChan
   );
 }
 
-export function AssistantAuditModal({ tenantId, assistantId, assistantName, opened, onClose }: Props) {
+export function AssistantAuditModal({ tenantId, assistantId, assistantName, toolOptions, opened, onClose }: Props) {
+  const toolNames = toolOptions.map((o) => o.label);
   const [cases, setCases] = useState<AuditCaseRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [repeats, setRepeats] = useState(1);
@@ -180,7 +185,7 @@ export function AssistantAuditModal({ tenantId, assistantId, assistantName, open
                     </Table.Td>
                     <Table.Td><ActorEditor value={c.actor} onChange={(a) => patch(c.id, { actor: a })} /></Table.Td>
                     <Table.Td>
-                      <ToolsOrderEditor value={c.expected_tools} onChange={(v) => patch(c.id, { expected_tools: v })} />
+                      <ToolsOrderEditor value={c.expected_tools} onChange={(v) => patch(c.id, { expected_tools: v })} options={toolNames} />
                     </Table.Td>
                     <Table.Td>{busyId === c.id ? <Loader size="xs" /> : verdictBadge(c)}</Table.Td>
                     <Table.Td>

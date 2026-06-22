@@ -193,6 +193,7 @@ function AssistantEditor({
       </Group>
       <AssistantAuditModal
         tenantId={tenantId} assistantId={assistant.id} assistantName={assistant.name}
+        toolOptions={toolOptions}
         opened={auditOpen} onClose={() => setAuditOpen(false)}
       />
     </Stack>
