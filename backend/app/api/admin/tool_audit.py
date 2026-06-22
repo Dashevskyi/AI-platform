@@ -242,6 +242,38 @@ async def _cleanup_chats(db: AsyncSession, chat_ids: list, key_id) -> None:
     await db.commit()
 
 
+async def _ensure_audit_clone(db: AsyncSession, tenant_id: str, assistant_id: str) -> str:
+    """Throwaway clone of the assistant with memory + cross-chat recall OFF, so
+    audit cases are ISOLATED — a fact found in one case (e.g. switch_id) isn't
+    recalled in the next, which would wrongly let the model skip a lookup tool.
+    Must be is_active (resolver requires it); '__'-prefixed → hidden from the UI
+    list. Refreshed each run to track the real assistant's config."""
+    import json as _json
+    src = (await db.execute(select(Assistant).where(Assistant.id == uuid.UUID(assistant_id)))).scalar_one_or_none()
+    if not src:
+        raise HTTPException(404, "Ассистент не найден")
+    ov = dict(src.overrides or {})
+    ov["memory_enabled"] = False
+    ov["recall_cross_chat_enabled"] = False
+    name = f"__audit__{assistant_id[:8]}"
+    tl = _json.dumps(src.allowed_tool_ids) if src.allowed_tool_ids is not None else None
+    existing = (await db.execute(select(Assistant).where(
+        Assistant.tenant_id == uuid.UUID(tenant_id), Assistant.name == name))).scalar_one_or_none()
+    if existing:
+        await db.execute(text(
+            "UPDATE assistants SET overrides=CAST(:ov AS jsonb), allowed_tool_ids=CAST(:tl AS jsonb),"
+            " is_active=true WHERE id=:id"), {"ov": _json.dumps(ov), "tl": tl, "id": str(existing.id)})
+        cid = str(existing.id)
+    else:
+        cid = str(uuid.uuid4())
+        await db.execute(text(
+            "INSERT INTO assistants (id,tenant_id,name,overrides,allowed_tool_ids,is_active,is_default,created_at)"
+            " VALUES (:id,:t,:n,CAST(:ov AS jsonb),CAST(:tl AS jsonb),true,false,now())"),
+            {"id": cid, "t": tenant_id, "n": name, "ov": _json.dumps(ov), "tl": tl})
+    await db.commit()
+    return cid
+
+
 @router.post("/cases/{case_id}/run", dependencies=[Depends(require_tenant_access)])
 async def run_case(tenant_id: str, assistant_id: str, case_id: str, repeats: int = 1,
                    db: AsyncSession = Depends(get_db)) -> dict:
@@ -250,12 +282,13 @@ async def run_case(tenant_id: str, assistant_id: str, case_id: str, repeats: int
     if not c:
         raise HTTPException(404, "Кейс не найден")
     repeats = max(1, min(int(repeats), 5))
+    clone_id = await _ensure_audit_clone(db, tenant_id, assistant_id)  # isolated (memory off)
     raw, prefix, kh = generate_api_key()
     kid = uuid.uuid4()
     await db.execute(text(
         "INSERT INTO tenant_api_keys (id,tenant_id,name,key_prefix,key_hash,assistant_id,actor_trusted,is_active,created_at)"
         " VALUES (:id,:t,'__audit_run__',:p,:h,:a,true,true,now())"),
-        {"id": str(kid), "t": tenant_id, "p": prefix, "h": kh, "a": assistant_id})
+        {"id": str(kid), "t": tenant_id, "p": prefix, "h": kh, "a": clone_id})
     await db.commit()
     actor = c.actor or {"role": "operator", "external_id": "audit"}
     expected = c.expected_tools or []

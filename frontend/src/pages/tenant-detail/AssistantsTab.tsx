@@ -208,7 +208,9 @@ export function AssistantsTab({ tenantId }: { tenantId: string }) {
   const [editing, setEditing] = useState<Assistant | null>(null);
 
   const reload = useCallback(async () => {
-    const rows = await assistantsApi.list(tenantId).catch(() => []);
+    const all = await assistantsApi.list(tenantId).catch(() => []);
+    // Hide system throwaway clones (eval/audit isolation) — names start with "__".
+    const rows = all.filter((a) => !a.name.startsWith('__'));
     setList(rows);
     // keep the open modal's data fresh
     setEditing((cur) => (cur ? rows.find((r) => r.id === cur.id) ?? null : cur));
