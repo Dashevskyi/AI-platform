@@ -79,6 +79,7 @@ export function AssistantAuditModal({ tenantId, assistantId, assistantName, tool
   const [loading, setLoading] = useState(false);
   const [repeats, setRepeats] = useState(1);
   const [runningAll, setRunningAll] = useState(false);
+  const [seeding, setSeeding] = useState(false);
   const [progress, setProgress] = useState(0);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [preview, setPreview] = useState<Record<string, { name: string; score: number }[]>>({});
@@ -138,9 +139,18 @@ export function AssistantAuditModal({ tenantId, assistantId, assistantName, tool
   };
 
   const seed = async () => {
-    const r = await auditSuiteApi.seed(tenantId, assistantId, 30);
-    notifications.show({ message: `Добавлено ${r.created} кейсов (выключены, проверь)`, color: 'green' });
-    await reload();
+    if (seeding) return;
+    setSeeding(true);
+    notifications.show({ id: 'seed', loading: true, message: 'Сидирую из логов…', autoClose: false, withCloseButton: false });
+    try {
+      const r = await auditSuiteApi.seed(tenantId, assistantId, 30);
+      notifications.update({ id: 'seed', loading: false, color: 'green', autoClose: 4000,
+        message: r.created ? `Добавлено ${r.created} кейсов (выключены, проверь)` : 'Новых вопросов нет — всё уже в наборе' });
+      await reload();
+    } catch (e: any) {
+      notifications.update({ id: 'seed', loading: false, color: 'red', autoClose: 4000,
+        message: e?.response?.data?.detail || 'Ошибка сида' });
+    } finally { setSeeding(false); }
   };
 
   return (
@@ -149,7 +159,7 @@ export function AssistantAuditModal({ tenantId, assistantId, assistantName, tool
         <Group justify="space-between">
           <Group gap="xs">
             <Button size="xs" leftSection={<IconPlus size={14} />} onClick={addCase}>Кейс</Button>
-            <Button size="xs" variant="default" leftSection={<IconDownload size={14} />} onClick={seed}>Сид из логов</Button>
+            <Button size="xs" variant="default" leftSection={<IconDownload size={14} />} onClick={seed} loading={seeding} disabled={seeding}>Сид из логов</Button>
             <NumberInput size="xs" w={110} min={1} max={5} value={repeats} onChange={(v) => setRepeats(Number(v) || 1)} label="повторы" />
           </Group>
           <Group gap="xs">
