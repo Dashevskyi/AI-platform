@@ -305,9 +305,18 @@ def _by_tool_summary(cases: list[AssistantAuditCase]) -> dict:
         lr = c.last_result or {}
         if lr and not lr.get("passed"):
             total_fail += 1
-            for exp in (c.expected_tools or ["(NO_TOOL)"]):
+            exp_list = c.expected_tools or ["(NO_TOOL)"]
+            called = set(lr.get("called") or [])
+            # all acceptable tool names across every expected step (incl a|b variants)
+            all_expected = {v for e in exp_list for v in str(e).split("|")}
+            wrong = called - all_expected  # tools called that weren't wanted
+            for exp in exp_list:
+                # blame ONLY the steps that were actually MISSED (not satisfied),
+                # so a multi-step case doesn't fault a tool it did call.
+                if set(str(exp).split("|")) & called:
+                    continue
                 fail_by_tool[exp] += 1
-                wrong_called.setdefault(exp, Counter()).update(lr.get("called") or ["(ничего)"])
+                wrong_called.setdefault(exp, Counter()).update(wrong or ["(ничего)"])
     out = []
     for tool, n in fail_by_tool.most_common():
         out.append({
