@@ -1,10 +1,11 @@
 import { useEffect, useState, useCallback, Fragment } from 'react';
 import {
   Modal, Button, Group, Stack, Text, Badge, Table, ScrollArea, Loader, Switch,
-  TagsInput, TextInput, ActionIcon, Tooltip, NumberInput, Progress, Alert, Divider,
+  TextInput, ActionIcon, Tooltip, NumberInput, Progress, Alert, Divider, Popover, Select,
 } from '@mantine/core';
 import {
   IconPlayerPlay, IconSearch, IconClipboardList, IconTrash, IconPlus, IconDownload, IconRefresh,
+  IconArrowUp, IconArrowDown, IconX,
 } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
 import { auditSuiteApi, toolAuditApi, type AuditCaseRow } from '../../shared/api/endpoints';
@@ -20,6 +21,52 @@ function verdictBadge(c: AuditCaseRow) {
   const pct = Math.round(lr.pass_rate * 100);
   const color = lr.passed ? 'green' : pct > 0 ? 'yellow' : 'red';
   return <Badge color={color} variant="light">{Math.round(lr.pass_rate * lr.repeats)}/{lr.repeats}{lr.called.length ? ` · ${lr.called.join(',')}` : ' · ничего'}</Badge>;
+}
+
+// Ordered, reorderable list of expected tools (order = call order for multi-round).
+function ToolsOrderEditor({ value, onChange }: { value: string[]; onChange: (v: string[]) => void }) {
+  const [add, setAdd] = useState('');
+  const move = (i: number, d: number) => {
+    const j = i + d; if (j < 0 || j >= value.length) return;
+    const v = [...value]; [v[i], v[j]] = [v[j], v[i]]; onChange(v);
+  };
+  return (
+    <Stack gap={2}>
+      {value.map((t, i) => (
+        <Group key={i} gap={2} wrap="nowrap">
+          <Text size="xs" c="dimmed" w={12}>{i + 1}</Text>
+          <Badge size="sm" variant="light" style={{ flex: 1, justifyContent: 'flex-start', textTransform: 'none' }}>{t}</Badge>
+          <ActionIcon size="xs" variant="subtle" onClick={() => move(i, -1)} disabled={i === 0}><IconArrowUp size={12} /></ActionIcon>
+          <ActionIcon size="xs" variant="subtle" onClick={() => move(i, 1)} disabled={i === value.length - 1}><IconArrowDown size={12} /></ActionIcon>
+          <ActionIcon size="xs" variant="subtle" color="red" onClick={() => onChange(value.filter((_, k) => k !== i))}><IconX size={12} /></ActionIcon>
+        </Group>
+      ))}
+      <TextInput size="xs" variant="filled" placeholder="+ тул (a|b = любой), Enter" value={add}
+        onChange={(e) => setAdd(e.currentTarget.value)}
+        onKeyDown={(e) => { if (e.key === 'Enter' && add.trim()) { onChange([...value, add.trim()]); setAdd(''); } }} />
+    </Stack>
+  );
+}
+
+// Per-case actor (client/operator + ids) — needed for forced-filter tools.
+function ActorEditor({ value, onChange }: { value: AuditCaseRow['actor']; onChange: (a: AuditCaseRow['actor']) => void }) {
+  const a = value || {};
+  const summary = a.role === 'client' ? `клиент${a.external_id ? ':' + a.external_id : ''}` : (a.role || 'оператор');
+  return (
+    <Popover width={230} withArrow position="bottom-start">
+      <Popover.Target><Button size="compact-xs" variant="default">{summary}</Button></Popover.Target>
+      <Popover.Dropdown>
+        <Stack gap="xs">
+          <Select size="xs" label="Роль" data={['operator', 'client']} value={a.role || 'operator'}
+            onChange={(v) => onChange({ ...a, role: v || 'operator' })} />
+          <TextInput size="xs" label="external_id" defaultValue={a.external_id || ''}
+            onBlur={(e) => onChange({ ...a, external_id: e.currentTarget.value || undefined })} />
+          <TextInput size="xs" label="phone" defaultValue={a.phone || ''}
+            onBlur={(e) => onChange({ ...a, phone: e.currentTarget.value || undefined })} />
+        </Stack>
+      </Popover.Dropdown>
+    </Popover>
+  );
 }
 
 export function AssistantAuditModal({ tenantId, assistantId, assistantName, opened, onClose }: Props) {
@@ -116,6 +163,7 @@ export function AssistantAuditModal({ tenantId, assistantId, assistantName, open
               <Table.Tr>
                 <Table.Th w={50}>Акт.</Table.Th>
                 <Table.Th>Запрос</Table.Th>
+                <Table.Th w={100}>Actor</Table.Th>
                 <Table.Th w={240}>Ожидаемые тулы (порядок)</Table.Th>
                 <Table.Th w={200}>Вердикт</Table.Th>
                 <Table.Th w={150}>Действия</Table.Th>
@@ -130,10 +178,9 @@ export function AssistantAuditModal({ tenantId, assistantId, assistantName, open
                       <TextInput variant="unstyled" defaultValue={c.question}
                         onBlur={(e) => e.currentTarget.value !== c.question && patch(c.id, { question: e.currentTarget.value })} />
                     </Table.Td>
+                    <Table.Td><ActorEditor value={c.actor} onChange={(a) => patch(c.id, { actor: a })} /></Table.Td>
                     <Table.Td>
-                      <TagsInput value={c.expected_tools} size="xs"
-                        placeholder="тул(ы), a|b = любой"
-                        onChange={(v) => patch(c.id, { expected_tools: v })} />
+                      <ToolsOrderEditor value={c.expected_tools} onChange={(v) => patch(c.id, { expected_tools: v })} />
                     </Table.Td>
                     <Table.Td>{busyId === c.id ? <Loader size="xs" /> : verdictBadge(c)}</Table.Td>
                     <Table.Td>
@@ -147,7 +194,7 @@ export function AssistantAuditModal({ tenantId, assistantId, assistantName, open
                   </Table.Tr>
                   {preview[c.id] && (
                     <Table.Tr key={c.id + '-pv'}>
-                      <Table.Td colSpan={5} bg="var(--mantine-color-gray-0)">
+                      <Table.Td colSpan={6} bg="var(--mantine-color-gray-0)">
                         <Group gap={4}>
                           <Text size="xs" c="dimmed">каталог (что уйдёт модели):</Text>
                           {preview[c.id].map((s) => (
