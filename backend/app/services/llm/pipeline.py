@@ -567,8 +567,24 @@ def _guard_unverified_links(
     # turn (tool outputs + KB) plus admin allowlist entries.
     trusted_blob = "\n".join(s for s in trusted_sources if s)
 
+    # Genuine sensitive links the model was actually given THIS turn (verbatim,
+    # from tool results / KB). When the model GARBLES a long sensitive link —
+    # liqpay checkout URLs carry a 400+ char base64 `data=` blob that no LLM can
+    # reproduce verbatim, so it drops/alters a char — we HEAL it to the real
+    # one instead of nuking it to the generic cabinet fallback (which would hand
+    # the client the wrong link). Only safe when exactly ONE real sensitive link
+    # exists this turn; with 0 or several we fall back (can't disambiguate).
+    trusted_sensitive: list[str] = []
+    for traw in set(_GUARD_URL_RE.findall(trusted_blob)):
+        turl = traw.rstrip(".,;:!?")
+        tlow = turl.lower()
+        if any(p in tlow for p in patterns) and not any(a in tlow for a in allowlist):
+            trusted_sensitive.append(turl)
+    heal_url = trusted_sensitive[0] if len(trusted_sensitive) == 1 else None
+
     out = content
     stripped: list[str] = []
+    healed: list[str] = []
     for raw in set(_GUARD_URL_RE.findall(content)):
         url = raw.rstrip(".,;:!?")  # trailing sentence punctuation isn't part of the URL
         low = url.lower()
@@ -578,9 +594,13 @@ def _guard_unverified_links(
             continue  # explicitly allowed
         if url in trusted_blob:
             continue  # came verbatim from a tool result / KB — verified
-        # Unverified sensitive URL → fabricated. Rewrite every occurrence.
+        # Unverified sensitive URL → garbled or fabricated. Prefer healing to
+        # the real link this turn; otherwise rewrite to the safe fallback.
         stripped.append(url)
-        if fallback_url:
+        if heal_url:
+            healed.append(url)
+            out = out.replace(url, heal_url)
+        elif fallback_url:
             out = out.replace(url, fallback_url)
         elif fallback_text:
             out = out.replace(url, fallback_text)
@@ -588,8 +608,9 @@ def _guard_unverified_links(
             out = out.replace(url, "(ссылка удалена)")
     if stripped:
         logger.warning(
-            "[%s] link-guard: rewrote %d unverified sensitive URL(s): %s",
-            correlation_id, len(stripped), ", ".join(stripped)[:300],
+            "[%s] link-guard: rewrote %d unverified sensitive URL(s) (%d healed→real, %d→fallback): %s",
+            correlation_id, len(stripped), len(healed), len(stripped) - len(healed),
+            ", ".join(stripped)[:300],
         )
     return out, stripped
 

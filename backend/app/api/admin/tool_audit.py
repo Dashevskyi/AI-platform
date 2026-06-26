@@ -455,3 +455,309 @@ async def seed_from_logs(tenant_id: str, assistant_id: str, body: SeedRequest,
         created += 1
     await db.commit()
     return {"created": created, "scanned": len(rows)}
+
+
+# ============================================================
+# Auto-tuning: read-only analysis → staged recommendations → Apply
+# ============================================================
+from app.models.tenant_tool import TenantTool  # noqa: E402
+from app.models.assistant_tune import AssistantTuneRecommendation  # noqa: E402
+from app.services import tuner as _tuner  # noqa: E402
+
+
+async def _trace_for_chat(db: AsyncSession, cid: str) -> dict:
+    """Rich per-case trace for diagnosis: offered tools, calls + args, tool
+    results/errors, final answer."""
+    row = (await db.execute(text(
+        "SELECT debug, raw_request, raw_response, model_name FROM llm_request_logs"
+        " WHERE chat_id=:c ORDER BY created_at DESC LIMIT 1"), {"c": cid})).mappings().first()
+    dbg = (row or {}).get("debug") or {}
+    tcs = [tc for tc in (dbg.get("tool_calls") or []) if isinstance(tc, dict) and tc.get("name")]
+    called = {tc["name"] for tc in tcs}
+    if (row or {}).get("model_name") == "tier0":
+        t0 = (dbg.get("tier0") or {}).get("tool")
+        if t0:
+            called.add(t0)
+    call_args = {tc["name"]: tc.get("args_preview") for tc in tcs}
+    tool_ok = {tc["name"]: tc.get("ok") for tc in tcs}
+    offered = [(t.get("function", {}).get("name") or t.get("name"))
+               for t in (dbg.get("tools_payload") or []) if isinstance(t, dict)]
+    # tool results: tool-role messages in raw_request, mapped by call order
+    rq = (row or {}).get("raw_request") or {}
+    names_order = [tc["name"] for tc in tcs]
+    tool_results: dict = {}
+    i = 0
+    for m in (rq.get("messages") or []):
+        if isinstance(m, dict) and m.get("role") == "tool":
+            nm = names_order[i] if i < len(names_order) else f"tool{i}"
+            tool_results[nm] = str(m.get("content") or "")[:400]
+            i += 1
+    rp = (row or {}).get("raw_response") or {}
+    final = ((rp.get("choices") or [{}])[0].get("message", {}) or {}).get("content")
+    return {"called": called, "call_args": call_args, "tool_ok": tool_ok,
+            "tools_offered": offered, "tool_results": tool_results, "final_content": final}
+
+
+def _classify_failure(expected: list[str], trace: dict) -> str:
+    called = set(trace.get("called") or [])
+    tool_ok = trace.get("tool_ok") or {}
+    biz = called - META_TOOLS
+    if not expected:
+        return "pass" if not biz else "wrong_tool"
+    satisfied = all((set(e.split("|")) & called) for e in expected)
+    if not satisfied:
+        return "no_tool_call" if not biz else "wrong_tool"
+    for e in expected:
+        for nm in (set(e.split("|")) & called):
+            if tool_ok.get(nm) is False:
+                return "tool_error"
+    return "pass"
+
+
+def _target_tool(expected: list[str], trace: dict, failure: str) -> str | None:
+    """Which tool's config to diagnose for this failure."""
+    if failure == "tool_error":
+        for e in expected:
+            for nm in (set(e.split("|")) & set(trace.get("called") or [])):
+                if (trace.get("tool_ok") or {}).get(nm) is False:
+                    return nm
+    # no_tool_call / wrong_tool → the tool it SHOULD have called (first expected variant)
+    if expected:
+        return expected[0].split("|")[0]
+    return None
+
+
+async def _load_diagnoser(db: AsyncSession):
+    """Heavy model used for diagnosis (DeepSeek V4-Flash by default)."""
+    from app.providers.factory import get_provider
+    from app.core.security import decrypt_value
+    rec = (await db.execute(text(
+        "SELECT provider_type, base_url, api_key_enc, model_id FROM llm_models"
+        " WHERE model_id='deepseek-v4-flash' AND is_active=true LIMIT 1"))).mappings().first()
+    if not rec:
+        return None, None
+    key = decrypt_value(rec["api_key_enc"]) if rec["api_key_enc"] else None
+    return get_provider(rec["provider_type"], rec["base_url"], key), rec["model_id"]
+
+
+def _current_value(cfg: dict, change_type: str, value, param_name: str | None):
+    fn = (cfg or {}).get("function", {}); xb = (cfg or {}).get("x_backend_config", {})
+    if change_type == "description":
+        return fn.get("description")
+    if change_type == "param_description":
+        p = (value or {}).get("param") if isinstance(value, dict) else param_name
+        return (((fn.get("parameters") or {}).get("properties") or {}).get(p) or {}).get("description")
+    if change_type == "arg_format":
+        path = (value or {}).get("path") if isinstance(value, dict) else param_name
+        return (xb.get("arg_formats") or {}).get(str(path))
+    if change_type == "tier0":
+        return xb.get("tier0_template")
+    if change_type in ("usage_example", "capability_tag"):
+        return xb.get("usage_examples" if change_type == "usage_example" else "capability_tags")
+    return None
+
+
+def _rec_dict(r: AssistantTuneRecommendation) -> dict:
+    return {
+        "id": str(r.id), "scope": r.scope, "tool_name": r.tool_name,
+        "change_type": r.change_type, "json_path": r.json_path, "param_name": r.param_name,
+        "current_value": r.current_value, "proposed_value": r.proposed_value,
+        "rationale": r.rationale, "deterministic": r.deterministic,
+        "failing_case_ids": r.failing_case_ids or [], "status": r.status,
+    }
+
+
+@router.post("/tune", dependencies=[Depends(require_tenant_access)])
+async def tune(tenant_id: str, assistant_id: str, db: AsyncSession = Depends(get_db)) -> dict:
+    """READ-ONLY: run active cases on the light model, classify failures, ask the
+    heavy model for config-change proposals, and STAGE them as recommendations.
+    Touches NO live config — apply happens only on explicit /apply."""
+    cases = (await db.execute(select(AssistantAuditCase).where(
+        AssistantAuditCase.assistant_id == uuid.UUID(assistant_id),
+        AssistantAuditCase.active == True)  # noqa: E712
+        .order_by(AssistantAuditCase.order_index, AssistantAuditCase.created_at))).scalars().all()
+    if not cases:
+        raise HTTPException(400, "Нет активных кейсов для прогона")
+
+    clone_id = await _ensure_audit_clone(db, tenant_id, assistant_id)
+    raw, prefix, kh = generate_api_key()
+    kid = uuid.uuid4()
+    await db.execute(text(
+        "INSERT INTO tenant_api_keys (id,tenant_id,name,key_prefix,key_hash,assistant_id,actor_trusted,is_active,created_at)"
+        " VALUES (:id,:t,'__audit_tune__',:p,:h,:a,true,true,now())"),
+        {"id": str(kid), "t": tenant_id, "p": prefix, "h": kh, "a": clone_id})
+    await db.commit()
+
+    run_id = uuid.uuid4()
+    failures: list[tuple] = []   # (case, trace, failure_class)
+    chat_ids: list = []
+    ran = 0
+    try:
+        async with httpx.AsyncClient(timeout=120) as cl:
+            for c in cases:
+                actor = c.actor or {"role": "operator", "external_id": "audit"}
+                try:
+                    ch = await cl.post(f"{API_BASE}/api/tenants/{tenant_id}/chats/",
+                                       headers={"X-API-Key": raw}, json={})
+                    cid = ch.json()["id"]; chat_ids.append(cid)
+                    await cl.post(f"{API_BASE}/api/tenants/{tenant_id}/chats/{cid}/messages",
+                                  headers={"X-API-Key": raw}, json={"content": c.question, "actor": actor})
+                    trace = await _trace_for_chat(db, cid)
+                except Exception as e:
+                    trace = {"called": set(), "error": str(e)[:120]}
+                ran += 1
+                fc = _classify_failure(c.expected_tools or [], trace)
+                trace["failure_class"] = fc
+                if fc != "pass":
+                    failures.append((c, trace, fc))
+    finally:
+        await _cleanup_chats(db, chat_ids, str(kid))
+
+    # Wipe previous PENDING recs for a fresh list (applied/dismissed are kept).
+    await db.execute(text(
+        "DELETE FROM assistant_tune_recommendations WHERE assistant_id=:a AND status='pending'"),
+        {"a": assistant_id})
+    await db.commit()
+
+    provider, dmodel = await _load_diagnoser(db)
+    # tool name -> (id, config_json)
+    tool_rows = (await db.execute(select(TenantTool).where(
+        TenantTool.tenant_id == uuid.UUID(tenant_id),
+        TenantTool.deleted_at.is_(None)))).scalars().all()
+    by_name = {t.name: t for t in tool_rows}
+
+    staged: dict = {}   # dedup key -> rec payload
+    diagnosed = 0
+    if provider:
+        for c, trace, fc in failures:
+            tname = _target_tool(c.expected_tools or [], trace, fc)
+            tool = by_name.get(tname) if tname else None
+            cfg = tool.config_json if tool else None
+            try:
+                proposals = await _tuner.diagnose(provider, dmodel, _case_dict(c), trace, cfg, tname or "?")
+            except Exception:
+                proposals = []
+            diagnosed += 1
+            for p in proposals:
+                ct = p["change_type"]
+                if ct == "ontology":
+                    key = ("assistant", ct, json_dumps_safe(p["value"]))
+                    rec = staged.get(key) or {
+                        "scope": "assistant", "tool_id": None, "tool_name": None,
+                        "change_type": ct, "json_path": "overrides.ontology_prompt", "param_name": None,
+                        "current_value": None, "proposed_value": p["value"],
+                        "rationale": p["rationale"], "deterministic": False, "cases": set(),
+                    }
+                else:
+                    if not tool:
+                        continue
+                    pname = (p["value"] or {}).get("param") if (ct == "param_description" and isinstance(p["value"], dict)) else \
+                            ((p["value"] or {}).get("path") if (ct == "arg_format" and isinstance(p["value"], dict)) else None)
+                    key = (str(tool.id), ct, pname, json_dumps_safe(p["value"]))
+                    rec = staged.get(key) or {
+                        "scope": "tool", "tool_id": tool.id, "tool_name": tool.name,
+                        "change_type": ct, "json_path": f"{tool.name}.{ct}" + (f".{pname}" if pname else ""),
+                        "param_name": pname,
+                        "current_value": _current_value(cfg or {}, ct, p["value"], pname),
+                        "proposed_value": p["value"], "rationale": p["rationale"],
+                        "deterministic": p["deterministic"], "cases": set(),
+                    }
+                rec["cases"].add(str(c.id))
+                staged[key] = rec
+
+    for rec in staged.values():
+        db.add(AssistantTuneRecommendation(
+            tenant_id=uuid.UUID(tenant_id), assistant_id=uuid.UUID(assistant_id), run_id=run_id,
+            scope=rec["scope"], tool_id=rec["tool_id"], tool_name=rec["tool_name"],
+            change_type=rec["change_type"], json_path=rec["json_path"], param_name=rec["param_name"],
+            current_value=rec["current_value"], proposed_value=rec["proposed_value"],
+            rationale=rec["rationale"], deterministic=rec["deterministic"],
+            failing_case_ids=sorted(rec["cases"]), status="pending"))
+    await db.commit()
+    return {
+        "ran": ran, "failed": len(failures), "diagnosed": diagnosed,
+        "recommendations": len(staged), "diagnoser": dmodel,
+        "failures_by_class": _count_by_class(failures),
+    }
+
+
+def json_dumps_safe(v) -> str:
+    import json as _j
+    try:
+        return _j.dumps(v, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        return str(v)
+
+
+def _count_by_class(failures: list) -> dict:
+    from collections import Counter
+    c = Counter(fc for _, _, fc in failures)
+    return dict(c)
+
+
+@router.get("/recommendations", dependencies=[Depends(require_tenant_access)])
+async def list_recommendations(tenant_id: str, assistant_id: str, status: str = "pending",
+                               db: AsyncSession = Depends(get_db)) -> dict:
+    q = select(AssistantTuneRecommendation).where(
+        AssistantTuneRecommendation.assistant_id == uuid.UUID(assistant_id))
+    if status != "all":
+        q = q.where(AssistantTuneRecommendation.status == status)
+    rows = (await db.execute(q.order_by(
+        AssistantTuneRecommendation.deterministic.desc(),
+        AssistantTuneRecommendation.created_at.desc()))).scalars().all()
+    return {"recommendations": [_rec_dict(r) for r in rows]}
+
+
+@router.post("/recommendations/{rec_id}/apply", dependencies=[Depends(require_tenant_access)])
+async def apply_recommendation(tenant_id: str, assistant_id: str, rec_id: str,
+                               db: AsyncSession = Depends(get_db)) -> dict:
+    """The ONLY write path. Applies one recommendation to the live config."""
+    from sqlalchemy.orm.attributes import flag_modified
+    from datetime import datetime, timezone
+    r = (await db.execute(select(AssistantTuneRecommendation).where(
+        AssistantTuneRecommendation.id == uuid.UUID(rec_id)))).scalar_one_or_none()
+    if not r:
+        raise HTTPException(404, "Рекомендация не найдена")
+    if r.status == "applied":
+        return {"ok": True, "already": True}
+
+    reembed = False
+    if r.scope == "assistant" and r.change_type == "ontology":
+        a = (await db.execute(select(Assistant).where(Assistant.id == uuid.UUID(assistant_id)))).scalar_one_or_none()
+        if not a:
+            raise HTTPException(404, "Ассистент не найден")
+        ov = dict(a.overrides or {})
+        prev = ov.get("ontology_prompt") or ""
+        add = r.proposed_value if isinstance(r.proposed_value, str) else str(r.proposed_value)
+        ov["ontology_prompt"] = (prev + "\n" + add).strip() if prev else add
+        a.overrides = ov
+        flag_modified(a, "overrides")
+    else:
+        tool = (await db.execute(select(TenantTool).where(TenantTool.id == r.tool_id))).scalar_one_or_none()
+        if not tool:
+            raise HTTPException(404, "Тул не найден")
+        tool.config_json = _tuner.apply_to_tool_config(
+            tool.config_json or {}, r.change_type, r.proposed_value, r.param_name)
+        flag_modified(tool, "config_json")
+        reembed = r.change_type in ("description", "param_description", "usage_example", "capability_tag")
+
+    r.status = "applied"
+    r.applied_at = datetime.now(timezone.utc)
+    await db.commit()
+    if reembed and r.tool_id:
+        try:
+            from app.services.tools.embedder import embed_tool
+            await embed_tool(r.tool_id)
+        except Exception:
+            logger.warning("tune apply: re-embed failed for tool %s", r.tool_id)
+    return {"ok": True, "scope": r.scope, "reembedded": reembed}
+
+
+@router.post("/recommendations/{rec_id}/dismiss", dependencies=[Depends(require_tenant_access)])
+async def dismiss_recommendation(tenant_id: str, assistant_id: str, rec_id: str,
+                                 db: AsyncSession = Depends(get_db)) -> dict:
+    await db.execute(text(
+        "UPDATE assistant_tune_recommendations SET status='dismissed' WHERE id=:i"),
+        {"i": rec_id})
+    await db.commit()
+    return {"ok": True}

@@ -12,6 +12,7 @@ import ipaddress
 import logging
 import re
 import shlex
+import time
 from dataclasses import dataclass
 from urllib.parse import urlencode
 
@@ -208,27 +209,43 @@ def _coerce_value(v, types: list):
 
 
 def _coerce_arguments_to_schema(tool_name: str, arguments: dict, tool_config: dict | None) -> None:
-    """Best-effort coercion of TOP-LEVEL args toward their DECLARED type
+    """Best-effort coercion of args toward their DECLARED type
     (config_json.function.parameters), in place, BEFORE validation. Always toward
     the schema type, never the reverse. Identifiers declared as string stay string
-    (number→str). Irreducible mismatches are left for validation to surface."""
+    (number→str). Irreducible mismatches are left for validation to surface.
+
+    RECURSES into nested objects (`properties`) and array `items`, because the
+    schema validator does too — otherwise a nested value like
+    `path_values.switch` (int sent where string declared) slips past top-level
+    coercion and gets bounced to the model for a needless round-trip."""
     if not isinstance(tool_config, dict) or not isinstance(arguments, dict):
         return
     fn = tool_config.get("function")
-    props = ((fn or {}).get("parameters") or {}).get("properties") if isinstance(fn, dict) else None
-    if not isinstance(props, dict):
+    params = (fn or {}).get("parameters") if isinstance(fn, dict) else None
+    if not isinstance(params, dict):
         return
-    changed = []
-    for key, spec in props.items():
-        if key not in arguments or not isinstance(spec, dict) or not spec.get("type"):
-            continue
-        typ = spec["type"]
-        types = typ if isinstance(typ, list) else [typ]
-        v = arguments[key]
-        nv = _coerce_value(v, types)
-        if type(nv) is not type(v) or nv != v:
-            arguments[key] = nv
-            changed.append(f"{key}: {type(v).__name__}→{type(nv).__name__}")
+    changed: list[str] = []
+
+    def _walk(value, spec, path: str):
+        if not isinstance(spec, dict):
+            return value
+        typ = spec.get("type")
+        types = typ if isinstance(typ, list) else ([typ] if typ else [])
+        if "object" in types and isinstance(value, dict):
+            for k, sub in (spec.get("properties") or {}).items():
+                if k in value:
+                    value[k] = _walk(value[k], sub, f"{path}.{k}" if path else k)
+            return value
+        if "array" in types and isinstance(value, list) and isinstance(spec.get("items"), dict):
+            return [_walk(it, spec["items"], f"{path}[{i}]") for i, it in enumerate(value)]
+        if not types:
+            return value
+        nv = _coerce_value(value, types)
+        if type(nv) is not type(value) or nv != value:
+            changed.append(f"{path}: {type(value).__name__}→{type(nv).__name__}")
+        return nv
+
+    _walk(arguments, params, "")
     if changed:
         logger.info("[arg-coerce] %s: %s", tool_name, ", ".join(changed))
 
@@ -1675,6 +1692,101 @@ async def tool_traceroute(arguments: dict, tool_config: dict | None = None) -> T
         return ToolResult(success=False, output="", error="Traceroute: таймаут (30с)")
     except FileNotFoundError:
         return ToolResult(success=False, output="", error="traceroute не установлен на сервере")
+
+
+_SITE_DOMAIN_RE = re.compile(
+    r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?'
+    r'(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)+$'
+)
+
+
+def _is_public_ip(ip_str: str) -> bool:
+    """True only for routable public addresses — blocks SSRF into our own
+    network (private/loopback/link-local/reserved/multicast)."""
+    try:
+        addr = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    return not (
+        addr.is_private or addr.is_loopback or addr.is_link_local
+        or addr.is_reserved or addr.is_multicast or addr.is_unspecified
+    )
+
+
+@register_tool("check_site")
+async def tool_check_site(arguments: dict, tool_config: dict | None = None) -> ToolResult:
+    """Check whether a website is reachable FROM OUR NETWORK (ISP-side triage).
+
+    Resolves DNS, verifies the host is public (anti-SSRF), then probes HTTPS
+    (falling back to HTTP) and reports status + latency. The vantage point is
+    our server, NOT the client's device — the result tells whether the problem
+    is upstream of the client (site/our net) vs. on the client side.
+    Returns a compact verbatim line for the model to phrase a verdict from.
+    """
+    raw = (arguments.get("domain") or arguments.get("url") or arguments.get("host") or "").strip()
+    if not raw:
+        return ToolResult(success=False, output="", error="Параметр 'domain' обязателен")
+
+    # Normalise: strip scheme/path, keep host[:port]
+    host = raw
+    if "://" in host:
+        host = host.split("://", 1)[1]
+    host = host.split("/", 1)[0].split("?", 1)[0].strip().rstrip(".").lower()
+    port = None
+    if host.count(":") == 1:  # host:port (ignore IPv6 literals here)
+        host, _, p = host.partition(":")
+        port = p if p.isdigit() else None
+
+    if not _SITE_DOMAIN_RE.match(host) or len(host) > 253:
+        return ToolResult(success=False, output="", error=f"Некорректный домен: {raw}")
+
+    # 1) DNS
+    import socket
+    loop = asyncio.get_event_loop()
+    try:
+        infos = await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: socket.getaddrinfo(host, None)), timeout=5.0
+        )
+        ips = sorted({i[4][0] for i in infos})
+    except (socket.gaierror, asyncio.TimeoutError):
+        return ToolResult(success=True, output=f"check_site {host} → DNS: НЕ РЕЗОЛВИТСЯ → домен не существует или проблема DNS")
+
+    # 2) SSRF guard — refuse to probe anything that points into our own network
+    if not any(_is_public_ip(ip) for ip in ips):
+        return ToolResult(success=False, output="", error=f"Адрес {host} ({', '.join(ips)}) — внутренний/непубличный, проверка запрещена")
+
+    # 3) HTTP(S) probe: try https, then http
+    base = host if port is None else f"{host}:{port}"
+    attempts = [f"https://{base}/", f"http://{base}/"]
+    last_err = None
+    for url in attempts:
+        scheme = url.split("://", 1)[0].upper()
+        t0 = time.perf_counter()
+        try:
+            async with httpx.AsyncClient(
+                timeout=8.0, follow_redirects=True,
+                headers={"User-Agent": "IT-Invest-SupportBot/1.0 (site-check)"},
+            ) as client:
+                resp = await client.get(url)
+            ms = int((time.perf_counter() - t0) * 1000)
+            final = str(resp.url)
+            redirect = f" → {final}" if final.rstrip("/") != url.rstrip("/") else ""
+            verdict = "доступен с нашей сети" if resp.status_code < 400 else "отвечает с ошибкой"
+            return ToolResult(success=True, output=(
+                f"check_site {host} → DNS: {', '.join(ips)} | {scheme}: {resp.status_code} "
+                f"({ms}мс){redirect} → {verdict} (точка обзора — наша сеть, не устройство клиента)"
+            ))
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            last_err = f"{scheme}: соединение не устанавливается"
+        except httpx.ReadTimeout:
+            last_err = f"{scheme}: таймаут ответа (8с)"
+        except Exception as e:  # noqa: BLE001 — report any probe failure compactly
+            last_err = f"{scheme}: {str(e)[:120]}"
+
+    return ToolResult(success=True, output=(
+        f"check_site {host} → DNS: {', '.join(ips)} (резолвится) | HTTP/HTTPS: {last_err} "
+        f"→ сайт НЕ отвечает с нашей сети → проблема, скорее всего, на стороне сайта"
+    ))
 
 
 @register_tool("search_records")

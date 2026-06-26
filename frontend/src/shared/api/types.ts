@@ -156,6 +156,23 @@ export interface TenantApiKeyGroupUpdate {
   allowed_tool_ids?: string[] | null;
 }
 
+export interface OntologyField { name: string; type: string; description: string }
+export interface OntologyEntity { name: string; fields: OntologyField[] }
+export type LogicNode =
+  | { type: 'condition'; label?: string; branches: { case: string; next: string | null }[] }
+  | { type: 'action'; label?: string; tool?: string; hint?: string; next: string | null }
+  | { type: 'note'; label?: string; text?: string; next: string | null };
+export interface LogicGraph { start: string | null; nodes: Record<string, LogicNode> }
+export interface LogicFlow { id: string; name: string; graph: LogicGraph }
+export type OntologySection =
+  | { id?: string; type: 'glossary'; title: string; items: { term: string; definition: string }[] }
+  | { id?: string; type: 'entities'; title: string; entities: OntologyEntity[] }
+  | { id?: string; type: 'relations'; title: string; items: { from: string; relation: string; to: string }[] }
+  | { id?: string; type: 'logic'; title: string; flows: LogicFlow[]; graph?: LogicGraph }
+  | { id?: string; type: 'examples'; title: string; items: { query: string; expected_tool?: string; note?: string }[] }
+  | { id?: string; type: 'freeform'; title: string; text: string };
+export interface OntologyJson { version: number; sections: OntologySection[] }
+
 export interface ShellConfig {
   id: string;
   tenant_id: string;
@@ -165,6 +182,7 @@ export interface ShellConfig {
   model_name: string;
   system_prompt: string | null;
   ontology_prompt: string | null;
+  ontology_json: OntologyJson | null;
   rules_text: string | null;
   temperature: number;
   max_context_messages: number;
@@ -219,6 +237,7 @@ export interface ShellConfigUpdate {
   model_name?: string;
   system_prompt?: string;
   ontology_prompt?: string;
+  ontology_json?: OntologyJson | null;
   rules_text?: string;
   temperature?: number;
   max_context_messages?: number;

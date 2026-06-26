@@ -45,6 +45,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { notifications } from '@mantine/notifications';
 import { shellApi } from '../../shared/api/endpoints';
 import type { ShellConfigUpdate, ShellVersionDetail } from '../../shared/api/types';
+import { OntologyEditor } from '../../components/Tools/OntologyEditor';
 
 type ShellSettingsTabProps = {
   tenantId: string;
@@ -738,6 +739,7 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
         model_name: config.model_name,
         system_prompt: config.system_prompt ?? undefined,
         ontology_prompt: config.ontology_prompt ?? undefined,
+        ontology_json: config.ontology_json ?? undefined,
         rules_text: config.rules_text ?? undefined,
         temperature: config.temperature,
         max_context_messages: config.max_context_messages,
@@ -916,19 +918,17 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
                       minRows={2}
                       maxRows={6}
                     />
-                    <Textarea
-                      label={
-                        <Hint hint="Структура данных, термины, mapping тема→tool. Только то, что не вынести в KB/память. Второй блок промпта.">
-                          Онтология / Domain knowledge
-                        </Hint>
-                      }
-                      placeholder={'OLT — головное PON-устройство. Splitter — пассивный делитель.\n\nТема ↔ tool:\n• клиенты — search_clients'}
-                      value={form.ontology_prompt || ''}
-                      onChange={(e) => updateField('ontology_prompt', e.currentTarget.value)}
-                      autosize
-                      minRows={3}
-                      maxRows={10}
-                    />
+                    <div>
+                      <Hint hint="Структура данных, термины, связи, граф логики (тема→tool). Правишь дерево — модель получает плоский текст. Только то, что не вынести в KB/память.">
+                        <Text size="sm" fw={500} mb={4}>Онтология / Domain knowledge</Text>
+                      </Hint>
+                      <OntologyEditor
+                        tenantId={tenantId}
+                        value={form.ontology_json ?? null}
+                        fallbackText={form.ontology_prompt ?? null}
+                        onChange={(v) => updateField('ontology_json', v)}
+                      />
+                    </div>
                     <Textarea
                       label={
                         <Hint hint="Длина, формат, стилевые исключения. Третий блок промпта, с префиксом «Rules:».">

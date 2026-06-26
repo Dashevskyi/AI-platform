@@ -42,9 +42,7 @@ SRC_ASSISTANT = "320a6f9c-5f8c-4d7d-8e15-0815b6df0a09"  # telegram-bot — confi
 # no longer a separate cloud "V3" to compare against. V4-Flash is the client
 # model; Qwen3-14B is the local SFT baseline.
 MODELS = {
-    "V4-Flash":       "6fabeaf0-ed48-40df-a790-8987d3b8cd0a",
-
-    "Qwen3-30B-2507": "36bfe847-bac7-4bf1-9805-a0d0254eef07",
+    "Gemma-26B-A4B":  "fe880ceb-ce9a-42c5-aa73-f2c14bde2f1f",
 }
 
 # Each case is run REPEATS times per model — models are probabilistic, so a

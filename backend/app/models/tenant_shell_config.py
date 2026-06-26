@@ -21,6 +21,10 @@ class TenantShellConfig(Base):
     # Domain ontology: structure of entities, terminology, tool ↔ argument mapping.
     # Separate from system_prompt so admins keep "who you are" and "what data exists" apart.
     ontology_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Structured source-of-truth for the ontology (sections incl. a decision
+    # graph). When set, `ontology_prompt` is regenerated from it on save (the LLM
+    # still reads the flat text). Null → the text above is authored directly.
+    ontology_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     rules_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     temperature: Mapped[float] = mapped_column(Float, default=0.7)
     max_context_messages: Mapped[int] = mapped_column(Integer, default=20)

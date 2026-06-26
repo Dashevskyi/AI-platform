@@ -71,6 +71,7 @@ def _config_to_response(cfg: TenantShellConfig) -> ShellConfigResponse:
         model_name=cfg.model_name,
         system_prompt=cfg.system_prompt,
         ontology_prompt=cfg.ontology_prompt,
+        ontology_json=cfg.ontology_json,
         rules_text=cfg.rules_text,
         temperature=cfg.temperature,
         max_context_messages=cfg.max_context_messages,
@@ -141,6 +142,7 @@ def _config_to_dict(cfg: TenantShellConfig) -> dict:
         "tools_policy": cfg.tools_policy,
         "enable_thinking": cfg.enable_thinking,
         "ontology_prompt": cfg.ontology_prompt,
+        "ontology_json": cfg.ontology_json,
         "response_language": cfg.response_language,
         "debug_enabled": cfg.debug_enabled,
         "timezone": cfg.timezone,
@@ -246,6 +248,15 @@ async def update_shell_config(
             value = min(float(value), MAX_SAFE_TEMPERATURE)
         setattr(cfg, field, value)
 
+    # Structured ontology is the source of truth — but regenerate the flat
+    # ontology_prompt ONLY when ontology_json ACTUALLY changed. The shell form
+    # resends the whole config on every save, so an unrelated save (or a stray
+    # Enter) must NOT clobber a hand-authored ontology_prompt with a partial
+    # structured version.
+    if "ontology_json" in update_data and cfg.ontology_json and cfg.ontology_json != previous_payload.get("ontology_json"):
+        from app.services.ontology import serialize
+        cfg.ontology_prompt = serialize(cfg.ontology_json) or None
+
     await db.flush()
     await db.refresh(cfg)
 
@@ -285,6 +296,29 @@ def _changed_fields(prev: dict | None, new: dict | None) -> list[str]:
     prev = prev or {}
     new = new or {}
     return sorted(k for k in (set(new) | set(prev)) if prev.get(k) != new.get(k))
+
+
+class OntologyPreviewBody(BaseModel):
+    ontology_json: dict | None = None
+
+
+@router.post("/ontology/preview")
+async def ontology_preview(tenant_id: uuid.UUID, body: OntologyPreviewBody) -> dict:
+    """Serialize a structured ontology to the flat text the LLM will read.
+    Pure/read-only — does NOT save."""
+    from app.services.ontology import serialize
+    return {"text": serialize(body.ontology_json)}
+
+
+@router.post("/ontology/import")
+async def ontology_import(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> dict:
+    """Best-effort parse the current flat ontology_prompt into the structured
+    form (for bootstrapping the editor). Returns it — does NOT save."""
+    await _verify_tenant(tenant_id, db)
+    cfg = (await db.execute(
+        select(TenantShellConfig).where(TenantShellConfig.tenant_id == tenant_id))).scalars().first()
+    from app.services.ontology import parse_text
+    return {"ontology_json": parse_text((cfg.ontology_prompt if cfg else "") or "")}
 
 
 @router.get("/versions", response_model=PaginatedResponse[VersionListItem])

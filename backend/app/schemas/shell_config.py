@@ -8,6 +8,7 @@ class ShellConfigUpdate(BaseModel):
     model_name: str | None = None
     system_prompt: str | None = None
     ontology_prompt: str | None = None
+    ontology_json: dict | None = None
     rules_text: str | None = None
     temperature: float | None = None
     max_context_messages: int | None = None
@@ -65,6 +66,7 @@ class ShellConfigResponse(BaseModel):
     model_name: str
     system_prompt: str | None
     ontology_prompt: str | None = None
+    ontology_json: dict | None = None
     rules_text: str | None
     temperature: float
     max_context_messages: int

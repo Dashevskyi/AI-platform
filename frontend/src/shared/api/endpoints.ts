@@ -1,5 +1,6 @@
 import apiClient from './client';
 import type {
+  OntologyJson,
   LoginRequest,
   LoginResponse,
   AdminUser,
@@ -193,6 +194,10 @@ export const shellApi = {
     const res = await apiClient.put(`/api/admin/tenants/${tenantId}/shell/`, data);
     return res.data;
   },
+  ontologyPreview: async (tenantId: string, ontology_json: OntologyJson | null): Promise<{ text: string }> =>
+    (await apiClient.post(`/api/admin/tenants/${tenantId}/shell/ontology/preview`, { ontology_json })).data,
+  ontologyImport: async (tenantId: string): Promise<{ ontology_json: OntologyJson }> =>
+    (await apiClient.post(`/api/admin/tenants/${tenantId}/shell/ontology/import`)).data,
   testConnection: async (tenantId: string): Promise<TestConnectionResult> => {
     const res = await apiClient.post(`/api/admin/tenants/${tenantId}/shell/test-connection`);
     return res.data;
@@ -1140,4 +1145,31 @@ export const auditSuiteApi = {
     by_tool: { total_failed: number; by_tool: { tool: string; misses: number; share: number; called_instead: Record<string, number> }[] };
     trend: { ts: string | null; passed: number; total: number }[];
   }> => (await apiClient.get(`${auditBase(t, a)}/stats`)).data,
+
+  // ----- auto-tuning (read-only analysis → staged recommendations → apply) -----
+  tune: async (t: string, a: string): Promise<{
+    ran: number; failed: number; diagnosed: number; recommendations: number;
+    diagnoser: string | null; failures_by_class: Record<string, number>;
+  }> => (await apiClient.post(`${auditBase(t, a)}/tune`)).data,
+  recommendations: async (t: string, a: string, status = 'pending'): Promise<{ recommendations: TuneRec[] }> =>
+    (await apiClient.get(`${auditBase(t, a)}/recommendations`, { params: { status } })).data,
+  applyRec: async (t: string, a: string, id: string): Promise<{ ok: boolean; reembedded?: boolean }> =>
+    (await apiClient.post(`${auditBase(t, a)}/recommendations/${id}/apply`)).data,
+  dismissRec: async (t: string, a: string, id: string): Promise<{ ok: boolean }> =>
+    (await apiClient.post(`${auditBase(t, a)}/recommendations/${id}/dismiss`)).data,
 };
+
+export interface TuneRec {
+  id: string;
+  scope: 'tool' | 'assistant';
+  tool_name: string | null;
+  change_type: string;
+  json_path: string | null;
+  param_name: string | null;
+  current_value: unknown;
+  proposed_value: unknown;
+  rationale: string | null;
+  deterministic: boolean;
+  failing_case_ids: string[];
+  status: string;
+}

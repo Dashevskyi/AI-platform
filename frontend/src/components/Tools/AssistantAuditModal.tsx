@@ -5,10 +5,16 @@ import {
 } from '@mantine/core';
 import {
   IconPlayerPlay, IconSearch, IconClipboardList, IconTrash, IconPlus, IconDownload, IconRefresh,
-  IconArrowUp, IconArrowDown, IconX,
+  IconArrowUp, IconArrowDown, IconX, IconWand, IconCheck, IconBan,
 } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
-import { auditSuiteApi, toolAuditApi, type AuditCaseRow } from '../../shared/api/endpoints';
+import { auditSuiteApi, toolAuditApi, type AuditCaseRow, type TuneRec } from '../../shared/api/endpoints';
+
+function renderVal(v: unknown): string {
+  if (v == null) return '∅';
+  if (typeof v === 'string') return v.length > 220 ? v.slice(0, 220) + '…' : v;
+  try { const s = JSON.stringify(v); return s.length > 220 ? s.slice(0, 220) + '…' : s; } catch { return String(v); }
+}
 
 interface Props {
   tenantId: string; assistantId: string; assistantName: string;
@@ -85,12 +91,20 @@ export function AssistantAuditModal({ tenantId, assistantId, assistantName, tool
   const [preview, setPreview] = useState<Record<string, { name: string; score: number }[]>>({});
   const [logFor, setLogFor] = useState<{ q: string; data: any } | null>(null);
   const [stats, setStats] = useState<Awaited<ReturnType<typeof auditSuiteApi.stats>> | null>(null);
+  const [tuning, setTuning] = useState(false);
+  const [recs, setRecs] = useState<TuneRec[]>([]);
+  const [tuneInfo, setTuneInfo] = useState<{ ran: number; failed: number; recommendations: number; failures_by_class: Record<string, number> } | null>(null);
+  const [applyingId, setApplyingId] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     setLoading(true);
     try {
-      const [c, s] = await Promise.all([auditSuiteApi.list(tenantId, assistantId), auditSuiteApi.stats(tenantId, assistantId)]);
-      setCases(c.cases); setStats(s);
+      const [c, s, r] = await Promise.all([
+        auditSuiteApi.list(tenantId, assistantId),
+        auditSuiteApi.stats(tenantId, assistantId),
+        auditSuiteApi.recommendations(tenantId, assistantId),
+      ]);
+      setCases(c.cases); setStats(s); setRecs(r.recommendations);
     } finally { setLoading(false); }
   }, [tenantId, assistantId]);
 
@@ -153,6 +167,37 @@ export function AssistantAuditModal({ tenantId, assistantId, assistantName, tool
     } finally { setSeeding(false); }
   };
 
+  const runTune = async () => {
+    if (tuning) return;
+    setTuning(true);
+    notifications.show({ id: 'tune', loading: true, autoClose: false, withCloseButton: false,
+      message: 'Прогон активных кейсов + диагностика тяжёлой моделью… (может занять минуту)' });
+    try {
+      const info = await auditSuiteApi.tune(tenantId, assistantId);
+      setTuneInfo(info);
+      const r = await auditSuiteApi.recommendations(tenantId, assistantId);
+      setRecs(r.recommendations);
+      notifications.update({ id: 'tune', loading: false, color: 'green', autoClose: 5000,
+        message: `Прогон ${info.ran} · фейлов ${info.failed} → ${info.recommendations} рекомендаций` });
+    } catch (e: any) {
+      notifications.update({ id: 'tune', loading: false, color: 'red', autoClose: 5000,
+        message: e?.response?.data?.detail || 'Ошибка авто-тюнинга' });
+    } finally { setTuning(false); }
+  };
+  const applyRec = async (id: string) => {
+    setApplyingId(id);
+    try {
+      await auditSuiteApi.applyRec(tenantId, assistantId, id);
+      setRecs((p) => p.filter((r) => r.id !== id));
+      notifications.show({ color: 'green', message: 'Применено к конфигу' });
+    } catch (e: any) { notifications.show({ color: 'red', message: e?.response?.data?.detail || 'Ошибка применения' }); }
+    finally { setApplyingId(null); }
+  };
+  const dismissRec = async (id: string) => {
+    await auditSuiteApi.dismissRec(tenantId, assistantId, id);
+    setRecs((p) => p.filter((r) => r.id !== id));
+  };
+
   return (
     <Modal opened={opened} onClose={onClose} size="90%" title={`Аудит роутинга — ${assistantName}`}>
       <Stack gap="sm">
@@ -167,6 +212,11 @@ export function AssistantAuditModal({ tenantId, assistantId, assistantName, tool
             <Button size="xs" color="grape" leftSection={<IconPlayerPlay size={14} />} loading={runningAll} onClick={runAll}>
               Запустить все активные
             </Button>
+            <Tooltip label="Прогон + диагностика тяжёлой моделью → рекомендации (конфиг не меняется до «Применить»)">
+              <Button size="xs" color="indigo" variant="light" leftSection={<IconWand size={14} />} loading={tuning} onClick={runTune}>
+                Авто-тюнинг
+              </Button>
+            </Tooltip>
           </Group>
         </Group>
         {runningAll && <Progress value={progress} animated />}
@@ -250,6 +300,45 @@ export function AssistantAuditModal({ tenantId, assistantId, assistantName, tool
                 ))}
               </Stack>
             )}
+          </>
+        )}
+
+        {recs.length > 0 && (
+          <>
+            <Divider label={`Рекомендации авто-тюнинга (${recs.length})`} labelPosition="left" />
+            {tuneInfo && (
+              <Text size="xs" c="dimmed">
+                прогон {tuneInfo.ran} · фейлов {tuneInfo.failed} · классы:{' '}
+                {Object.entries(tuneInfo.failures_by_class || {}).map(([k, v]) => `${k}:${v}`).join(', ') || '—'}
+              </Text>
+            )}
+            <Stack gap="xs">
+              {recs.map((r) => (
+                <Alert key={r.id} variant="light" color={r.deterministic ? 'teal' : 'indigo'} p="xs">
+                  <Group justify="space-between" wrap="nowrap" align="flex-start">
+                    <Stack gap={2} style={{ flex: 1, minWidth: 0 }}>
+                      <Group gap={6}>
+                        <Badge size="sm" color={r.deterministic ? 'teal' : 'indigo'} variant="filled" style={{ textTransform: 'none' }}>{r.change_type}</Badge>
+                        {r.deterministic && <Badge size="sm" color="teal" variant="outline">детерминир.</Badge>}
+                        <Badge size="sm" variant="outline" color={r.scope === 'assistant' ? 'grape' : 'gray'}>
+                          {r.scope === 'assistant' ? 'ассистент' : 'тул (общий)'}
+                        </Badge>
+                        <Text size="sm" fw={600}>{r.json_path}</Text>
+                        <Text size="xs" c="dimmed">чинит кейсов: {r.failing_case_ids.length}</Text>
+                      </Group>
+                      {r.rationale && <Text size="xs" c="dimmed">{r.rationale}</Text>}
+                      <Text size="xs"><Text span c="red">было:</Text> <code>{renderVal(r.current_value)}</code></Text>
+                      <Text size="xs"><Text span c="green">станет:</Text> <code>{renderVal(r.proposed_value)}</code></Text>
+                    </Stack>
+                    <Group gap={4} wrap="nowrap">
+                      <Button size="compact-xs" color="green" leftSection={<IconCheck size={14} />}
+                        loading={applyingId === r.id} onClick={() => applyRec(r.id)}>Применить</Button>
+                      <Tooltip label="Отклонить"><ActionIcon variant="subtle" color="gray" onClick={() => dismissRec(r.id)}><IconBan size={16} /></ActionIcon></Tooltip>
+                    </Group>
+                  </Group>
+                </Alert>
+              ))}
+            </Stack>
           </>
         )}
       </Stack>
