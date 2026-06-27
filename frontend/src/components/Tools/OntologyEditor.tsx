@@ -962,11 +962,12 @@ export function OntologyEditor({ tenantId, value, fallbackText, onChange, import
   const sections = value?.sections || [];
   const toolNames = useMemo(() => Object.keys(toolMap).sort(), [toolMap]);
   const [saving, setSaving] = useState(false);
-  // Snapshot of what's persisted, to flag unsaved edits. The shell form has its
-  // own Save too, but editing here is easy to lose track of — so the editor
-  // shows a dirty badge and can save the ontology on its own.
-  const [savedSnapshot, setSavedSnapshot] = useState<string>(() => JSON.stringify(value ?? null));
-  const dirty = JSON.stringify(value ?? null) !== savedSnapshot;
+  // "Dirty" = edited THROUGH this editor since load/last save. A snapshot of the
+  // initial `value` is unreliable because the parent populates ontology_json
+  // asynchronously (config fetch) — that would read as a phantom edit on load.
+  // So we flag touched only on real mutations and clear it on save.
+  const [touched, setTouched] = useState(false);
+  const dirty = touched;
 
   // Debounce linting — it runs over the whole ontology on every keystroke,
   // which can lag typing on a large ontology.
@@ -1022,7 +1023,7 @@ export function OntologyEditor({ tenantId, value, fallbackText, onChange, import
     })();
   }, [tenantId]);
 
-  const setSections = (secs: OntologySection[]) => onChange({ version: 1, sections: secs });
+  const setSections = (secs: OntologySection[]) => { setTouched(true); onChange({ version: 1, sections: secs }); };
   const patchSection = (i: number, s: OntologySection) => setSections(sections.map((x, k) => k === i ? s : x));
   const groupByType = () => {
     const next = sortOntologySectionsByType(sections);
@@ -1070,6 +1071,7 @@ export function OntologyEditor({ tenantId, value, fallbackText, onChange, import
   };
 
   const applyOntologyChange = (next: OntologyJson, focusSectionId?: string | null) => {
+    setTouched(true);
     onChange(next);
     setMode('structured');
     if (focusSectionId) setSelectedId(focusSectionId);
@@ -1167,6 +1169,7 @@ export function OntologyEditor({ tenantId, value, fallbackText, onChange, import
       const r = importSourceText != null
         ? await shellApi.ontologyParse(tenantId, importSourceText)
         : await shellApi.ontologyImport(tenantId);
+      setTouched(true);
       onChange(r.ontology_json);
       setMode('structured');
       if (r.ontology_json.sections[0]) {
@@ -1186,7 +1189,7 @@ export function OntologyEditor({ tenantId, value, fallbackText, onChange, import
     setSaving(true);
     try {
       await shellApi.update(tenantId, { ontology_json: value });
-      setSavedSnapshot(JSON.stringify(value ?? null));
+      setTouched(false);
       notifications.show({ color: 'green', message: 'Онтология сохранена (текст для модели перегенерирован)' });
     } catch (e: any) {
       notifications.show({ color: 'red', message: e?.response?.data?.detail || 'Ошибка сохранения' });
@@ -1465,7 +1468,7 @@ export function OntologyEditor({ tenantId, value, fallbackText, onChange, import
         tenantId={tenantId}
         tools={toolsList}
         ontology={value}
-        onApply={onChange}
+        onApply={(next) => applyOntologyChange(next)}
       />
       <OntologyWizardModal
         opened={wizardOpen}
