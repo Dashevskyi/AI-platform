@@ -191,6 +191,8 @@ async def search_tools(
     embedding_model: str | None,
     candidate_ids: Sequence[uuid.UUID] | None = None,
     top_k: int = 25,
+    query_vector: list[float] | None = None,
+    ontology_examples: list[dict] | None = None,
 ) -> list[TenantTool]:
     """
     Semantic search over active tools. Returns top_k by cosine distance to `query`.
@@ -199,15 +201,17 @@ async def search_tools(
     """
     if not query or not query.strip() or not embedding_model:
         return []
-    try:
-        provider = get_provider("ollama", app_settings.OLLAMA_BASE_URL or "http://localhost:11434")
-        vectors = await provider.embed(query, embedding_model)
-    except Exception:
-        logger.exception("tool query embed failed")
-        return []
-    if not vectors:
-        return []
-    qv = vectors[0]
+    qv = query_vector
+    if qv is None:
+        try:
+            provider = get_provider("ollama", app_settings.OLLAMA_BASE_URL or "http://localhost:11434")
+            vectors = await provider.embed(query, embedding_model)
+        except Exception:
+            logger.exception("tool query embed failed")
+            return []
+        if not vectors:
+            return []
+        qv = vectors[0]
 
     # Select both the row and the similarity score so callers can show
     # "why this tool was picked" in the debug panel.
@@ -258,6 +262,9 @@ async def search_tools(
             if bonus >= TAG_BONUS_MAX:
                 bonus = TAG_BONUS_MAX
                 break
+        if ontology_examples:
+            from app.services.llm.request_context import ontology_tool_boost
+            bonus = min(TAG_BONUS_MAX, bonus + ontology_tool_boost(query, tool.name, ontology_examples))
         final_score = min(1.0, cos + bonus)
         # Stash the raw cos + bonus separately so the debug-trace UI can
         # explain "0.42 cosine + 0.20 tag bonus = 0.62 effective".

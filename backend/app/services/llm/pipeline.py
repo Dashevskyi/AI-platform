@@ -304,6 +304,7 @@ class ToolExecCtx:
     # is a 1-element list used as a mutable int box.
     tool_call_counts: dict = None
     failed_calls: list = None
+    prompt_cache_extra: dict = None
 
 
 async def _run_provider_round(ctx: ToolExecCtx, round_num: int, *, voice_mode: bool = False):
@@ -320,10 +321,13 @@ async def _run_provider_round(ctx: ToolExecCtx, round_num: int, *, voice_mode: b
         max_tokens=ctx.config.max_tokens,
         tools=ctx.tool_defs,
         on_chunk=ctx.chunk_cb,
-        extra_body=_resolve_thinking_kwargs(
-            getattr(ctx.config, "enable_thinking", "on"), ctx.user_content, bool(ctx.tool_defs),
-            voice_mode=voice_mode,
-        ),
+        extra_body={
+            **_resolve_thinking_kwargs(
+                getattr(ctx.config, "enable_thinking", "on"), ctx.user_content, bool(ctx.tool_defs),
+                voice_mode=voice_mode,
+            ),
+            **(ctx.prompt_cache_extra or {}),
+        },
     )
     latency_ms = int((time.time() - t0) * 1000)
     pt = int(resp.prompt_tokens or 0)
@@ -756,6 +760,12 @@ from app.core.security import decrypt_value, redact_for_log
 from app.services.tools.executor import execute_tool
 from app.services.kb.embedder import search_kb_chunks
 from app.services.llm.model_resolver import resolve_model
+from app.services.llm.tool_selection import (
+    TOOL_SEMANTIC_TOPK,
+    select_relevant_tools as _select_relevant_tools,
+    tool_budget_for_model as _tool_budget_for_model,
+    tool_capability_tags as _tool_capability_tags,
+)
 from app.services.llm.context_compressor import RECENT_MESSAGES_FULL, trim_tool_definitions
 from app.services.llm.system_blocks import STATIC_SYSTEM_BLOCKS, effective_system_blocks
 from app.services.throttle import get_or_create_throttle, ThrottleRejected
@@ -985,6 +995,59 @@ async def _chat_completion_inner(self) -> dict:
     # declares (`actor_fields`), drop the rest. Empty/unset → pass all (compat).
     actor = _filter_actor(actor, getattr(config, "actor_fields", None))
 
+    from app.services.llm.request_context import RequestContext, load_ontology_examples
+    from app.services.llm.context_builder import batch_assistant_for_user_messages, run_prefetch_parallel
+    from app.services.llm.preflight_planner import plan_preflight_heuristic, resolve_preflight_plan
+    from app.services.llm.prompt_cache import compute_prompt_cache_key, cache_extra_body
+    from app.services.llm.pipeline_metrics import pipeline_metrics
+
+    req_ctx = RequestContext(
+        query=user_content or "",
+        embedding_model=getattr(config, "embedding_model_name", None),
+        ontology_examples=load_ontology_examples(getattr(config, "ontology_json", None)),
+    )
+    _preflight = plan_preflight_heuristic(
+        user_content or "",
+        memory_enabled=bool(getattr(config, "memory_enabled", True)),
+        kb_enabled=bool(getattr(config, "knowledge_base_enabled", True)),
+        kb_inject_auto=bool(getattr(config, "kb_inject_auto", True)),
+    )
+    req_ctx.preflight_reason = _preflight.reason
+
+    async def _emit_context(stage: str, status: str = "done", **extra) -> None:
+        await _emit("context_building", {"stage": stage, "status": status, **extra})
+
+    req_ctx.timer.start("embed_query")
+    await req_ctx.ensure_query_vector()
+    req_ctx.timer.stop("embed_query")
+    await _emit_context("embed_query", ms=req_ctx.timer.timings_ms.get("embed_query", 0))
+
+    _early_allowed = await _load_allowed_tool_ids(db, tenant_id, api_key_id)
+    _assistant_scope_early = getattr(config, "assistant_allowed_tool_ids", None)
+    if _assistant_scope_early is not None:
+        _aset = {str(t) for t in _assistant_scope_early}
+        _early_allowed = _aset if _early_allowed is None else (_early_allowed & _aset)
+    _early_candidates = None if _early_allowed is None else [uuid.UUID(x) for x in _early_allowed]
+
+    if req_ctx.query_vector and req_ctx.embedding_model and _preflight.need_semantic_tools:
+        req_ctx.timer.start("semantic_tools")
+        try:
+            from app.services.tools.embedder import search_tools as _prefetch_search_tools
+            req_ctx.semantic_tools_cache = await _prefetch_search_tools(
+                tenant_id=str(tenant_id),
+                query=req_ctx.query,
+                db=db,
+                embedding_model=req_ctx.embedding_model,
+                candidate_ids=_early_candidates,
+                top_k=TOOL_SEMANTIC_TOPK,
+                query_vector=req_ctx.query_vector,
+                ontology_examples=req_ctx.ontology_examples,
+            )
+        except Exception:
+            logger.exception("[%s] semantic tools prefetch failed", correlation_id)
+        req_ctx.timer.stop("semantic_tools")
+        await _emit_context("semantic_tools", ms=req_ctx.timer.timings_ms.get("semantic_tools", 0))
+
     # 1a. Tier 0 routing — try the deterministic shortcut FIRST. If the query
     # is unambiguous (high-confidence single tool + required entities present
     # in text + tool has a tier0_template configured) we call the tool
@@ -992,16 +1055,7 @@ async def _chat_completion_inner(self) -> dict:
     # ~100-300ms vs 1-2s. If anything is uncertain → returns None and we
     # fall through to the full pipeline below.
     if getattr(config, "tier0_enabled", False):
-        # Effective tool allow-set (API-key ∩ assistant) — Tier 0 must respect it,
-        # else it can route to an out-of-scope tenant tool and leave the model
-        # with an empty catalog. Mirrors the scope logic applied below for the
-        # LLM path. None = no restriction; empty set = no tool access.
-        _t0_allowed = await _load_allowed_tool_ids(db, tenant_id, api_key_id)
-        _t0_scope = getattr(config, "assistant_allowed_tool_ids", None)
-        if _t0_scope is not None:
-            _t0_set = {str(t) for t in _t0_scope}
-            _t0_allowed = _t0_set if _t0_allowed is None else (_t0_allowed & _t0_set)
-        _t0_candidates = None if _t0_allowed is None else [uuid.UUID(x) for x in _t0_allowed]
+        _t0_candidates = _early_candidates
         try:
             from app.services.llm.tier0_router import try_tier0
             tier0_result = await try_tier0(
@@ -1012,8 +1066,9 @@ async def _chat_completion_inner(self) -> dict:
                 min_tool_score=float(getattr(config, "tier0_min_tool_score", 0.80) or 0.80),
                 max_score_gap=float(getattr(config, "tier0_max_score_gap", 0.15) or 0.15),
                 candidate_ids=_t0_candidates,
-                # Same _context the LLM path injects — so Tier 0 honours PII
-                # redaction (redact_fields) and actor forced-filters too.
+                query_vector=req_ctx.query_vector,
+                semantic_tools=req_ctx.semantic_tools_cache or None,
+                ontology_examples=req_ctx.ontology_examples,
                 tool_context={
                     "tenant_id": str(tenant_id),
                     "chat_id": str(chat_id),
@@ -1092,6 +1147,8 @@ async def _chat_completion_inner(self) -> dict:
             await _auto_summary_background(
                 None, config, chat_id, user_content, tier0_result.content,
             )
+            pipeline_metrics.record_stages(req_ctx.timer.timings_ms)
+            pipeline_metrics.record_request(tier0=True, error=False)
             return {
                 "content": tier0_result.content,
                 "prompt_tokens": 0,
@@ -1149,11 +1206,10 @@ async def _chat_completion_inner(self) -> dict:
     if exclude_ids and recent_msgs:
         recent_msgs = [m for m in recent_msgs if str(m.id) not in exclude_ids]
 
-    # 3. Memory — pinned entries always included; the rest selected by
-    #    semantic similarity to the user's current message.
+    # 3. Memory — pinned entries loaded now; semantic search deferred to prefetch (after model resolve).
     memory_entries: list = []
+    pinned_entries: list = []
     if config.memory_enabled:
-        # Always-on: pinned entries + scope (this chat or tenant-wide)
         pinned_q = (
             select(MemoryEntry)
             .where(
@@ -1165,44 +1221,7 @@ async def _chat_completion_inner(self) -> dict:
             .order_by(MemoryEntry.priority.desc())
         )
         pinned_entries = list((await db.execute(pinned_q)).scalars().all())
-        # Semantic top-N via embeddings — ignored gracefully if no embedding model configured
-        semantic_entries: list = []
-        if config.embedding_model_name:
-            try:
-                from app.services.memory.embedder import search_memory_entries
-                semantic_entries = list(await search_memory_entries(
-                    tenant_id=str(tenant_id),
-                    chat_id=str(chat_id),
-                    query=user_content,
-                    db=db,
-                    embedding_model=config.embedding_model_name,
-                    top_k=8,
-                ))
-            except Exception:
-                logger.exception(f"[{correlation_id}] memory semantic search failed; falling back to priority-only")
-        if not semantic_entries:
-            # Fallback: top-N by priority among non-pinned (preserves old behaviour
-            # if embeddings aren't ready yet — backfill is async)
-            fallback_q = (
-                select(MemoryEntry)
-                .where(
-                    MemoryEntry.tenant_id == tenant_id,
-                    MemoryEntry.deleted_at.is_(None),
-                    MemoryEntry.is_pinned.is_(False),
-                    (MemoryEntry.chat_id == chat_id) | (MemoryEntry.chat_id.is_(None)),
-                )
-                .order_by(MemoryEntry.priority.desc(), MemoryEntry.created_at.desc())
-                .limit(8)
-            )
-            semantic_entries = list((await db.execute(fallback_q)).scalars().all())
-        # De-dup
-        seen_ids = set()
-        memory_entries = []
-        for m in [*pinned_entries, *semantic_entries]:
-            if m.id in seen_ids:
-                continue
-            seen_ids.add(m.id)
-            memory_entries.append(m)
+        memory_entries = list(pinned_entries)
 
     # 4. Resolve model via catalog (or fallback to shell_config)
     resolved = await resolve_model(tenant_id, user_content, db, config)
@@ -1281,44 +1300,167 @@ async def _chat_completion_inner(self) -> dict:
 
     logger.debug(f"[{correlation_id}] Model resolved: {model_name} (source={resolved.source}, provider={resolved.provider_type})")
 
-    # 5. KB — semantic search via embeddings (skip if no KB documents exist)
-    # kb_inject_auto=False → on-demand mode: skip pre-search entirely;
-    # the LLM will call search_kb() tool when it actually needs KB context.
-    kb_chunks: list = []
-    _kb_inject_auto = getattr(config, "kb_inject_auto", True)
-    if _kb_inject_auto and config.knowledge_base_enabled and config.embedding_model_name:
-        # Quick check: do any KB chunks exist for this tenant?
-        kb_exists = (await db.execute(
-            select(sa_func.count()).select_from(
-                select(KBChunk.id).where(KBChunk.tenant_id == tenant_id).limit(1).subquery()
-            )
-        )).scalar()
-        if kb_exists:
-            await _emit("kb_search_start", {"query": user_content[:120]})
-            try:
-                from app.core.config import settings
-                embed_provider = get_provider("ollama", settings.OLLAMA_BASE_URL or "http://localhost:11434")
-                kb_chunks = await search_kb_chunks(
-                    tenant_id=tenant_id,
-                    query=user_content,
-                    db=db,
-                    provider=embed_provider,
-                    embedding_model=config.embedding_model_name,
-                    max_results=config.kb_max_chunks or 10,
-                )
-            except Exception as e:
-                logger.warning(f"KB semantic search failed: {e}")
-            await _emit("kb_search_done", {"chunks_count": len(kb_chunks)})
+    _preflight = await resolve_preflight_plan(
+        user_content or "",
+        provider=provider,
+        model_name=model_name,
+        has_attachments=False,
+        memory_enabled=bool(getattr(config, "memory_enabled", True)),
+        kb_enabled=bool(getattr(config, "knowledge_base_enabled", True)),
+        kb_inject_auto=bool(getattr(config, "kb_inject_auto", True)),
+        tools_likely=_query_needs_tools(user_content, []),
+    )
+    req_ctx.preflight_reason = _preflight.reason
+    debug_trace["preflight_mode"] = _preflight.mode
 
-    # 6. Load processed chat attachments first — they inform tool routing.
-    attachment_tool_defs: list[dict] = []
-    attachment_map: dict[str, str] = {}  # tool_name -> attachment_id
+    # 5–6. Parallel prefetch: memory semantic + KB + attachments + grounding.
+    kb_chunks: list = []
+    active_artifacts: list = []
+    _kb_inject_auto = getattr(config, "kb_inject_auto", True)
     attachments_q = select(MessageAttachment).where(
         MessageAttachment.chat_id == chat_id,
         MessageAttachment.tenant_id == tenant_id,
         MessageAttachment.processing_status == "done",
     )
-    chat_attachments = list((await db.execute(attachments_q)).scalars().all())
+
+    async def _prefetch_memory() -> list:
+        if not config.memory_enabled or not _preflight.need_memory_semantic:
+            return []
+        if not config.embedding_model_name:
+            fallback_q = (
+                select(MemoryEntry)
+                .where(
+                    MemoryEntry.tenant_id == tenant_id,
+                    MemoryEntry.deleted_at.is_(None),
+                    MemoryEntry.is_pinned.is_(False),
+                    (MemoryEntry.chat_id == chat_id) | (MemoryEntry.chat_id.is_(None)),
+                )
+                .order_by(MemoryEntry.priority.desc(), MemoryEntry.created_at.desc())
+                .limit(8)
+            )
+            return list((await db.execute(fallback_q)).scalars().all())
+        try:
+            from app.services.memory.embedder import search_memory_entries
+            return list(await search_memory_entries(
+                tenant_id=str(tenant_id),
+                chat_id=str(chat_id),
+                query=user_content,
+                db=db,
+                embedding_model=config.embedding_model_name,
+                top_k=8,
+                query_vector=req_ctx.query_vector,
+            ))
+        except Exception:
+            logger.exception("[%s] memory semantic prefetch failed", correlation_id)
+            return []
+
+    async def _prefetch_kb() -> list:
+        if not _preflight.need_kb:
+            return []
+        if not (_kb_inject_auto and config.knowledge_base_enabled and config.embedding_model_name):
+            return []
+        kb_exists = (await db.execute(
+            select(sa_func.count()).select_from(
+                select(KBChunk.id).where(KBChunk.tenant_id == tenant_id).limit(1).subquery()
+            )
+        )).scalar()
+        if not kb_exists:
+            return []
+        await _emit("kb_search_start", {"query": user_content[:120]})
+        try:
+            from app.core.config import settings
+            embed_provider = get_provider("ollama", settings.OLLAMA_BASE_URL or "http://localhost:11434")
+            return await search_kb_chunks(
+                tenant_id=tenant_id,
+                query=user_content,
+                db=db,
+                provider=embed_provider,
+                embedding_model=config.embedding_model_name,
+                max_results=config.kb_max_chunks or 10,
+                query_vector=req_ctx.query_vector,
+            )
+        except Exception as e:
+            logger.warning(f"KB semantic search failed: {e}")
+            return []
+
+    async def _prefetch_attachments() -> list:
+        return list((await db.execute(attachments_q)).scalars().all())
+
+    async def _prefetch_grounding() -> list:
+        if not _preflight.need_grounding:
+            return []
+        if not chat_id:
+            return []
+        try:
+            from app.services.artifacts.grounding import resolve_active_artifacts
+            return list(await resolve_active_artifacts(
+                db=db,
+                tenant_id=tenant_id,
+                chat_id=chat_id,
+                user_content=user_content,
+                query_vector=req_ctx.query_vector,
+                embed_model=config.embedding_model_name,
+            ))
+        except Exception:
+            logger.exception("[%s] artifact grounding prefetch failed", correlation_id)
+            return []
+
+    req_ctx.timer.start("prefetch")
+    _pf_mem, _pf_kb, chat_attachments, _pf_artifacts = await run_prefetch_parallel(
+        _prefetch_memory(),
+        _prefetch_kb(),
+        _prefetch_attachments(),
+        _prefetch_grounding(),
+        names=["memory", "kb", "attachments", "grounding"],
+    )
+    kb_chunks = _pf_kb or []
+    active_artifacts = _pf_artifacts or []
+    semantic_memory = _pf_mem or []
+    if config.memory_enabled and not semantic_memory and _preflight.need_memory_semantic:
+        fallback_q = (
+            select(MemoryEntry)
+            .where(
+                MemoryEntry.tenant_id == tenant_id,
+                MemoryEntry.deleted_at.is_(None),
+                MemoryEntry.is_pinned.is_(False),
+                (MemoryEntry.chat_id == chat_id) | (MemoryEntry.chat_id.is_(None)),
+            )
+            .order_by(MemoryEntry.priority.desc(), MemoryEntry.created_at.desc())
+            .limit(8)
+        )
+        semantic_memory = list((await db.execute(fallback_q)).scalars().all())
+    seen_mem: set = set()
+    memory_entries = []
+    for m in [*pinned_entries, *semantic_memory]:
+        if m.id in seen_mem:
+            continue
+        seen_mem.add(m.id)
+        memory_entries.append(m)
+    if chat_attachments:
+        _preflight = await resolve_preflight_plan(
+            user_content or "",
+            provider=provider,
+            model_name=model_name,
+            has_attachments=True,
+            memory_enabled=bool(getattr(config, "memory_enabled", True)),
+            kb_enabled=bool(getattr(config, "knowledge_base_enabled", True)),
+            kb_inject_auto=bool(getattr(config, "kb_inject_auto", True)),
+            tools_likely=_query_needs_tools(user_content, chat_attachments),
+        )
+        req_ctx.preflight_reason = _preflight.reason
+    if _kb_inject_auto and config.knowledge_base_enabled and kb_chunks:
+        await _emit("kb_search_done", {"chunks_count": len(kb_chunks)})
+    req_ctx.timer.stop("prefetch")
+    await _emit_context(
+        "prefetch",
+        ms=req_ctx.timer.timings_ms.get("prefetch", 0),
+        kb=len(kb_chunks),
+        artifacts=len(active_artifacts),
+        preflight=_preflight.reason,
+    )
+
+    attachment_tool_defs: list[dict] = []
+    attachment_map: dict[str, str] = {}  # tool_name -> attachment_id
 
     # Split into attachments attached to THIS user message (the freshest, must
     # get prime placement next to the question) vs everything attached earlier
@@ -1339,16 +1481,7 @@ async def _chat_completion_inner(self) -> dict:
         previous_chat_attachments = chat_attachments
 
     needs_tools = _query_needs_tools(user_content, chat_attachments)
-    # Resolve API-key tool access early — empty allowed_tool_ids means key has no tool access
-    allowed_tool_ids = await _load_allowed_tool_ids(db, tenant_id, api_key_id)
-    # Also enforce the ASSISTANT's tool scope. It was loaded into EffectiveConfig
-    # but never applied — so a scoped assistant (e.g. telegram-bot → [my_services])
-    # could still call ANY tenant tool. Effective allow-set = key ∩ assistant;
-    # NULL on a side = no restriction from it; both NULL = all tenant tools.
-    _assistant_scope = getattr(config, "assistant_allowed_tool_ids", None)
-    if _assistant_scope is not None:
-        _assistant_set = {str(t) for t in _assistant_scope}
-        allowed_tool_ids = _assistant_set if allowed_tool_ids is None else (allowed_tool_ids & _assistant_set)
+    allowed_tool_ids = _early_allowed
     key_blocks_tools = allowed_tool_ids is not None and len(allowed_tool_ids) == 0
 
     if config.tools_policy == "never":
@@ -1384,6 +1517,9 @@ async def _chat_completion_inner(self) -> dict:
             db=db,
             tenant_id=str(tenant_id),
             semantic_floor=float(getattr(config, "tool_semantic_floor", 0.5) or 0.5),
+            query_vector=req_ctx.query_vector,
+            ontology_examples=req_ctx.ontology_examples,
+            semantic_cache=req_ctx.semantic_tools_cache or None,
         )
         tool_config_map = {
             t.config_json["function"]["name"]: t.config_json
@@ -1624,16 +1760,7 @@ async def _chat_completion_inner(self) -> dict:
     # present open files. Block payload is built here, attached below.
     active_artifacts_block_text: str | None = None
     try:
-        from app.services.artifacts.grounding import (
-            resolve_active_artifacts,
-            format_active_artifacts_block,
-        )
-        active_artifacts = await resolve_active_artifacts(
-            db=db,
-            tenant_id=tenant_id,
-            chat_id=chat_id,
-            user_content=user_content,
-        )
+        from app.services.artifacts.grounding import format_active_artifacts_block
         if active_artifacts:
             active_artifacts_block_text = format_active_artifacts_block(active_artifacts)
             logger.info(
@@ -1729,16 +1856,7 @@ async def _chat_completion_inner(self) -> dict:
                     return t[:cap].rstrip() + " …"
                 return t
 
-            pairs: list[tuple] = []
-            for u in user_rows:
-                asst = (await db.execute(
-                    select(Message).where(
-                        Message.chat_id == chat_id,
-                        Message.role == "assistant",
-                        Message.created_at >= u.created_at,
-                    ).order_by(Message.created_at.asc()).limit(1)
-                )).scalar_one_or_none()
-                pairs.append((u, asst))
+            pairs = await batch_assistant_for_user_messages(db, chat_id, user_rows)
 
             # Layer 1 — verbatim native-role turns. Critical for short
             # follow-ups like «да», «ок», «а во второй строке?» — the resume
@@ -1868,6 +1986,18 @@ async def _chat_completion_inner(self) -> dict:
     # Injected HERE (after all static blocks) for KV-cache efficiency:
     # everything above is tenant-static and can be cached across requests.
     # Only the date + history + query below are dynamic.
+    _prompt_cache_key = compute_prompt_cache_key(system_parts)
+    _prompt_cache_extra = cache_extra_body(_prompt_cache_key)
+    req_ctx.prompt_cache_key = _prompt_cache_key
+    debug_trace["prompt_cache_key"] = _prompt_cache_key
+    debug_trace["preflight"] = {
+        "reason": req_ctx.preflight_reason,
+        "mode": _preflight.mode,
+        "need_kb": _preflight.need_kb,
+        "need_grounding": _preflight.need_grounding,
+        "need_memory_semantic": _preflight.need_memory_semantic,
+        "need_semantic_tools": _preflight.need_semantic_tools,
+    }
     if _hc0_date_text:
         _sys("HARDCODED-0 current date/time", _hc0_date_text)
 
@@ -2229,6 +2359,7 @@ async def _chat_completion_inner(self) -> dict:
             current_round_ref=current_round_ref, round_breakdown=round_breakdown,
             tool_routing_temperature=tool_routing_temperature, effective_temperature=effective_temperature,
             tool_call_counts={}, failed_calls=[0],
+            prompt_cache_extra=_prompt_cache_extra,
         )
 
         # Initial LLM call — let the auto-router pick light/heavy first
@@ -2267,9 +2398,9 @@ async def _chat_completion_inner(self) -> dict:
             # provider decides what extra fields (reasoning_content, etc.) to echo.
             messages.append(provider.format_assistant_turn(resp))
 
-            # Execute each tool call and add results (see _execute_tool_call).
-            for tc in resp.tool_calls:
-                await _execute_tool_call(_tool_ctx, tc, round_num)
+            # Execute each tool call and add results (parallel when multiple).
+            from app.services.llm.pipeline_tool_exec import execute_tool_calls
+            await execute_tool_calls(_tool_ctx, resp.tool_calls, round_num)
 
             # Summarize large tool results from PREVIOUS rounds to save tokens.
             # Current round results stay full so LLM can process them now.
@@ -2627,6 +2758,11 @@ async def _chat_completion_inner(self) -> dict:
     await _collect_capture_artifacts(_capture_tasks_by_round, round_breakdown, correlation_id)
 
     # Finalize debug trace before persisting.
+    debug_trace["timings_ms"] = req_ctx.timer.timings_ms
+    pipeline_metrics.record_stages(req_ctx.timer.timings_ms)
+    if first_chunk_at is not None:
+        pipeline_metrics.record_ttft(int((first_chunk_at - start) * 1000))
+    pipeline_metrics.record_request(tier0=False, error=(status != "success"))
     debug_trace["rounds"] = round_breakdown
     debug_trace["context"] = {
         "messages_count": len(messages),
@@ -3748,20 +3884,6 @@ def _query_needs_tools(user_content: str, chat_attachments: list) -> bool:
     return True
 
 
-MAX_TOOLS_PER_REQUEST = 20    # ≤ → send all; > → use semantic selection
-TOOL_KEYWORD_THRESHOLD = 80   # use keyword matching up to this; semantic above
-TOOL_SEMANTIC_TOPK = 18       # how many tools to pull from semantic search
-LOCAL_QWEN_TOOL_BUDGET = 8
-DEFAULT_TOOL_BUDGET = 12
-
-
-def _tool_budget_for_model(model_name: str | None) -> int:
-    lowered = (model_name or "").lower()
-    if "qwen2.5" in lowered or "qwen2_5" in lowered:
-        return LOCAL_QWEN_TOOL_BUDGET
-    return DEFAULT_TOOL_BUDGET
-
-
 _TOPIC_TOKEN_RE = re.compile(r"[A-Za-zА-Яа-яЁёІіЇїЄєҐґ0-9][A-Za-zА-Яа-яЁёІіЇїЄєҐґ0-9\.-]{2,}")
 
 
@@ -3778,38 +3900,25 @@ def _topic_tokens(text: str) -> set[str]:
 
 
 def _should_carry_tool_history(current_user_content: str, prior_user_content: str) -> bool:
-    """Keep the latest prior tool turn only when it still looks relevant.
-
-    Without this filter, unrelated requests can inherit a stale tool task from the
-    previous turn. That is especially harmful because tools are enabled for almost
-    every substantive message, so a fresh question like certificate setup may end up
-    carrying an old address/geocoding request into the next prompt.
-    """
     current = (current_user_content or "").strip()
     prior = (prior_user_content or "").strip()
     if not current or not prior:
         return False
-
     current_distinctive = _extract_distinctive_tokens(current)
     prior_distinctive = _extract_distinctive_tokens(prior)
     if current_distinctive & prior_distinctive:
         return True
-
     current_tokens = _topic_tokens(current)
     prior_tokens = _topic_tokens(prior)
     overlap = current_tokens & prior_tokens
     if len(overlap) >= 2:
         return True
-
-    # Stronger tie for addresses / domains / hostnames where a single shared token
-    # can still be sufficient (`gagarina`, `ai.it-invest.ua`).
     if len(overlap) == 1:
         only = next(iter(overlap))
         if "." in only or only.isdigit():
             return True
         if only in {"гагарина", "університетський", "университетский", "кривий", "кривой"}:
             return True
-
     return False
 
 
@@ -3843,269 +3952,6 @@ def _compact_history_for_tool_request(
                 pending_assistant_summary = {"role": "assistant", "content": compact}
     selected.reverse()
     return selected
-
-
-async def _select_relevant_tools(
-    all_tools: list,
-    user_message: str,
-    provider,
-    model_name: str,
-    *,
-    embedding_model: str | None = None,
-    db = None,
-    tenant_id: str | None = None,
-    semantic_floor: float = 0.5,
-) -> list:
-    """
-    Select relevant tools for the user message:
-
-      • ≤ MAX_TOOLS_PER_REQUEST  → return everything (no filter needed)
-      • > MAX_TOOLS_PER_REQUEST → prefer semantic search via tool embeddings,
-        falling back to keyword matcher → LLM-pick when embeddings are absent.
-
-    Pinned tools (is_pinned=True) are always included on top of the selection.
-
-    Semantic is the default above the cap because keyword matching scores
-    English tool names poorly against Russian queries, and reliably drops
-    legitimately relevant tools (observed: `search_tasks` dropped because the
-    user message lacked literal "tasks"/"задания" tokens even though the topic
-    was billing tasks).
-    """
-    if not all_tools:
-        return []
-
-    budget = min(MAX_TOOLS_PER_REQUEST, _tool_budget_for_model(model_name))
-
-    # Tier 1 — small set, send everything when the budget allows it.
-    if len(all_tools) <= budget:
-        return all_tools
-
-    pinned = [t for t in all_tools if getattr(t, "is_pinned", False)]
-    pinned_ids = {t.id for t in pinned}
-    rest = [t for t in all_tools if t.id not in pinned_ids]
-    # Tag pinned tools with their selection source — used by debug-trace.
-    for t in pinned:
-        t._selection_source = "pinned"
-
-    selected: list = []
-    selection_method = ""
-
-    # Tier 2 — semantic search when embeddings available. Domain workflows
-    # (e.g. PON: pon_search → pon_tree) belong in tenant.ontology_prompt as
-    # plain instructions, not as a hardcoded route here — keeping selection
-    # purely semantic keeps the pipeline tenant-agnostic.
-    embeddable = [t for t in rest if getattr(t, "embedding", None) is not None]
-    has_enough_embeddings = embedding_model and db is not None and tenant_id and len(embeddable) >= len(rest) // 2
-    semantic_selected: list = []
-    non_embedded_fallback: list = []
-    # True once semantic search actually executed. When it did, an empty result
-    # (everything below the floor) is a DELIBERATE "no relevant tools" — for
-    # conversational/identity queries ("кто ты?") we must NOT escalate to the
-    # keyword/LLM-pick fallbacks, which would force-pick an irrelevant tool.
-    semantic_ran = False
-    if has_enough_embeddings:
-        try:
-            from app.services.tools.embedder import search_tools
-            semantic_results = await search_tools(
-                tenant_id=str(tenant_id),
-                query=user_message,
-                db=db,
-                embedding_model=embedding_model,
-                top_k=TOOL_SEMANTIC_TOPK,
-            )
-            semantic_ran = True
-            if semantic_results:
-                # Apply per-tenant similarity floor — tools below it are noisy
-                # "kinda matches" that crowd the prompt without adding signal.
-                # Non-embedded tools bypass this floor (we can't score them).
-                semantic_filtered = [
-                    t for t in semantic_results
-                    if (getattr(t, "_semantic_score", None) or 0.0) >= float(semantic_floor or 0.0)
-                ]
-                semantic_ids = {t.id for t in semantic_filtered}
-                non_embedded_fallback = [t for t in rest if getattr(t, "embedding", None) is None and t.id not in semantic_ids]
-                for t in semantic_filtered:
-                    t._selection_source = "semantic"
-                    # _semantic_score already set by search_tools
-                for t in non_embedded_fallback:
-                    t._selection_source = "non-embedded-fallback"
-                semantic_selected = semantic_filtered
-                if len(semantic_filtered) < len(semantic_results):
-                    logger.info(
-                        "[tool-select] semantic floor %.2f cut %d/%d tools (kept %d)",
-                        semantic_floor, len(semantic_results) - len(semantic_filtered),
-                        len(semantic_results), len(semantic_filtered),
-                    )
-        except Exception:
-            logger.exception("semantic tool selection failed; falling back to keyword")
-
-    # Merge semantic + non-embedded fallback — dedup by tool id.
-    if semantic_selected or non_embedded_fallback:
-        seen_merge: set = set()
-        for src in (semantic_selected, non_embedded_fallback):
-            for t in src:
-                if t.id in seen_merge:
-                    continue
-                seen_merge.add(t.id)
-                selected.append(t)
-        parts = []
-        if semantic_selected:
-            parts.append("semantic")
-        if not parts and non_embedded_fallback:
-            parts.append("non-embedded-fallback")
-        selection_method = "+".join(parts)
-
-    # Tier 3 — keyword fallback (only when semantic search couldn't run, i.e.
-    # tenant lacks embeddings). If semantic ran and kept nothing, that's a
-    # deliberate "no tools" — don't force a keyword/LLM pick.
-    if not selected and not semantic_ran and len(rest) <= TOOL_KEYWORD_THRESHOLD:
-        try:
-            selected = _keyword_match_tools(rest, user_message)
-            for t in selected:
-                t._selection_source = "keyword"
-            selection_method = "keyword"
-        except Exception:
-            logger.exception("keyword tool selection failed")
-
-    # Tier 4 — last resort LLM pick, also only when semantic didn't run.
-    if not selected and not semantic_ran:
-        try:
-            selected = await _llm_select_tools(rest, user_message, provider, model_name)
-            for t in selected:
-                t._selection_source = "llm-pick"
-            selection_method = "llm-pick"
-        except Exception:
-            selected = []
-            selection_method = "fallback-empty"
-
-    if not selected and semantic_ran and not selection_method:
-        selection_method = "semantic-empty"  # no tool cleared the floor — answer directly
-
-    # Pinned tools are "system-essentials" (memory/artifacts/RAG helpers).
-    # They go in ABOVE the budget — budget only constrains the non-pinned
-    # semantic/keyword selection. Otherwise pinned starves out the
-    # actually-relevant tools for the user query (observed: 7 pinned filled
-    # the 8-slot Qwen budget and squeezed out `ping` for a network query).
-    seen_ids: set = set()
-    selected_non_pinned: list = []
-    for t in selected:
-        if t.id in pinned_ids or t.id in seen_ids:
-            continue
-        seen_ids.add(t.id)
-        selected_non_pinned.append(t)
-    # Budget cap applies only to non-pinned. Final payload = pinned + capped.
-    capped_non_pinned = selected_non_pinned[:budget]
-    final: list = [*pinned, *capped_non_pinned]
-    logger.info(
-        "tool selection: tenant=%s total=%d pinned=%d %s -> %d non-pinned kept (budget=%d) + %d pinned = %d total",
-        tenant_id, len(all_tools), len(pinned), selection_method,
-        len(capped_non_pinned), budget, len(pinned), len(final),
-    )
-    return final
-
-
-def _keyword_match_tools(all_tools: list, user_message: str) -> list:
-    """Score tools by keyword overlap with user message."""
-    msg_lower = user_message.lower()
-    msg_words = set(msg_lower.split())
-
-    scored = []
-    for tool in all_tools:
-        score = 0
-        name = (tool.name or "").lower()
-        desc = (tool.description or "").lower()
-        tags = " ".join(_tool_capability_tags(tool)).lower()
-        # Name match is strong signal
-        if name in msg_lower:
-            score += 10
-        # Word overlap
-        tool_words = set(name.split("_")) | set(name.split("-")) | set(desc.split()) | set(tags.split())
-        overlap = msg_words & tool_words
-        score += len(overlap) * 2
-        # Partial substring match in description
-        for word in msg_words:
-            if len(word) > 3 and word in desc:
-                score += 1
-            if len(word) > 3 and word in tags:
-                score += 1
-        scored.append((score, tool))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    # Return top tools with score > 0, up to MAX_TOOLS_PER_REQUEST
-    selected = [t for score, t in scored[:MAX_TOOLS_PER_REQUEST] if score > 0]
-    # If nothing matched, return top N by name (better than nothing)
-    if not selected:
-        selected = [t for _, t in scored[:MAX_TOOLS_PER_REQUEST]]
-    return selected
-
-
-TOOL_SELECTION_PROMPT = """У тебя есть список инструментов. Пользователь отправил сообщение.
-Выбери ТОЛЬКО те инструменты, которые могут понадобиться для ответа на это сообщение.
-Верни JSON-массив с именами выбранных инструментов (максимум {max_tools}).
-Если ни один инструмент не нужен — верни [].
-
-Инструменты:
-{tools_list}
-
-Сообщение пользователя: {user_message}
-
-JSON-массив имён:"""
-
-
-async def _llm_select_tools(
-    all_tools: list,
-    user_message: str,
-    provider,
-    model_name: str,
-) -> list:
-    """Use LLM to select relevant tools from a large set."""
-    tools_summary = "\n".join(
-        f"- {t.name} [{', '.join(_tool_capability_tags(t)) or 'no-tags'}]: {(t.description or 'нет описания')[:100]}"
-        for t in all_tools
-    )
-
-    prompt = TOOL_SELECTION_PROMPT.format(
-        max_tools=MAX_TOOLS_PER_REQUEST,
-        tools_list=tools_summary[:3000],
-        user_message=user_message[:500],
-    )
-
-    resp = await provider.chat_completion(
-        messages=[{"role": "user", "content": prompt}],
-        model=model_name,
-        temperature=0.0,
-        max_tokens=200,
-    )
-
-    text = resp.content.strip()
-    if "```" in text:
-        import re
-        match = re.search(r'```(?:json)?\s*(\[.*?\])\s*```', text, re.DOTALL)
-        if match:
-            text = match.group(1)
-
-    selected_names = json.loads(text)
-    if not isinstance(selected_names, list):
-        return _keyword_match_tools(all_tools, user_message)
-
-    name_set = set(str(n).lower().strip() for n in selected_names)
-    selected = [t for t in all_tools if t.name.lower().strip() in name_set]
-
-    logger.debug(f"LLM tool selection: {len(selected)}/{len(all_tools)} tools selected")
-    return selected[:MAX_TOOLS_PER_REQUEST]
-
-
-def _tool_capability_tags(tool) -> list[str]:
-    config = getattr(tool, "config_json", None)
-    if not isinstance(config, dict):
-        return []
-    runtime = config.get("x_backend_config")
-    if not isinstance(runtime, dict):
-        return []
-    tags = runtime.get("capability_tags")
-    if not isinstance(tags, list):
-        return []
-    return [str(tag).strip() for tag in tags if str(tag).strip()]
 
 
 async def _load_allowed_tool_ids(

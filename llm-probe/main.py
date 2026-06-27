@@ -192,6 +192,17 @@ pre{flex:1;overflow:auto;padding:8px 10px;margin:0;white-space:pre-wrap;word-bre
 .c-mark{color:#ffa657;font-weight:bold}
 .c-err{color:#f85149}
 .c-ttft{color:#3fb950;font-weight:bold}
+.tab-btn{padding:1px 7px;font-size:10px;background:#21262d;border:1px solid #30363d;margin-left:4px;color:#8b949e;cursor:pointer}
+.tab-btn.active{background:#1f6feb;border-color:#1f6feb;color:#fff}
+.md-wrap{flex:1;overflow:auto;background:#0d1117;padding:10px}
+.think-box{color:#8b949e;white-space:pre-wrap;font-size:12px;border-left:2px solid #d2a8ff;padding-left:8px;margin:4px 0 8px}
+#out-think-d summary{color:#d2a8ff;cursor:pointer;font-size:11px}
+.md{color:#c9d1d9;font-size:13px;line-height:1.55;font-family:-apple-system,Segoe UI,Roboto,sans-serif;white-space:normal}
+.md h1,.md h2,.md h3{margin:.5em 0 .3em;line-height:1.2}
+.md code{background:#161b22;padding:1px 4px;border-radius:3px;font-size:12px;font-family:monospace}
+.md pre.code{background:#161b22;padding:8px;border-radius:6px;overflow:auto;font-family:monospace;font-size:12px}
+.md ul,.md ol{margin:.3em 0 .3em 1.2em}.md li{margin:.15em 0}
+.md a{color:#58a6ff}.md strong{color:#fff}
 </style>
 </head>
 <body>
@@ -250,8 +261,18 @@ pre{flex:1;overflow:auto;padding:8px 10px;margin:0;white-space:pre-wrap;word-bre
     <pre id="req-pre"></pre>
   </div>
   <div class="panel">
-    <div class="ph">RAW SSE RESPONSE <button onclick="copyEl('resp-pre')">copy</button></div>
-    <pre id="resp-pre"></pre>
+    <div class="ph">
+      <span>ОТВЕТ
+        <button id="tab-rend" class="tab-btn active" onclick="setRespTab('rend')">Обработанный</button>
+        <button id="tab-raw" class="tab-btn" onclick="setRespTab('raw')">Сырой</button>
+      </span>
+      <button onclick="copyEl(respTab==='raw'?'resp-pre':'out-content')">copy</button>
+    </div>
+    <div id="out-wrap" class="md-wrap">
+      <details id="out-think-d" style="display:none"><summary>🧠 размышления</summary><div id="out-think" class="think-box"></div></details>
+      <div id="out-content" class="md"></div>
+    </div>
+    <pre id="resp-pre" style="display:none"></pre>
   </div>
 </div>
 
@@ -259,6 +280,35 @@ pre{flex:1;overflow:auto;padding:8px 10px;margin:0;white-space:pre-wrap;word-bre
 let abortCtrl = null;
 
 function copyEl(id){ navigator.clipboard.writeText(document.getElementById(id).textContent).catch(()=>{}); }
+
+let respTab='rend';
+function setRespTab(m){
+  respTab=m;
+  document.getElementById('out-wrap').style.display = m==='rend'?'':'none';
+  document.getElementById('resp-pre').style.display = m==='raw'?'':'none';
+  document.getElementById('tab-rend').classList.toggle('active', m==='rend');
+  document.getElementById('tab-raw').classList.toggle('active', m==='raw');
+}
+function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function mdToHtml(t){
+  const parts = t.split('```');
+  let html='';
+  for(let i=0;i<parts.length;i++){
+    if(i%2===1){ html += '<pre class="code">'+esc(parts[i])+'</pre>'; continue; }
+    let s = esc(parts[i]);
+    s = s.replace(/`([^`]+)`/g,'<code>$1</code>');
+    s = s.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
+    s = s.replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g,'<a href="$2" target="_blank">$1</a>');
+    s = s.replace(/^\s*### (.+)$/gm,'<h3>$1</h3>').replace(/^\s*## (.+)$/gm,'<h2>$1</h2>').replace(/^\s*# (.+)$/gm,'<h1>$1</h1>');
+    s = s.replace(/(?:^|\n)((?:[ \t]*(?:[-•*]|\d+[.)]) .+(?:\n|$))+)/g, (m)=>{
+      const items = m.trim().split('\n').map(l=>'<li>'+l.replace(/^[ \t]*(?:[-•*]|\d+[.)]) /,'')+'</li>').join('');
+      return '<ul>'+items+'</ul>';
+    });
+    s = s.replace(/\n/g,'<br>').replace(/(<\/(?:h1|h2|h3|ul)>)<br>/g,'$1');
+    html += s;
+  }
+  return html;
+}
 
 document.getElementById('system_prompt').addEventListener('input', function(){
   const n = Math.round(this.value.length / 3.5);
@@ -305,6 +355,9 @@ async function send(){
   const respPre  = document.getElementById('resp-pre');
   reqPre.innerHTML  = '';
   respPre.innerHTML = '';
+  document.getElementById('out-content').innerHTML = '';
+  document.getElementById('out-think').textContent = '';
+  document.getElementById('out-think-d').style.display = 'none';
 
   document.getElementById('btn-run').disabled = true;
   document.getElementById('btn-stop').style.display = '';
@@ -396,6 +449,11 @@ async function runOnce(showReq, reqPre, respPre){
   const dec = new TextDecoder();
   let buf = '';
   let result = null;
+  let accText = '', accThink = '';
+  // fresh rendered view for this run
+  document.getElementById('out-content').innerHTML = '';
+  document.getElementById('out-think').textContent = '';
+  document.getElementById('out-think-d').style.display = 'none';
 
   while(true){
     const {done,value} = await reader.read();
@@ -457,6 +515,17 @@ async function runOnce(showReq, reqPre, respPre){
       // Annotate extracted parts below it
       if(think) appendTo('resp-pre', `  ↳ 🧠 think(${think.length}ch): ${think.slice(0,80)}${think.length>80?'…':''}\n`, 'c-think');
       if(txt)   appendTo('resp-pre', `  ↳ 📝 text: ${txt}\n`, 'c-text');
+
+      // Accumulate for the rendered ("Обработанный") tab
+      if(think){
+        accThink += think;
+        document.getElementById('out-think-d').style.display = '';
+        document.getElementById('out-think').textContent = accThink;
+      }
+      if(txt){
+        accText += txt;
+        document.getElementById('out-content').innerHTML = mdToHtml(accText);
+      }
 
       // Live token counter
       if(txt){

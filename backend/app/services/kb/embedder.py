@@ -272,13 +272,16 @@ async def search_kb_chunks(
     provider,
     embedding_model: str,
     max_results: int = 10,
+    query_vector: list[float] | None = None,
 ) -> list[KBChunk]:
     """
     Semantic search: embed query, find closest chunks via cosine distance.
     """
-    # Embed query
-    query_embeddings = await provider.embed(query, embedding_model)
-    query_vector = query_embeddings[0]
+    if query_vector is not None:
+        query_vector_out = query_vector
+    else:
+        query_embeddings = await provider.embed(query, embedding_model)
+        query_vector_out = query_embeddings[0]
 
     # Cosine distance search using pgvector
     stmt = (
@@ -295,7 +298,7 @@ async def search_kb_chunks(
             KnowledgeBaseDocument.is_active == True,  # noqa: E712
             KnowledgeBaseDocument.deleted_at.is_(None),
         )
-        .order_by(KBChunk.embedding.cosine_distance(query_vector))
+        .order_by(KBChunk.embedding.cosine_distance(query_vector_out))
         .limit(max_results)
     )
 

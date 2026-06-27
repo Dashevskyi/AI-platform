@@ -20,9 +20,11 @@ import { useMemo, useState, useEffect } from 'react';
 import {
   ActionIcon,
   Badge,
+  Box,
   Button,
   Card,
   Group,
+  NavLink,
   NumberInput,
   Select,
   Stack,
@@ -32,7 +34,7 @@ import {
   Textarea,
   Tooltip,
 } from '@mantine/core';
-import { IconPlus, IconTrash, IconCopy, IconInfoCircle } from '@tabler/icons-react';
+import { IconPlus, IconTrash, IconCopy, IconInfoCircle, IconListDetails } from '@tabler/icons-react';
 
 /** Compact label with a ⓘ tooltip icon — replaces verbose `description` props. */
 function Hint({ label, tip, w = 240 }: { label: string; tip: string; w?: number }) {
@@ -417,7 +419,7 @@ function ParameterCard({
             allowDeselect={false}
           />
           <Switch
-            label="required"
+            label="Обязательный"
             checked={isRequired}
             onChange={(e) => onToggleRequired(e.currentTarget.checked)}
             size="sm"
@@ -430,7 +432,7 @@ function ParameterCard({
         </Tooltip>
       </Group>
       <Textarea
-        label={<Hint label="description" tip="Что модель должна знать про этот параметр. Чем точнее — тем меньше галлюцинаций при заполнении." w={300} />}
+        label={<Hint label="Описание для LLM" tip="Что модель должна знать про этот параметр. Чем точнее — тем меньше галлюцинаций при заполнении." w={300} />}
         value={description}
         onChange={(e) => onChangeSchema({ ...schema, description: e.currentTarget.value || undefined })}
         minRows={2}
@@ -454,15 +456,24 @@ export function ParametersEditor({
   required: string[];
   onChange: (newProperties: Record<string, JsonSchema>, newRequired: string[]) => void;
 }) {
-  // Preserve order via Object.keys (JS keeps insertion order on string keys).
   const names = useMemo(() => Object.keys(parameters || {}), [parameters]);
+  const [selectedName, setSelectedName] = useState<string | null>(names[0] ?? null);
+
+  useEffect(() => {
+    if (!names.length) {
+      setSelectedName(null);
+      return;
+    }
+    if (!selectedName || !names.includes(selectedName)) {
+      setSelectedName(names[0]);
+    }
+  }, [names, selectedName]);
 
   const updateOne = (oldName: string, newName: string, newSchema: JsonSchema) => {
     const next: Record<string, JsonSchema> = {};
-    // If renaming, ensure no collision — append _2 to disambiguate
     const finalName = (() => {
       const trimmed = (newName || '').trim();
-      if (!trimmed) return oldName; // empty rename is no-op
+      if (!trimmed) return oldName;
       if (trimmed === oldName) return trimmed;
       let candidate = trimmed;
       let i = 2;
@@ -478,6 +489,7 @@ export function ParametersEditor({
     const newReq = required
       .map((r) => (r === oldName ? finalName : r))
       .filter((r, idx, arr) => arr.indexOf(r) === idx);
+    if (oldName === selectedName && finalName !== oldName) setSelectedName(finalName);
     onChange(next, newReq);
   };
 
@@ -491,6 +503,8 @@ export function ParametersEditor({
   const removeParam = (name: string) => {
     const next: Record<string, JsonSchema> = {};
     for (const n of names) if (n !== name) next[n] = parameters[n];
+    const nextNames = names.filter((n) => n !== name);
+    if (selectedName === name) setSelectedName(nextNames[0] ?? null);
     onChange(next, required.filter((r) => r !== name));
   };
 
@@ -498,7 +512,8 @@ export function ParametersEditor({
     let candidate = 'new_param';
     let i = 1;
     while (candidate in parameters) candidate = `new_param_${++i}`;
-    onChange({ ...parameters, [candidate]: { type: 'string' } }, required);
+    onChange({ ...parameters, [candidate]: { type: 'string', description: '' } }, required);
+    setSelectedName(candidate);
   };
 
   const duplicateParam = (name: string) => {
@@ -511,42 +526,82 @@ export function ParametersEditor({
       if (n === name) next[candidate] = JSON.parse(JSON.stringify(parameters[name]));
     }
     onChange(next, required);
+    setSelectedName(candidate);
   };
 
-  return (
-    <Stack gap="xs">
-      {names.length === 0 && (
-        <Text size="xs" c="dimmed" ta="center" py="md">
-          Нет параметров. Добавь первый.
+  const selectedSchema = selectedName ? parameters[selectedName] : undefined;
+  const typeHint = (name: string) => {
+    const t = detectType(parameters[name]);
+    const opt = TYPE_OPTIONS.find((o) => o.value === t);
+    return opt?.hint || t;
+  };
+
+  if (names.length === 0) {
+    return (
+      <Stack gap="md" align="center" py="lg">
+        <IconListDetails size={36} stroke={1.2} style={{ opacity: 0.35 }} />
+        <Text size="sm" c="dimmed" ta="center">
+          У инструмента пока нет параметров. Добавьте первый — имя, тип и описание для LLM.
         </Text>
-      )}
-      {names.map((name) => (
-        <div key={name} style={{ position: 'relative' }}>
-          <ParameterCard
-            name={name}
-            schema={parameters[name]}
-            isRequired={required.includes(name)}
-            onRename={(newName) => updateOne(name, newName, parameters[name])}
-            onChangeSchema={(s) => updateOne(name, name, s)}
-            onToggleRequired={(r) => toggleRequired(name, r)}
-            onRemove={() => removeParam(name)}
-          />
-          <Tooltip label="Скопировать параметр">
-            <ActionIcon
-              variant="subtle"
-              color="gray"
-              size="sm"
-              style={{ position: 'absolute', top: 8, right: 44 }}
-              onClick={() => duplicateParam(name)}
-            >
-              <IconCopy size={14} />
-            </ActionIcon>
-          </Tooltip>
-        </div>
-      ))}
-      <Button leftSection={<IconPlus size={14} />} variant="light" size="sm" onClick={addParam}>
-        Добавить параметр
-      </Button>
-    </Stack>
+        <Button leftSection={<IconPlus size={14} />} variant="light" size="sm" onClick={addParam}>
+          Добавить параметр
+        </Button>
+      </Stack>
+    );
+  }
+
+  return (
+    <Group align="flex-start" gap="md" wrap="nowrap">
+      <Box w={220} style={{ flexShrink: 0 }}>
+        <Text size="xs" c="dimmed" tt="uppercase" fw={600} mb={6}>
+          Параметры ({names.length})
+        </Text>
+        <Stack gap={4}>
+          {names.map((name) => (
+            <NavLink
+              key={name}
+              active={selectedName === name}
+              onClick={() => setSelectedName(name)}
+              label={name}
+              description={typeHint(name)}
+              leftSection={
+                <Badge size="xs" variant="light" color={required.includes(name) ? 'red' : 'gray'}>
+                  {detectType(parameters[name])}
+                </Badge>
+              }
+              rightSection={
+                required.includes(name) ? <Badge size="xs" color="red" variant="outline">*</Badge> : null
+              }
+            />
+          ))}
+        </Stack>
+        <Button leftSection={<IconPlus size={14} />} variant="light" size="xs" fullWidth mt="sm" onClick={addParam}>
+          Добавить
+        </Button>
+      </Box>
+
+      <Box style={{ flex: 1, minWidth: 0 }}>
+        {selectedName && selectedSchema && (
+          <Stack gap="xs">
+            <Group justify="flex-end" gap="xs">
+              <Tooltip label="Скопировать параметр">
+                <Button size="xs" variant="subtle" leftSection={<IconCopy size={14} />} onClick={() => duplicateParam(selectedName)}>
+                  Дублировать
+                </Button>
+              </Tooltip>
+            </Group>
+            <ParameterCard
+              name={selectedName}
+              schema={selectedSchema}
+              isRequired={required.includes(selectedName)}
+              onRename={(newName) => updateOne(selectedName, newName, selectedSchema)}
+              onChangeSchema={(s) => updateOne(selectedName, selectedName, s)}
+              onToggleRequired={(r) => toggleRequired(selectedName, r)}
+              onRemove={() => removeParam(selectedName)}
+            />
+          </Stack>
+        )}
+      </Box>
+    </Group>
   );
 }

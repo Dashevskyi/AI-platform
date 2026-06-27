@@ -161,7 +161,8 @@ export interface OntologyEntity { name: string; fields: OntologyField[] }
 export type LogicNode =
   | { type: 'condition'; label?: string; branches: { case: string; next: string | null }[] }
   | { type: 'action'; label?: string; tool?: string; hint?: string; next: string | null }
-  | { type: 'note'; label?: string; text?: string; next: string | null };
+  | { type: 'note'; label?: string; text?: string; next: string | null }
+  | { type: 'ref'; label?: string; flowId: string; next: string | null };
 export interface LogicGraph { start: string | null; nodes: Record<string, LogicNode> }
 export interface LogicFlow { id: string; name: string; graph: LogicGraph }
 export type OntologySection =
@@ -172,6 +173,47 @@ export type OntologySection =
   | { id?: string; type: 'examples'; title: string; items: { query: string; expected_tool?: string; note?: string }[] }
   | { id?: string; type: 'freeform'; title: string; text: string };
 export interface OntologyJson { version: number; sections: OntologySection[] }
+
+export type OntologyPatchOp = 'merge_glossary' | 'merge_examples' | 'add_section' | 'append_freeform';
+
+export interface OntologyPatch {
+  id: string;
+  op: OntologyPatchOp;
+  section_id?: string | null;
+  section_type?: string | null;
+  title?: string | null;
+  data: Record<string, unknown>;
+  rationale?: string;
+}
+
+export interface ToolCallAuditItem {
+  id: string;
+  source: 'log' | 'audit_case';
+  query: string;
+  expected_tool: string | null;
+  called: string[];
+  tools_offered: string[];
+  semantic_top: { name: string; score: number }[];
+  failure_class: string;
+  failure_label: string;
+  suggestion: string;
+  created_at: string | null;
+  log_id: string | null;
+  case_id: string | null;
+  assistant_id: string | null;
+  assistant_name: string | null;
+}
+
+export interface ToolCallAuditResponse {
+  items: ToolCallAuditItem[];
+  summary: {
+    total: number;
+    by_failure_class: Record<string, number>;
+    by_source: Record<string, number>;
+    days: number;
+    since: string;
+  };
+}
 
 export interface ShellConfig {
   id: string;

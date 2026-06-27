@@ -295,7 +295,7 @@ export function ModelConfigTab({ tenantId }: ModelConfigTabProps) {
 
   return (
     <>
-      <Stack gap="lg" maw={1100}>
+      <Stack gap="lg" w="100%">
         <Card withBorder padding="lg">
           <Stack gap="md">
             <Group justify="space-between" align="flex-end">

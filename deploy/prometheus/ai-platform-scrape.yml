@@ -1,0 +1,19 @@
+# Prometheus scrape config for ai-platform pipeline metrics.
+# Enable on the backend: METRICS_PUBLIC=true
+#
+# Example prometheus.yml fragment:
+#   scrape_configs:
+#     - job_name: ai-platform
+#       metrics_path: /metrics
+#       static_configs:
+#         - targets: ['127.0.0.1:8001']
+
+scrape_configs:
+  - job_name: ai-platform-pipeline
+    metrics_path: /metrics
+    scrape_interval: 30s
+    static_configs:
+      - targets:
+          - 127.0.0.1:8001
+        labels:
+          service: ai-platform-backend

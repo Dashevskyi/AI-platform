@@ -99,6 +99,7 @@ async def search_memory_entries(
     db: AsyncSession,
     embedding_model: str | None,
     top_k: int = 8,
+    query_vector: list[float] | None = None,
 ) -> Sequence[MemoryEntry]:
     """
     Semantic search across tenant memory.
@@ -107,15 +108,17 @@ async def search_memory_entries(
     """
     if not query or not query.strip() or not embedding_model:
         return []
-    try:
-        provider = get_provider("ollama", app_settings.OLLAMA_BASE_URL or "http://localhost:11434")
-        vectors = await provider.embed(query, embedding_model)
-    except Exception:
-        logger.exception("memory query embed failed")
-        return []
-    if not vectors:
-        return []
-    qv = vectors[0]
+    qv = query_vector
+    if qv is None:
+        try:
+            provider = get_provider("ollama", app_settings.OLLAMA_BASE_URL or "http://localhost:11434")
+            vectors = await provider.embed(query, embedding_model)
+        except Exception:
+            logger.exception("memory query embed failed")
+            return []
+        if not vectors:
+            return []
+        qv = vectors[0]
 
     stmt = (
         select(MemoryEntry)

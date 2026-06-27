@@ -1,6 +1,7 @@
 import apiClient from './client';
 import type {
   OntologyJson,
+  OntologyPatch,
   LoginRequest,
   LoginResponse,
   AdminUser,
@@ -62,6 +63,7 @@ import type {
   TenantModelConfigUpdate,
   AttachmentBrief,
   TenantStatsResponse,
+  ToolCallAuditResponse,
 } from './types';
 
 // Auth
@@ -198,6 +200,51 @@ export const shellApi = {
     (await apiClient.post(`/api/admin/tenants/${tenantId}/shell/ontology/preview`, { ontology_json })).data,
   ontologyImport: async (tenantId: string): Promise<{ ontology_json: OntologyJson }> =>
     (await apiClient.post(`/api/admin/tenants/${tenantId}/shell/ontology/import`)).data,
+  ontologyParse: async (tenantId: string, text: string): Promise<{ ontology_json: OntologyJson }> =>
+    (await apiClient.post(`/api/admin/tenants/${tenantId}/shell/ontology/parse`, { text })).data,
+  ontologySuggest: async (
+    tenantId: string,
+    body: { task?: string; ontology_json?: OntologyJson | null; audit_cases?: Record<string, unknown>[] | null },
+  ): Promise<{ summary: string; patches: OntologyPatch[]; model: string }> =>
+    (await apiClient.post(`/api/admin/tenants/${tenantId}/shell/ontology/suggest`, body)).data,
+  ontologyApplyPatches: async (
+    tenantId: string,
+    body: { ontology_json: OntologyJson | null; patch_ids: string[]; patches: OntologyPatch[] },
+  ): Promise<{ ontology_json: OntologyJson }> =>
+    (await apiClient.post(`/api/admin/tenants/${tenantId}/shell/ontology/apply-patches`, body)).data,
+  ontologySnapshot: async (
+    tenantId: string,
+    body: { ontology_json: OntologyJson; comment?: string },
+  ): Promise<{ id: string; changed_at: string }> =>
+    (await apiClient.post(`/api/admin/tenants/${tenantId}/shell/ontology/snapshot`, body)).data,
+  ontologyListVersions: async (
+    tenantId: string,
+    page = 1,
+    pageSize = 20,
+  ): Promise<PaginatedResponse<{ id: string; changed_at: string; changed_by: string | null; comment: string | null; section_count: number }>> =>
+    (await apiClient.get(`/api/admin/tenants/${tenantId}/shell/ontology/versions`, { params: { page, page_size: pageSize } })).data,
+  ontologyToolCallAudit: async (
+    tenantId: string,
+    opts?: { days?: number; limit?: number; includeLogs?: boolean; includeAuditCases?: boolean; assistantId?: string },
+  ): Promise<ToolCallAuditResponse> =>
+    (await apiClient.get(`/api/admin/tenants/${tenantId}/shell/ontology/tool-call-audit`, {
+      params: {
+        days: opts?.days,
+        limit: opts?.limit,
+        include_logs: opts?.includeLogs,
+        include_audit_cases: opts?.includeAuditCases,
+        assistant_id: opts?.assistantId,
+      },
+    })).data,
+  ontologyRoutingFeedback: async (
+    tenantId: string,
+    body?: { dry_run?: boolean; days?: number; limit?: number; async_job?: boolean },
+  ): Promise<{ dry_run?: boolean; examples_added?: number; tools_updated?: string[]; skipped?: string[]; queued?: boolean }> =>
+    (await apiClient.post(`/api/admin/tenants/${tenantId}/shell/ontology/routing-feedback`, body ?? {})).data,
+  scheduleRoutingFeedbackAll: async (
+    body?: { days?: number; limit?: number },
+  ): Promise<{ queued: number; days: number; limit: number }> =>
+    (await apiClient.post('/api/admin/metrics/routing-feedback/schedule-all', body ?? {})).data,
   testConnection: async (tenantId: string): Promise<TestConnectionResult> => {
     const res = await apiClient.post(`/api/admin/tenants/${tenantId}/shell/test-connection`);
     return res.data;

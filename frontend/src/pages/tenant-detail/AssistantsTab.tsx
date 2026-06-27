@@ -3,9 +3,11 @@ import {
   Stack, Card, Text, Group, Button, TextInput, Textarea, Select, MultiSelect,
   Badge, ActionIcon, Switch, Loader, Alert, Divider, Code, Modal, TagsInput,
 } from '@mantine/core';
-import { IconPlus, IconTrash, IconRobot, IconDeviceFloppy, IconPencil, IconClipboardCheck } from '@tabler/icons-react';
+import { IconPlus, IconTrash, IconRobot, IconDeviceFloppy, IconPencil, IconClipboardCheck, IconArrowBackUp } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
-import { assistantsApi, toolsApi, modelsApi, type Assistant } from '../../shared/api/endpoints';
+import { assistantsApi, shellApi, toolsApi, modelsApi, type Assistant } from '../../shared/api/endpoints';
+import type { OntologyJson } from '../../shared/api/types';
+import { OntologyEditor } from '../../components/Tools/OntologyEditor';
 import { AssistantAuditModal } from '../../components/Tools/AssistantAuditModal';
 
 // Tri-state select: "" = inherit (key removed from overrides), else override.
@@ -53,7 +55,22 @@ function AssistantEditor({
   const [d, setD] = useState<Draft>(toDraft(assistant));
   const [saving, setSaving] = useState(false);
   const [auditOpen, setAuditOpen] = useState(false);
+  const [ontologyJson, setOntologyJson] = useState<OntologyJson | null>(null);
+  const [ontologyInherited, setOntologyInherited] = useState(true);
   useEffect(() => { setD(toDraft(assistant)); }, [assistant]);
+
+  useEffect(() => {
+    const text = assistant.overrides?.ontology_prompt;
+    if (typeof text === 'string' && text.trim()) {
+      setOntologyInherited(false);
+      shellApi.ontologyParse(tenantId, text)
+        .then((r) => setOntologyJson(r.ontology_json))
+        .catch(() => setOntologyJson(null));
+    } else {
+      setOntologyInherited(true);
+      setOntologyJson(null);
+    }
+  }, [assistant]);
 
   const ovStr = (key: string) => (d.overrides[key] as string | undefined) ?? INHERIT;
   const setOvStr = (key: string, val: string) => setD((p) => {
@@ -85,12 +102,22 @@ function AssistantEditor({
     if (!d.name.trim()) { notifications.show({ message: 'Имя обязательно', color: 'red' }); return; }
     setSaving(true);
     try {
+      const overrides = { ...d.overrides };
+      if (ontologyInherited) {
+        delete overrides.ontology_prompt;
+      } else if (ontologyJson?.sections?.length) {
+        const preview = await shellApi.ontologyPreview(tenantId, ontologyJson);
+        overrides.ontology_prompt = preview.text || undefined;
+      } else if (typeof overrides.ontology_prompt !== 'string') {
+        delete overrides.ontology_prompt;
+      }
+
       await assistantsApi.update(tenantId, assistant.id, {
         name: d.name.trim(),
         description: d.description || null,
         is_default: d.is_default,
         is_active: d.is_active,
-        overrides: d.overrides,
+        overrides,
         allowed_tool_ids: d.allowed_tool_ids,
       });
       notifications.show({ message: 'Сохранено', color: 'green' });
@@ -131,9 +158,56 @@ function AssistantEditor({
       <Textarea label="Системный промт" autosize minRows={2} maxRows={10}
         placeholder="(наследовать общий промт тенанта)"
         value={ovStr('system_prompt')} onChange={(e) => setOvStr('system_prompt', e.currentTarget.value)} />
-      <Textarea label="Онтология (ontology_prompt)" autosize minRows={2} maxRows={8}
-        placeholder="(наследовать)"
-        value={ovStr('ontology_prompt')} onChange={(e) => setOvStr('ontology_prompt', e.currentTarget.value)} />
+
+      <Stack gap="xs">
+        <Group justify="space-between">
+          <div>
+            <Text size="sm" fw={500}>Онтология ассистента</Text>
+            <Text size="xs" c="dimmed">Переопределяет знания тенанта. Пусто — наследуется из «Настройки оболочки».</Text>
+          </div>
+          {!ontologyInherited && (
+            <Button
+              size="xs"
+              variant="subtle"
+              leftSection={<IconArrowBackUp size={14} />}
+              onClick={() => {
+                setOntologyInherited(true);
+                setOntologyJson(null);
+                setOvStr('ontology_prompt', INHERIT);
+              }}
+            >
+              Наследовать от тенанта
+            </Button>
+          )}
+        </Group>
+        {ontologyInherited ? (
+          <Alert variant="light" color="gray" py="xs">
+            Используется онтология тенанта. Нажмите «Задать свою», чтобы переопределить для этого ассистента.
+            <Button
+              size="xs"
+              variant="light"
+              mt="xs"
+              onClick={() => {
+                setOntologyInherited(false);
+                setOntologyJson({ version: 1, sections: [] });
+              }}
+            >
+              Задать свою онтологию
+            </Button>
+          </Alert>
+        ) : (
+          <OntologyEditor
+            tenantId={tenantId}
+            value={ontologyJson}
+            fallbackText={(d.overrides.ontology_prompt as string | undefined) ?? null}
+            importSourceText={(d.overrides.ontology_prompt as string | undefined) ?? null}
+            onChange={(v) => {
+              setOntologyJson(v);
+              setOntologyInherited(false);
+            }}
+          />
+        )}
+      </Stack>
 
       <Group grow>
         <Select label="Язык ответа" data={LANG_OPTS} value={ovStr('response_language')} onChange={(v) => setOvStr('response_language', v || INHERIT)} />

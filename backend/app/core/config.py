@@ -76,6 +76,15 @@ class Settings(BaseSettings):
     # CPU-vision (Ollama llava/minicpm) is OFF by default — it takes minutes per
     # image on CPU. Enable only on hosts with GPU vision.
     ENABLE_CPU_VISION_DESCRIPTION: bool = False
+    # Pipeline preflight: heuristic (default) | llm (light model for borderline) | off (load all)
+    PREFLIGHT_PLANNER_MODE: str = "heuristic"
+    # Public /metrics for Prometheus (no auth). Off by default.
+    METRICS_PUBLIC: bool = False
+    # Periodic routing-feedback: enqueue usage_examples updates from audit/logs
+    ROUTING_FEEDBACK_SCHEDULER_ENABLED: bool = False
+    ROUTING_FEEDBACK_INTERVAL_HOURS: int = 24
+    ROUTING_FEEDBACK_DAYS: int = 14
+    ROUTING_FEEDBACK_LIMIT: int = 40
 
     @property
     def cors_origins_list(self) -> List[str]:

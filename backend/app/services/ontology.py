@@ -15,6 +15,7 @@ Schema (ontology_json):
              node = condition {type, label, branches:[{case, next:<id|None>}]}
                   | action    {type, label?, tool?, hint?, next:<id|None>}
                   | note      {type, label?, text?, next:<id|None>}
+                  | ref       {type, label?, flowId:<flow id>, next:<id|None>}
   examples : {type, title, items:[{query, expected_tool?, note?}]}
   freeform : {type, title, text}
 """
@@ -23,11 +24,27 @@ from __future__ import annotations
 import re
 
 
-def _node_label(nid: str, node: dict) -> str:
+def _node_label(nid: str, node: dict, flow_names: dict[str, str] | None = None) -> str:
+    if node.get("type") == "ref":
+        fid = str(node.get("flowId") or "").strip()
+        if fid and flow_names and flow_names.get(fid):
+            base = flow_names[fid]
+            if node.get("label"):
+                return f"{str(node['label']).strip()} → {base}"
+            return base
     return (node.get("label") or node.get("tool") or nid).strip() or nid
 
 
-def _action_text(node: dict) -> str:
+def _action_text(node: dict, flow_names: dict[str, str] | None = None) -> str:
+    if node.get("type") == "ref":
+        fid = str(node.get("flowId") or "").strip()
+        fname = (flow_names or {}).get(fid, fid) if fid else ""
+        parts = []
+        if node.get("label"):
+            parts.append(str(node["label"]).strip())
+        if fname:
+            parts.append(f"выполнить сценарий «{fname}»")
+        return " — ".join(parts) if parts else ""
     parts = []
     if node.get("label"):
         parts.append(str(node["label"]).strip())
@@ -51,7 +68,7 @@ def _succ(node: dict) -> list[str]:
     return out
 
 
-def serialize_graph(graph: dict) -> str:
+def serialize_graph(graph: dict, flow_names: dict[str, str] | None = None) -> str:
     nodes: dict = graph.get("nodes") or {}
     if not nodes:
         return ""
@@ -87,7 +104,7 @@ def serialize_graph(graph: dict) -> str:
     blocks: list[str] = []
 
     def lbl(nid: str) -> str:
-        return _node_label(nid, nodes.get(nid, {}))
+        return _node_label(nid, nodes.get(nid, {}), flow_names)
 
     def emit_block(head: str) -> str:
         lines: list[str] = [f"[{lbl(head)}]"]
@@ -111,7 +128,7 @@ def serialize_graph(graph: dict) -> str:
                         lines.append(f"    • {case} → (конец)")
                 break
             else:
-                txt = _action_text(n) or (str(n.get("text") or "").strip())
+                txt = _action_text(n, flow_names) or (str(n.get("text") or "").strip())
                 if txt:
                     lines.append(("  " + txt) if not first else f"  {txt}")
                 nxt = n.get("next")
@@ -162,11 +179,16 @@ def serialize(ontology_json: dict | None) -> str:
             flows = sec.get("flows")
             if not flows and sec.get("graph"):
                 flows = [{"name": "", "graph": sec.get("graph")}]
+            flow_names = {
+                str(fl.get("id")): str(fl.get("name") or fl.get("id") or "").strip() or str(fl.get("id"))
+                for fl in (flows or [])
+                if isinstance(fl, dict) and fl.get("id")
+            }
             body = []
             for fl in flows or []:
                 if not isinstance(fl, dict):
                     continue
-                g = serialize_graph(fl.get("graph") or {})
+                g = serialize_graph(fl.get("graph") or {}, flow_names)
                 if not g:
                     continue
                 name = str(fl.get("name") or "").strip()

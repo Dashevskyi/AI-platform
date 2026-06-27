@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useState, useCallback, type ReactNode } from 'react';
 import {
   ActionIcon,
   Alert,
@@ -31,24 +31,49 @@ import {
 import {
   IconAlertCircle,
   IconArrowBackUp,
+  IconBolt,
+  IconDatabase,
   IconDeviceFloppy,
   IconHelpCircle,
   IconHistory,
+  IconMessageChatbot,
   IconMicrophone,
   IconPlugConnected,
   IconRefresh,
   IconRobot,
+  IconRoute,
+  IconShield,
+  IconSparkles,
   IconVolume,
-  IconBolt,
 } from '@tabler/icons-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { notifications } from '@mantine/notifications';
 import { shellApi } from '../../shared/api/endpoints';
 import type { ShellConfigUpdate, ShellVersionDetail } from '../../shared/api/types';
 import { OntologyEditor } from '../../components/Tools/OntologyEditor';
+import { SettingsSectionCard, SettingsSectionNav } from './shell-settings/SettingsSectionNav';
+import {
+  pickShellFields,
+  sectionHasDirtyFields,
+  SHELL_SECTION_FIELDS,
+  SHELL_TAB_FIELDS,
+  tabHasDirtyFields,
+} from './shell-settings/shellFieldGroups';
+
+const LLM_NAV_SECTIONS = [
+  { id: 'provider', label: 'Подключение', description: 'Провайдер и ключи', icon: IconPlugConnected },
+  { id: 'prompts', label: 'Промпты', description: 'Роль, онтология, правила', icon: IconMessageChatbot },
+  { id: 'generation', label: 'Генерация', description: 'Температура, история, язык', icon: IconSparkles },
+  { id: 'tools-routing', label: 'Инструменты', description: 'Роутинг и лимиты', icon: IconRoute },
+  { id: 'tier0', label: 'Tier 0', description: 'Быстрые ответы без LLM', icon: IconBolt },
+  { id: 'security', label: 'Безопасность', description: 'Защита персональных данных', icon: IconShield },
+  { id: 'memory-kb', label: 'Память и KB', description: 'Долгая память и база знаний', icon: IconDatabase },
+] as const;
 
 type ShellSettingsTabProps = {
   tenantId: string;
+  activeSection?: string | null;
+  onSectionChange?: (sectionId: string) => void;
 };
 
 function Hint({ children, hint }: { children: ReactNode; hint: ReactNode }) {
@@ -721,7 +746,7 @@ function VersionsSection({ tenantId }: { tenantId: string }) {
   );
 }
 
-export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
+export function ShellSettingsTab({ tenantId, activeSection, onSectionChange }: ShellSettingsTabProps) {
   const queryClient = useQueryClient();
   const { data: config, isLoading } = useQuery({
     queryKey: ['tenants', tenantId, 'shell'],
@@ -730,6 +755,9 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
 
   const [form, setForm] = useState<ShellConfigUpdate>({});
   const [dirty, setDirty] = useState(false);
+  const [dirtyFields, setDirtyFields] = useState<Set<keyof ShellConfigUpdate>>(new Set());
+  const [savingSection, setSavingSection] = useState<string | null>(null);
+  const [shellTab, setShellTab] = useState('llm');
 
   useEffect(() => {
     if (config) {
@@ -783,8 +811,18 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
         tts_fish_url: config.tts_fish_url ?? undefined,
       });
       setDirty(false);
+      setDirtyFields(new Set());
     }
   }, [config]);
+
+  const clearDirtyFields = (fields: (keyof ShellConfigUpdate)[]) => {
+    setDirtyFields((prev) => {
+      const next = new Set(prev);
+      fields.forEach((field) => next.delete(field));
+      setDirty(next.size > 0);
+      return next;
+    });
+  };
 
   useEffect(() => {
     if (!dirty) return;
@@ -795,14 +833,15 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
 
   const updateField = <K extends keyof ShellConfigUpdate>(key: K, value: ShellConfigUpdate[K]) => {
     setForm((prev) => ({ ...prev, [key]: value }));
+    setDirtyFields((prev) => new Set(prev).add(key));
     setDirty(true);
   };
 
   const saveMutation = useMutation({
-    mutationFn: () => shellApi.update(tenantId, form),
-    onSuccess: () => {
+    mutationFn: (payload: ShellConfigUpdate) => shellApi.update(tenantId, payload),
+    onSuccess: (_data, payload) => {
       queryClient.invalidateQueries({ queryKey: ['tenants', tenantId, 'shell'] });
-      setDirty(false);
+      clearDirtyFields(Object.keys(payload) as (keyof ShellConfigUpdate)[]);
       notifications.show({ title: 'Сохранено', message: 'Настройки оболочки обновлены', color: 'green' });
     },
     onError: (err: unknown) => {
@@ -810,7 +849,29 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
         (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || 'Не удалось сохранить';
       notifications.show({ title: 'Ошибка', message, color: 'red' });
     },
+    onSettled: () => setSavingSection(null),
   });
+
+  const saveAll = () => saveMutation.mutate(form);
+
+  const saveSection = (sectionId: string) => {
+    const fields = SHELL_SECTION_FIELDS[sectionId];
+    if (!fields?.length) return;
+    setSavingSection(sectionId);
+    saveMutation.mutate(pickShellFields(form, fields));
+  };
+
+  const saveTab = (tabId: string) => {
+    const fields = SHELL_TAB_FIELDS[tabId];
+    if (!fields?.length) return;
+    setSavingSection(tabId);
+    saveMutation.mutate(pickShellFields(form, fields));
+  };
+
+  const sectionDirty = useCallback(
+    (sectionId: string) => sectionHasDirtyFields(dirtyFields, sectionId),
+    [dirtyFields],
+  );
 
   const testMutation = useMutation({
     mutationFn: () => shellApi.testConnection(tenantId),
@@ -831,34 +892,53 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
   }
 
   return (
-    <Card withBorder padding="lg" maw={1100}>
+    <Card withBorder padding="lg" w="100%">
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          saveMutation.mutate();
+          saveAll();
         }}
       >
         <Stack gap="md">
+          <div>
+            <Text fw={600} size="lg">Настройки оболочки</Text>
+            <Text size="sm" c="dimmed" mt={4}>
+              Поведение AI-ассистента: промпты, голос, распознавание речи и параметры работы с инструментами.
+              Изменения применяются после сохранения.
+            </Text>
+          </div>
+
           {dirty && (
             <Alert icon={<IconAlertCircle size={16} />} color="yellow" variant="light" py="xs">
               У вас есть несохранённые изменения.
             </Alert>
           )}
 
-          <Tabs defaultValue="llm">
+          <Tabs value={shellTab} onChange={(v) => setShellTab(v ?? 'llm')}>
             <Tabs.List mb="md">
-              <Tabs.Tab value="llm" leftSection={<IconRobot size={16} />}>LLM</Tabs.Tab>
-              <Tabs.Tab value="stt" leftSection={<IconMicrophone size={16} />}>STT</Tabs.Tab>
-              <Tabs.Tab value="tts" leftSection={<IconVolume size={16} />}>TTS</Tabs.Tab>
-              <Tabs.Tab value="history" leftSection={<IconHistory size={16} />}>История</Tabs.Tab>
+              <Tabs.Tab value="llm" leftSection={<IconRobot size={16} />}>LLM и промпты</Tabs.Tab>
+              <Tabs.Tab value="stt" leftSection={<IconMicrophone size={16} />}>Распознавание (STT)</Tabs.Tab>
+              <Tabs.Tab value="tts" leftSection={<IconVolume size={16} />}>Синтез речи (TTS)</Tabs.Tab>
+              <Tabs.Tab value="history" leftSection={<IconHistory size={16} />}>История изменений</Tabs.Tab>
             </Tabs.List>
 
             {/* ── LLM tab ──────────────────────────────────────────────────── */}
             <Tabs.Panel value="llm">
-              <Stack gap="md">
-
-                {/* ── Provider ─────────────────────────────────────────── */}
-                <Fieldset legend="Провайдер" variant="filled">
+              <SettingsSectionNav
+                items={[...LLM_NAV_SECTIONS]}
+                activeSection={activeSection}
+                onSectionChange={onSectionChange}
+                sectionDirty={sectionDirty}
+              >
+                <SettingsSectionCard
+                  id="provider"
+                  title="Подключение к LLM"
+                  description="Куда отправляются запросы. Модель чата настраивается отдельно во вкладке «Модель»."
+                  icon={IconPlugConnected}
+                  dirty={sectionDirty('provider')}
+                  saving={savingSection === 'provider'}
+                  onSave={() => saveSection('provider')}
+                >
                   <Stack gap="sm">
                     <SimpleGrid cols={{ base: 1, md: 3 }} spacing="sm">
                       <Select
@@ -897,14 +977,21 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
                       />
                     </SimpleGrid>
                     <Alert icon={<IconAlertCircle size={14} />} color="blue" variant="light" py={6}>
-                      Основная модель чата выбирается во вкладке «Модель». Здесь — провайдер, промпты, лимиты, поведение оболочки.
+                      Основная модель чата — во вкладке «Модель». Здесь только провайдер, промпты и поведение оболочки.
                     </Alert>
                   </Stack>
-                </Fieldset>
+                </SettingsSectionCard>
 
-                {/* ── Prompts ─────────────────────────────────────────── */}
-                <Fieldset legend="Промпты" variant="filled">
-                  <Stack gap="sm">
+                <SettingsSectionCard
+                  id="prompts"
+                  title="Промпты и знания"
+                  description="Три блока, которые модель видит в каждом запросе: кто ассистент, что он знает о предметной области, как формулировать ответ."
+                  icon={IconMessageChatbot}
+                  dirty={sectionDirty('prompts')}
+                  saving={savingSection === 'prompts'}
+                  onSave={() => saveSection('prompts')}
+                >
+                  <Stack gap="md">
                     <Textarea
                       label={
                         <Hint hint="Идентичность ассистента и общий стиль. Короткое, 1-3 предложения. Уходит в LLM первым блоком.">
@@ -920,7 +1007,7 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
                     />
                     <div>
                       <Hint hint="Структура данных, термины, связи, граф логики (тема→tool). Правишь дерево — модель получает плоский текст. Только то, что не вынести в KB/память.">
-                        <Text size="sm" fw={500} mb={4}>Онтология / Domain knowledge</Text>
+                        <Text size="sm" fw={500} mb={4}>Онтология — знания о предметной области</Text>
                       </Hint>
                       <OntologyEditor
                         tenantId={tenantId}
@@ -943,10 +1030,17 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
                       maxRows={5}
                     />
                   </Stack>
-                </Fieldset>
+                </SettingsSectionCard>
 
-                {/* ── Generation ─────────────────────────────────────── */}
-                <Fieldset legend="Генерация" variant="filled">
+                <SettingsSectionCard
+                  id="generation"
+                  title="Генерация ответов"
+                  description="Как модель пишет текст: креативность, объём истории, язык и режим рассуждений."
+                  icon={IconSparkles}
+                  dirty={sectionDirty('generation')}
+                  saving={savingSection === 'generation'}
+                  onSave={() => saveSection('generation')}
+                >
                   <Stack gap="sm">
                     <Group align="flex-end" gap="md" wrap="wrap">
                       <div style={{ flex: '1 1 320px', minWidth: 280 }}>
@@ -960,9 +1054,9 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
                           value={Math.min(form.temperature ?? 0.3, 0.7)}
                           onChange={(val) => updateField('temperature', val)}
                           marks={[
-                            { value: 0, label: '0' },
+                            { value: 0, label: 'Точно' },
                             { value: 0.3, label: '0.3' },
-                            { value: 0.7, label: '0.7' },
+                            { value: 0.7, label: 'Креативно' },
                           ]}
                           mt={6}
                         />
@@ -1017,13 +1111,13 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
                       <Select
                         label={
                           <Hint hint="on — всегда «думает» (точнее, медленнее). off — сразу отвечает (быстро). auto — думает только на сложных. Влияет на Qwen3 и аналоги.">
-                            Reasoning (thinking)
+                            Режим рассуждений (thinking)
                           </Hint>
                         }
                         data={[
-                          { value: 'on', label: 'On — всегда' },
-                          { value: 'off', label: 'Off — никогда' },
-                          { value: 'auto', label: 'Auto — по эвристике' },
+                          { value: 'on', label: 'Всегда включён' },
+                          { value: 'off', label: 'Выключен' },
+                          { value: 'auto', label: 'Авто — по сложности' },
                         ]}
                         value={form.enable_thinking || 'on'}
                         onChange={(val) => updateField('enable_thinking', val || 'on')}
@@ -1053,7 +1147,7 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
                     <TextInput
                       label={
                         <Hint hint="IANA timezone для блока «текущая дата» в системном промпте. Например: Europe/Kyiv, UTC, Asia/Tokyo. Пусто — серверный TZ.">
-                          Timezone (IANA)
+                          Часовой пояс (IANA)
                         </Hint>
                       }
                       placeholder="Europe/Kyiv"
@@ -1062,15 +1156,22 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
                       w={260}
                     />
                   </Stack>
-                </Fieldset>
+                </SettingsSectionCard>
 
-                {/* ── Tools / Routing ────────────────────────────────── */}
-                <Fieldset legend="Tools / роутинг" variant="filled">
+                <SettingsSectionCard
+                  id="tools-routing"
+                  title="Инструменты и роутинг"
+                  description="Как модель выбирает tools и сколько раз может их вызывать за один запрос."
+                  icon={IconRoute}
+                  dirty={sectionDirty('tools-routing')}
+                  saving={savingSection === 'tools-routing'}
+                  onSave={() => saveSection('tools-routing')}
+                >
                   <SimpleGrid cols={{ base: 2, md: 4 }} spacing="sm">
                     <NumberInput
                       label={
                         <Hint hint="Минимальный cosine similarity (0.0-1.0) для tool, выбранного семантикой. Ниже = выбрасывается. Default 0.5.">
-                          Semantic floor
+                          Мин. сходство инструмента
                         </Hint>
                       }
                       min={0}
@@ -1083,7 +1184,7 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
                     <NumberInput
                       label={
                         <Hint hint="Temperature на раундах LLM с tools в payload (выбор tool / аргументов). Ниже = детерминированнее. Default 0.3.">
-                          Routing temperature
+                          Температура выбора инструментов
                         </Hint>
                       }
                       min={0}
@@ -1096,7 +1197,7 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
                     <NumberInput
                       label={
                         <Hint hint="Сколько top-K tools идёт с полной schema. Остальные — компактно (имя + 1 строка), деталь через describe_tool. Default 3. 100 чтобы выключить.">
-                          Lazy catalog top-K
+                          Полная схема для top-K
                         </Hint>
                       }
                       min={1}
@@ -1108,7 +1209,7 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
                     <NumberInput
                       label={
                         <Hint hint="Максимум tool-раундов в одном запросе (защита от бесконечных циклов). Default 6. Multi-stage пайплайны могут поднять до 10-12.">
-                          Max tool rounds
+                          Макс. раундов вызова
                         </Hint>
                       }
                       min={1}
@@ -1152,28 +1253,33 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
                       />
                     </SimpleGrid>
                   )}
-                </Fieldset>
+                </SettingsSectionCard>
 
-                {/* ── Tier 0 routing ────────────────────────────────────── */}
-                <Fieldset legend={<Group gap={6}><IconBolt size={15} /><Text fw={500}>Tier 0 routing</Text><Text size="xs" c="dimmed">— детерминистический шорткат без LLM</Text></Group>} variant="filled">
+                <SettingsSectionCard
+                  id="tier0"
+                  title="Tier 0 — быстрые ответы"
+                  description="Детерминистический шорткат: подходящий запрос вызывает tool напрямую, без LLM (~100–700 ms вместо 1–3 s)."
+                  icon={IconBolt}
+                  dirty={sectionDirty('tier0')}
+                  saving={savingSection === 'tier0'}
+                  onSave={() => saveSection('tier0')}
+                >
                   <Stack gap="sm">
-                    <Group gap="lg">
-                      <Tooltip
-                        label="Когда включено: если запрос matches с уверенным tool (см. пороги ниже), pipeline вызывает tool напрямую и рендерит результат через template, минуя LLM. ~100-700ms вместо 1-3s."
-                        multiline w={380} withArrow
-                      >
-                        <Switch
-                          label="Включить Tier 0"
-                          checked={form.tier0_enabled ?? false}
-                          onChange={(e) => updateField('tier0_enabled', e.currentTarget.checked)}
-                        />
-                      </Tooltip>
-                    </Group>
+                    <Tooltip
+                      label="Когда включено: если запрос matches с уверенным tool (см. пороги ниже), pipeline вызывает tool напрямую и рендерит результат через template, минуя LLM."
+                      multiline w={380} withArrow
+                    >
+                      <Switch
+                        label="Включить Tier 0"
+                        checked={form.tier0_enabled ?? false}
+                        onChange={(e) => updateField('tier0_enabled', e.currentTarget.checked)}
+                      />
+                    </Tooltip>
                     <SimpleGrid cols={{ base: 1, md: 2 }} spacing="sm">
                       <NumberInput
                         label={
                           <Hint hint="Минимальный boosted-score топового tool чтобы Tier 0 считал «уверенным». Ниже = больше hit rate, но и больше false positive. Рекомендую 0.70-0.80.">
-                            Min tool score
+                            Мин. score инструмента
                           </Hint>
                         }
                         min={0.50} max={1.00} step={0.05} decimalScale={2}
@@ -1183,7 +1289,7 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
                       <NumberInput
                         label={
                           <Hint hint="Минимальный gap между топом и 2-м кандидатом — гарантирует что нет close competitor. Чем выше, тем строже. Default 0.15.">
-                            Min gap к 2-му
+                            Мин. отрыв от 2-го кандидата
                           </Hint>
                         }
                         min={0.05} max={0.50} step={0.05} decimalScale={2}
@@ -1192,25 +1298,39 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
                       />
                     </SimpleGrid>
                   </Stack>
-                </Fieldset>
+                </SettingsSectionCard>
 
-                {/* ── PII routing ────────────────────────────────────── */}
-                <Fieldset legend={<Group gap={6}><Text fw={500}>🛡 PII routing</Text><Text size="xs" c="dimmed">— безопасность данных</Text></Group>} variant="filled">
+                <SettingsSectionCard
+                  id="security"
+                  title="Безопасность данных"
+                  description="Защита персональных данных при маршрутизации между локальными и облачными моделями."
+                  icon={IconShield}
+                  dirty={sectionDirty('security')}
+                  saving={savingSection === 'security'}
+                  onSave={() => saveSection('security')}
+                >
                   <Tooltip
                     label="При обнаружении PII в запросе (телефон / MAC / IP) auto-router НЕ будет escalate в cloud модель — остаётся на local навсегда для этого чата. Защищает персональные данные клиентов от выхода за пределы локальной сети."
                     multiline w={420} withArrow
                   >
                     <Switch
-                      label="Запретить cloud при PII в запросе"
-                      description="Phone / MAC / IP детектятся regex'ом. Локально всё равно ответит — просто без esc к DeepSeek/Claude."
+                      label="Запретить облако при PII в запросе"
+                      description="Телефон, MAC, IP — остаются на локальной модели. Облако не получит персональные данные."
                       checked={form.pii_routing_enabled ?? false}
                       onChange={(e) => updateField('pii_routing_enabled', e.currentTarget.checked)}
                     />
                   </Tooltip>
-                </Fieldset>
+                </SettingsSectionCard>
 
-                {/* ── Memory & KB ────────────────────────────────────── */}
-                <Fieldset legend="Память и KB" variant="filled">
+                <SettingsSectionCard
+                  id="memory-kb"
+                  title="Память и база знаний"
+                  description="Долгосрочная память ассистента, RAG из документов и отладочный трейс."
+                  icon={IconDatabase}
+                  dirty={sectionDirty('memory-kb')}
+                  saving={savingSection === 'memory-kb'}
+                  onSave={() => saveSection('memory-kb')}
+                >
                   <Stack gap="sm">
                     <Group gap="lg">
                       <Switch
@@ -1262,7 +1382,7 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
                           withArrow
                         >
                           <Switch
-                            label="KB: eager-инъекция (выключить = on-demand через tool)"
+                            label="KB: подмешивать в каждый запрос (выкл. = по запросу через tool)"
                             checked={form.kb_inject_auto ?? true}
                             onChange={(e) => updateField('kb_inject_auto', e.currentTarget.checked)}
                           />
@@ -1277,13 +1397,27 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
                       onChange={(e) => updateField('vision_model_name', e.currentTarget.value || undefined)}
                     />
                   </Stack>
-                </Fieldset>
-
-              </Stack>
+                </SettingsSectionCard>
+              </SettingsSectionNav>
             </Tabs.Panel>
 
             {/* ── STT tab ──────────────────────────────────────────────────── */}
             <Tabs.Panel value="stt">
+              <Group justify="space-between" mb="md">
+                <Text size="sm" c="dimmed">
+                  Распознавание речи: затравка Whisper, hotwords и словарь для коррекции терминов.
+                </Text>
+                <Button
+                  size="sm"
+                  variant={tabHasDirtyFields(dirtyFields, 'stt') ? 'filled' : 'light'}
+                  leftSection={<IconDeviceFloppy size={14} />}
+                  loading={savingSection === 'stt'}
+                  disabled={!tabHasDirtyFields(dirtyFields, 'stt')}
+                  onClick={() => saveTab('stt')}
+                >
+                  Сохранить STT
+                </Button>
+              </Group>
               <STTVocabSection
                 tenantId={tenantId}
                 form={form}
@@ -1294,6 +1428,21 @@ export function ShellSettingsTab({ tenantId }: ShellSettingsTabProps) {
 
             {/* ── TTS tab ──────────────────────────────────────────────────── */}
             <Tabs.Panel value="tts">
+              <Group justify="space-between" mb="md">
+                <Text size="sm" c="dimmed">
+                  Синтез речи: провайдер, голос и параметры озвучки ответов ассистента.
+                </Text>
+                <Button
+                  size="sm"
+                  variant={tabHasDirtyFields(dirtyFields, 'tts') ? 'filled' : 'light'}
+                  leftSection={<IconDeviceFloppy size={14} />}
+                  loading={savingSection === 'tts'}
+                  disabled={!tabHasDirtyFields(dirtyFields, 'tts')}
+                  onClick={() => saveTab('tts')}
+                >
+                  Сохранить TTS
+                </Button>
+              </Group>
               <TTSSection
                 form={form}
                 config={config}

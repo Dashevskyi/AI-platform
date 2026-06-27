@@ -75,6 +75,15 @@ class AutoRouter:
             return self.heavy, f"size {tokens_estimate} > {self.size_threshold}"
         if self.use_classifier and not self.classifier_done:
             self.classifier_done = True
+            # Skip classifier for tiny prompts or when already large enough to
+            # justify heavy without an extra LLM round-trip.
+            grey_low = max(800, self.size_threshold // 2) if self.size_threshold > 0 else 800
+            grey_high = self.size_threshold if self.size_threshold > 0 else 4000
+            if tokens_estimate < grey_low:
+                return self.light, f"classifier skipped (est {tokens_estimate} < {grey_low})"
+            if self.size_threshold > 0 and tokens_estimate > grey_high:
+                self.escalated = True
+                return self.heavy, f"classifier skipped (est {tokens_estimate} > {grey_high})"
             complexity = await _classify_complexity(
                 self.light.provider, self.light.model_name, self.user_content,
             )

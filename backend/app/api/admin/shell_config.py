@@ -302,12 +302,52 @@ class OntologyPreviewBody(BaseModel):
     ontology_json: dict | None = None
 
 
+class OntologyParseBody(BaseModel):
+    text: str = ""
+
+
+class OntologySuggestBody(BaseModel):
+    task: str = "Дополнить и улучшить онтологию: глоссарий, примеры, пробелы в покрытии tools."
+    ontology_json: dict | None = None
+    audit_cases: list[dict] | None = None
+
+
+class OntologyApplyPatchesBody(BaseModel):
+    ontology_json: dict | None = None
+    patch_ids: list[str]
+    patches: list[dict]
+
+
+class OntologySnapshotBody(BaseModel):
+    ontology_json: dict
+    comment: str | None = None
+
+
+class RoutingFeedbackBody(BaseModel):
+    dry_run: bool = False
+    days: int = 14
+    limit: int = 40
+    async_job: bool = False
+
+
 @router.post("/ontology/preview")
 async def ontology_preview(tenant_id: uuid.UUID, body: OntologyPreviewBody) -> dict:
     """Serialize a structured ontology to the flat text the LLM will read.
     Pure/read-only — does NOT save."""
     from app.services.ontology import serialize
     return {"text": serialize(body.ontology_json)}
+
+
+@router.post("/ontology/parse")
+async def ontology_parse(
+    tenant_id: uuid.UUID,
+    body: OntologyParseBody,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Best-effort parse flat ontology text into structured form. Does NOT save."""
+    await _verify_tenant(tenant_id, db)
+    from app.services.ontology import parse_text
+    return {"ontology_json": parse_text(body.text or "")}
 
 
 @router.post("/ontology/import")
@@ -319,6 +359,212 @@ async def ontology_import(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_d
         select(TenantShellConfig).where(TenantShellConfig.tenant_id == tenant_id))).scalars().first()
     from app.services.ontology import parse_text
     return {"ontology_json": parse_text((cfg.ontology_prompt if cfg else "") or "")}
+
+
+async def _resolve_heavy_model_for_suggest(tenant_id: str, db: AsyncSession, cfg: TenantShellConfig):
+    from app.models.tenant_model_config import TenantModelConfig
+    from app.services.llm.model_resolver import (
+        _load_model_record, _make_provider, _resolve_from_shell_config,
+    )
+    mc = (await db.execute(
+        select(TenantModelConfig).where(TenantModelConfig.tenant_id == uuid.UUID(tenant_id))
+    )).scalar_one_or_none()
+    if mc:
+        for mid, cid in (
+            (mc.auto_heavy_model_id, getattr(mc, "auto_heavy_custom_model_id", None)),
+            (mc.manual_model_id, mc.manual_custom_model_id),
+            (mc.auto_light_model_id, mc.auto_light_custom_model_id),
+        ):
+            if mid or cid:
+                try:
+                    record, is_custom = await _load_model_record(mid, cid, db)
+                    if record:
+                        return _make_provider(record, is_custom)
+                except Exception:
+                    continue
+    return _resolve_from_shell_config(cfg)
+
+
+async def _load_tenant_tools(tenant_id: uuid.UUID, db: AsyncSession) -> list[dict]:
+    from app.models.tenant_tool import TenantTool
+    rows = (await db.execute(
+        select(TenantTool).where(
+            TenantTool.tenant_id == tenant_id,
+            TenantTool.deleted_at.is_(None),
+            TenantTool.is_active.is_(True),
+        ).order_by(TenantTool.name)
+    )).scalars().all()
+    out = []
+    for t in rows:
+        fn = {}
+        if isinstance(t.config_json, dict):
+            fn = (t.config_json.get("function") or {}) if isinstance(t.config_json.get("function"), dict) else {}
+        out.append({
+            "name": t.name,
+            "description": t.description or fn.get("description") or "",
+        })
+    return out
+
+
+@router.get("/ontology/tool-call-audit")
+async def ontology_tool_call_audit(
+    tenant_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    days: int = Query(14, ge=1, le=90),
+    limit: int = Query(80, ge=1, le=200),
+    include_logs: bool = Query(True),
+    include_audit_cases: bool = Query(True),
+    assistant_id: uuid.UUID | None = Query(None),
+) -> dict:
+    """Erroneous tool calls from logs + failed audit cases — for ontology examples."""
+    await _verify_tenant(tenant_id, db)
+    from app.services.tool_call_audit import collect_tool_call_audit
+    return await collect_tool_call_audit(
+        db,
+        tenant_id,
+        days=days,
+        limit=limit,
+        include_logs=include_logs,
+        include_audit_cases=include_audit_cases,
+        assistant_id=assistant_id,
+    )
+
+
+@router.post("/ontology/routing-feedback")
+async def ontology_routing_feedback(
+    tenant_id: uuid.UUID,
+    body: RoutingFeedbackBody,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Apply audit/log routing failures to tool usage_examples and re-embed."""
+    await _verify_tenant(tenant_id, db)
+    if body.async_job:
+        from app.services.jobs.queue import enqueue as enqueue_job
+        await enqueue_job(db, "routing_feedback", {
+            "tenant_id": str(tenant_id),
+            "days": body.days,
+            "limit": body.limit,
+            "dry_run": body.dry_run,
+        }, tenant_id=tenant_id)
+        await db.commit()
+        return {"queued": True}
+    from app.services.llm.routing_feedback import apply_routing_feedback
+    return await apply_routing_feedback(
+        db, tenant_id, days=body.days, limit=body.limit, dry_run=body.dry_run,
+    )
+
+
+@router.post("/ontology/suggest")
+async def ontology_suggest(
+    tenant_id: uuid.UUID,
+    body: OntologySuggestBody,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Ask the tenant's heavy model for structured ontology patches. Does NOT save."""
+    await _verify_tenant(tenant_id, db)
+    cfg = (await db.execute(
+        select(TenantShellConfig).where(TenantShellConfig.tenant_id == tenant_id)
+    )).scalars().first()
+    if not cfg:
+        raise HTTPException(status_code=404, detail="Shell config not found")
+    try:
+        resolved = await _resolve_heavy_model_for_suggest(str(tenant_id), db, cfg)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Model resolution failed: {exc}") from exc
+    tools = await _load_tenant_tools(tenant_id, db)
+    ontology = body.ontology_json if body.ontology_json is not None else cfg.ontology_json
+    from app.services.ontology_suggest import suggest_patches
+    try:
+        return await suggest_patches(
+            resolved.provider,
+            resolved.model_name,
+            task=body.task.strip() or "Улучши онтологию.",
+            ontology_json=ontology,
+            tools=tools,
+            system_prompt=cfg.system_prompt,
+            audit_cases=body.audit_cases,
+            max_tokens=cfg.max_tokens or 6000,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"LLM suggest failed: {exc}") from exc
+
+
+@router.post("/ontology/apply-patches")
+async def ontology_apply_patches(body: OntologyApplyPatchesBody) -> dict:
+    """Merge accepted patches into ontology_json (pure, does NOT save)."""
+    from app.services.ontology_suggest import apply_patches
+    selected = {p.get("id") for p in body.patches if isinstance(p, dict)}
+    to_apply = [p for p in body.patches if isinstance(p, dict) and p.get("id") in set(body.patch_ids) and p.get("id") in selected]
+    return {"ontology_json": apply_patches(body.ontology_json, to_apply)}
+
+
+@router.post("/ontology/snapshot")
+async def ontology_snapshot(
+    tenant_id: uuid.UUID,
+    body: OntologySnapshotBody,
+    current_user: AdminUser = Depends(require_tenant_access),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Save ontology-only snapshot into shell version history (does NOT change live config)."""
+    await _verify_tenant(tenant_id, db)
+    cfg = (await db.execute(
+        select(TenantShellConfig).where(TenantShellConfig.tenant_id == tenant_id)
+    )).scalars().first()
+    prev_json = (cfg.ontology_json if cfg else None) or None
+    comment = (body.comment or "").strip() or "Снимок онтологии"
+    if not comment.startswith("[ontology]"):
+        comment = f"[ontology] {comment}"
+    version = TenantShellConfigVersion(
+        tenant_id=tenant_id,
+        changed_by=current_user.id,
+        previous_payload={"ontology_json": prev_json},
+        new_payload={"ontology_json": body.ontology_json},
+        comment=comment,
+    )
+    db.add(version)
+    await db.commit()
+    await db.refresh(version)
+    return {"id": str(version.id), "changed_at": version.changed_at.isoformat()}
+
+
+@router.get("/ontology/versions")
+async def list_ontology_versions(
+    tenant_id: uuid.UUID,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Shell versions where ontology_json changed (incl. manual snapshots)."""
+    await _verify_tenant(tenant_id, db)
+    rows = (await db.execute(
+        select(TenantShellConfigVersion)
+        .where(TenantShellConfigVersion.tenant_id == tenant_id)
+        .order_by(TenantShellConfigVersion.changed_at.desc())
+        .limit(200)
+    )).scalars().all()
+    actor_ids = {v.changed_by for v in rows if v.changed_by}
+    logins: dict = {}
+    if actor_ids:
+        logins = dict((await db.execute(
+            select(AdminUser.id, AdminUser.login).where(AdminUser.id.in_(actor_ids))
+        )).all())
+    filtered = []
+    for v in rows:
+        fields = _changed_fields(v.previous_payload, v.new_payload)
+        if "ontology_json" not in fields and not (v.comment or "").startswith("[ontology]"):
+            continue
+        oj = (v.new_payload or {}).get("ontology_json") or {}
+        sections = oj.get("sections") if isinstance(oj, dict) else []
+        filtered.append({
+            "id": str(v.id),
+            "changed_at": v.changed_at.isoformat() if v.changed_at else None,
+            "changed_by": logins.get(v.changed_by),
+            "comment": v.comment,
+            "section_count": len(sections) if isinstance(sections, list) else 0,
+        })
+    start = (page - 1) * page_size
+    page_items = filtered[start:start + page_size]
+    return {"items": page_items, "total_count": len(filtered), "page": page, "page_size": page_size}
 
 
 @router.get("/versions", response_model=PaginatedResponse[VersionListItem])

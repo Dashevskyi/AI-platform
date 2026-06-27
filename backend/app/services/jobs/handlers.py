@@ -64,8 +64,23 @@ async def handle_history_summary(payload: dict) -> None:
     )
 
 
-@register_job("memory_extract")
-async def handle_memory_extract(payload: dict) -> None:
+@register_job("routing_feedback")
+async def handle_routing_feedback(payload: dict) -> None:
+    from app.services.llm.routing_feedback import apply_routing_feedback
+
+    tenant_id = payload.get("tenant_id")
+    if not tenant_id:
+        return
+    async with async_session() as db:
+        await apply_routing_feedback(
+            db,
+            uuid.UUID(str(tenant_id)),
+            days=int(payload.get("days") or 14),
+            limit=int(payload.get("limit") or 40),
+            dry_run=bool(payload.get("dry_run")),
+        )
+
+
     from app.services.llm.pipeline import _extract_memory_background, _pick_summary_model_name
 
     tenant_id = payload.get("tenant_id")

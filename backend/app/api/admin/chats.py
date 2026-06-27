@@ -488,6 +488,7 @@ async def send_message_stream(
     queue: asyncio.Queue[tuple[str, dict] | None] = asyncio.Queue()
     trail: list[dict] = []
     TRAIL_KEEP_TYPES = {
+        "context_building",
         "kb_search_start", "kb_search_done",
         "provider_call_start", "provider_call_done",
         "tool_call_start", "tool_call_done",

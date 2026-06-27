@@ -2,8 +2,9 @@ import logging
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
 from sqlalchemy import text
 
 from app.core.config import settings
@@ -52,6 +53,7 @@ from app.api.admin.model_config import router as model_config_router
 from app.api.admin.custom_models import router as admin_custom_models_router
 from app.api.admin.users import tenant_router as admin_users_tenant_router, global_router as admin_users_global_router
 from app.api.admin.gpu import router as gpu_router
+from app.api.admin.pipeline_metrics import router as pipeline_metrics_router
 from app.api.tenant.chats import router as tenant_chats_router
 from app.api.tenant.custom_models import router as tenant_custom_models_router
 from app.api.tenant.voice import router as tenant_voice_router
@@ -137,6 +139,7 @@ async def lifespan(app: FastAPI):
     from app.services.gpu_metrics import snapshot_worker
 
     from app.services.jobs.queue import run_worker
+    from app.services.scheduled_tasks import scheduled_worker
 
     _enforce_secure_config()
     await seed_admin()
@@ -144,12 +147,15 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_warmup_fish_speech())
     jobs_stop = asyncio.Event()
     jobs_task = asyncio.create_task(run_worker(jobs_stop))
+    scheduled_stop = asyncio.Event()
+    scheduled_task = asyncio.create_task(scheduled_worker(scheduled_stop))
     try:
         yield
     finally:
         jobs_stop.set()
+        scheduled_stop.set()
         gpu_task.cancel()
-        for _t in (gpu_task, jobs_task):
+        for _t in (gpu_task, jobs_task, scheduled_task):
             try:
                 await _t
             except asyncio.CancelledError:
@@ -207,6 +213,7 @@ app.include_router(admin_custom_models_router)
 app.include_router(admin_users_tenant_router)
 app.include_router(admin_users_global_router)
 app.include_router(gpu_router)
+app.include_router(pipeline_metrics_router)
 
 # Tenant API routes
 app.include_router(tenant_chats_router)
@@ -243,3 +250,11 @@ async def ready():
     async with async_session() as db:
         await db.execute(text("SELECT 1"))
     return {"status": "ready"}
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+async def public_metrics():
+    if not settings.METRICS_PUBLIC:
+        raise HTTPException(status_code=404, detail="Not found")
+    from app.services.llm.pipeline_metrics import pipeline_metrics
+    return pipeline_metrics.prometheus_text()

@@ -122,6 +122,8 @@ async def resolve_active_artifacts(
     chat_id: uuid.UUID,
     user_content: str,
     max_artifacts: int = MAX_GROUNDED_ARTIFACTS,
+    query_vector: list[float] | None = None,
+    embed_model: str | None = None,
 ) -> list[Artifact]:
     """Find artifacts that the LLM should see while answering this user message.
 
@@ -139,11 +141,11 @@ async def resolve_active_artifacts(
     # semantic search for them, but the recent hot-set still applies below.
     do_semantic = len(query) >= MIN_QUERY_CHARS
 
-    qvec, embed_model = (
-        await _embed_query(db=db, tenant_id=tenant_id, query=query)
-        if do_semantic
-        else (None, None)
-    )
+    qvec = query_vector if do_semantic else None
+    if qvec is None and do_semantic:
+        qvec, embed_model = await _embed_query(db=db, tenant_id=tenant_id, query=query)
+    elif embed_model is None and do_semantic:
+        embed_model = await _resolve_embedding_model(tenant_id, db)
 
     selected_ids: list[uuid.UUID] = []
     selected_rows: dict[uuid.UUID, Artifact] = {}

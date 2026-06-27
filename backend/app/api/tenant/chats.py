@@ -456,6 +456,7 @@ def _build_assistant_metadata(llm_result: dict | None) -> dict | None:
 PUBLIC_SSE_EVENTS = {
     "stream_open",
     "content_chunk",
+    "context_building",
     "done",
     "final",
     "error",

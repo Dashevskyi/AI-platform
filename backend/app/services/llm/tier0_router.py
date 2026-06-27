@@ -499,6 +499,9 @@ async def try_tier0(
     max_score_gap: float = 0.15,
     tool_context: dict | None = None,
     candidate_ids: "Sequence | None" = None,
+    query_vector: list[float] | None = None,
+    semantic_tools: list | None = None,
+    ontology_examples: list[dict] | None = None,
 ) -> Tier0Result | None:
     """Run the Tier 0 router. Returns None to signal "fall back to LLM".
 
@@ -528,14 +531,19 @@ async def try_tier0(
     # `keyword_extract` tools can fire on any query (no strict-format entity
     # needed). The entity check is deferred to step 5 (per tool config).
     try:
-        top = await search_tools(
-            tenant_id=str(tenant_id),
-            query=user_query,
-            db=db,
-            embedding_model=embedding_model,
-            candidate_ids=candidate_ids,
-            top_k=5,
-        )
+        if semantic_tools is not None:
+            top = semantic_tools[:5]
+        else:
+            top = await search_tools(
+                tenant_id=str(tenant_id),
+                query=user_query,
+                db=db,
+                embedding_model=embedding_model,
+                candidate_ids=candidate_ids,
+                top_k=5,
+                query_vector=query_vector,
+                ontology_examples=ontology_examples,
+            )
     except Exception:
         logger.exception("[tier0] semantic search failed; fallback to LLM")
         return None
